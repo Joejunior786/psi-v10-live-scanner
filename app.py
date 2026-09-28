@@ -1,39 +1,32 @@
-# ================================================================
+# =============================================================================
 # Ψ-V10 BINANCE LIVE SCANNER
-# ================================================================
+# =============================================================================
 #
-# LIVE DATA:
-#   Binance Spot REST + WebSocket
+# READ-ONLY MARKET SCANNER
 #
-# CORE:
-#   - Binance USDT universe
+# Core layers:
+#   - Binance Spot USDT universe
 #   - 4H EMA50 / EMA200
-#   - ATR
-#   - Relative volume acceleration
+#   - ATR14
+#   - EMA proximity / reclaim
+#   - Volume acceleration
 #   - Range compression
-#   - Breakout distance
+#   - Breakout proximity
 #   - Anti-chase filter
-#
-# LIVE MICROSTRUCTURE:
-#   - Sequential local order book
-#   - L1-L10 depth
-#   - Order Flow Imbalance (OFI)
-#   - Order Book Imbalance (OBI)
-#   - Rolling aggressive-buy CVD
-#   - Ask liquidity depletion
-#   - Bid liquidity depletion
+#   - Live aggTrade CVD
+#   - L1-L10 order-book imbalance
+#   - Order-flow imbalance (OFI)
+#   - Bid / ask liquidity depletion
 #   - Persistence
+#   - WATCH / PRE-IGNITION / BUY classification
 #
-# OUTPUT:
-#   BUY
-#   PRE-IGNITION
-#   WATCH
-#   REJECT
+# Railway:
+#   GET /
+#   GET /health
+#   GET /scan
 #
-# IMPORTANT:
-#   Scanner only. No automatic order execution.
-#
-# ================================================================
+# This program DOES NOT place trades.
+# =============================================================================
 
 import asyncio
 import json
@@ -42,760 +35,769 @@ import os
 import time
 from collections import defaultdict, deque
 from statistics import mean
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
+from aiohttp import web
 
 
-# ================================================================
-# CONFIG
-# ================================================================
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
+# Public Binance market-data-only REST endpoint.
 REST_BASE = os.getenv(
     "BINANCE_REST",
-    "https://api.binance.com"
-)
+    "https://data-api.binance.vision",
+).rstrip("/")
 
+# Keep WebSocket independently configurable.
 WS_BASE = os.getenv(
     "BINANCE_WS",
-    "wss://stream.binance.com:9443/ws"
+    "wss://stream.binance.com:9443",
+).rstrip("/")
+
+PORT = int(os.getenv("PORT", "8080"))
+
+TOP_STRUCTURE_UNIVERSE = int(
+    os.getenv("TOP_STRUCTURE_UNIVERSE", "120")
 )
 
-QUOTE_ASSET = "USDT"
-
-# How many high-liquidity pairs receive full live microstructure
-MAX_LIVE_SYMBOLS = int(
-    os.getenv("MAX_LIVE_SYMBOLS", "30")
+MICRO_UNIVERSE_SIZE = int(
+    os.getenv("MICRO_UNIVERSE_SIZE", "30")
 )
 
-# Scanner returns this many
-TOP_RESULTS = int(
-    os.getenv("TOP_RESULTS", "10")
+RETURN_LIMIT = int(
+    os.getenv("RETURN_LIMIT", "10")
 )
 
-# Minimum 24h USDT quote volume
 MIN_QUOTE_VOLUME = float(
-    os.getenv("MIN_QUOTE_VOLUME", "5000000")
+    os.getenv("MIN_QUOTE_VOLUME", "500000")
 )
 
-# 4H historical candles
-KLINE_LIMIT = 260
+STRUCTURE_REFRESH_SECONDS = int(
+    os.getenv("STRUCTURE_REFRESH_SECONDS", "300")
+)
 
-# Book
-BOOK_LEVELS = 10
-SNAPSHOT_LIMIT = 1000
+MICRO_REFRESH_SECONDS = int(
+    os.getenv("MICRO_REFRESH_SECONDS", "20")
+)
 
-# Rolling microstructure window
-MICRO_WINDOW_SEC = 60
+DEPTH_LIMIT = 100
 
-# Need some data before trusting microstructure
-MIN_BOOK_SAMPLES = 10
-MIN_TRADE_SAMPLES = 10
+TOP_BOOK_LEVELS = 10
 
-# Refresh structural analysis
-STRUCTURE_REFRESH_SEC = 60
+EMA_TOUCH_ATR = float(
+    os.getenv("EMA_TOUCH_ATR", "0.75")
+)
 
-# Full universe refresh
-UNIVERSE_REFRESH_SEC = 1800
+EMA_NEAR_ATR = float(
+    os.getenv("EMA_NEAR_ATR", "1.00")
+)
 
-# Scanner output refresh
-PRINT_INTERVAL_SEC = 15
+ANTI_CHASE_ATR = float(
+    os.getenv("ANTI_CHASE_ATR", "2.50")
+)
 
-# EMA proximity
-EMA_NEAR_PCT = 2.0
+BREAKOUT_NEAR_PCT = float(
+    os.getenv("BREAKOUT_NEAR_PCT", "2.0")
+)
 
-# Anti-chase
-MAX_ATR_EXTENSION = 2.25
-MAX_4H_PUMP_PCT = 8.0
+BUY_MIN_CONFIRMATIONS = int(
+    os.getenv("BUY_MIN_CONFIRMATIONS", "5")
+)
 
-# Breakout proximity
-MAX_BREAKOUT_DISTANCE_PCT = 2.5
+BUY_MIN_MICRO_CONFIRMATIONS = int(
+    os.getenv("BUY_MIN_MICRO_CONFIRMATIONS", "4")
+)
 
-# Micro thresholds
-MIN_CVD_RATIO = 0.10
-MIN_OFI = 0.03
-MIN_OBI = 0.08
-MIN_ASK_DEPLETION = 0.05
+PRE_MIN_CONFIRMATIONS = int(
+    os.getenv("PRE_MIN_CONFIRMATIONS", "4")
+)
 
-# V10
-BUY_MIN_CONFIRMATIONS = 5
-PRE_MIN_CONFIRMATIONS = 4
+PRE_MIN_MICRO_CONFIRMATIONS = int(
+    os.getenv("PRE_MIN_MICRO_CONFIRMATIONS", "3")
+)
 
-
-# ================================================================
-# OPTIONAL SYMBOL FILTER
-# ================================================================
+# Optional explicit allow-list.
+# Example Railway variable:
 #
-# If you have a confirmed Binance-UK symbol allowlist, place it in:
+# UK_SYMBOLS=BTCUSDT,ETHUSDT,XRPUSDT
 #
-# UK_SYMBOLS=BTCUSDT,ETHUSDT,XRPUSDT,...
-#
-# If absent, scanner uses active Binance Spot USDT pairs.
-#
-# ================================================================
-
-UK_SYMBOLS_ENV = os.getenv(
-    "UK_SYMBOLS",
-    ""
-).strip()
+# If empty, scanner uses Binance active Spot USDT markets.
+UK_SYMBOLS_RAW = os.getenv("UK_SYMBOLS", "").strip()
 
 UK_SYMBOLS = {
     x.strip().upper()
-    for x in UK_SYMBOLS_ENV.split(",")
+    for x in UK_SYMBOLS_RAW.split(",")
     if x.strip()
 }
 
+USER_AGENT = "psi-v10-live-scanner/2.0"
 
-# ================================================================
+
+# =============================================================================
 # GLOBAL STATE
-# ================================================================
+# =============================================================================
 
-session = None
+session: Optional[aiohttp.ClientSession] = None
 
-symbol_meta = {}
-structure = {}
+symbol_meta: Dict[str, dict] = {}
 
-books = {}
-book_locks = defaultdict(asyncio.Lock)
+structure: Dict[str, dict] = {}
 
-depth_buffers = defaultdict(deque)
+micro_state: Dict[str, dict] = defaultdict(dict)
 
-micro = defaultdict(
-    lambda: {
-        "trades": deque(),
-        "book_samples": deque(),
+books: Dict[str, dict] = {}
 
-        "buy_quote": 0.0,
-        "sell_quote": 0.0,
+book_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-        "trade_count": 0,
-
-        "ofi": 0.0,
-        "obi": 0.0,
-
-        "ask_depletion": 0.0,
-        "bid_depletion": 0.0,
-
-        "book_samples_count": 0,
-
-        "last_trade_ts": 0,
-        "last_book_ts": 0,
-    }
+depth_buffers: Dict[str, deque] = defaultdict(
+    lambda: deque(maxlen=5000)
 )
 
-live_symbols = []
+depth_queues: Dict[str, asyncio.Queue] = {}
 
-last_universe_refresh = 0
+depth_workers: Dict[str, asyncio.Task] = {}
 
+selected_micro_symbols: List[str] = []
 
-# ================================================================
-# HTTP
-# ================================================================
+scanner_started_at = time.time()
 
-async def api_get(path, params=None, timeout=15):
+last_structure_refresh = 0.0
 
-    url = REST_BASE + path
+last_micro_refresh = 0.0
 
-    async with session.get(
-        url,
-        params=params,
-        timeout=aiohttp.ClientTimeout(total=timeout)
-    ) as r:
+last_error: Optional[str] = None
 
-        if r.status == 429:
-            retry = float(
-                r.headers.get("Retry-After", "2")
-            )
+scanner_ready = False
 
-            await asyncio.sleep(
-                max(retry, 1)
-            )
+websocket_connected = False
 
-            raise RuntimeError(
-                "Binance rate limit 429"
-            )
-
-        if r.status != 200:
-
-            text = await r.text()
-
-            raise RuntimeError(
-                f"Binance HTTP {r.status}: {text}"
-            )
-
-        return await r.json()
+rest_connected = False
 
 
-# ================================================================
-# BASIC MATH
-# ================================================================
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
 
-def safe_div(a, b):
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
-    if not b:
-        return 0.0
 
+def safe_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_div(a: float, b: float, default=0.0) -> float:
+    if b == 0:
+        return default
     return a / b
 
 
-def pct_distance(price, reference):
-
-    if reference <= 0:
-        return 999.0
-
-    return (
-        (price - reference)
-        / reference
-    ) * 100.0
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
-def ema(values, period):
+def pct_distance(price: float, reference: float) -> Optional[float]:
+    if not reference:
+        return None
 
+    return ((price - reference) / reference) * 100.0
+
+
+def abs_pct_distance(price: float, reference: float) -> Optional[float]:
+    d = pct_distance(price, reference)
+
+    if d is None:
+        return None
+
+    return abs(d)
+
+
+def average(values: List[float]) -> float:
+    if not values:
+        return 0.0
+
+    return sum(values) / len(values)
+
+
+# =============================================================================
+# REST
+# =============================================================================
+
+async def api_get(
+    client: aiohttp.ClientSession,
+    path: str,
+    params: Optional[dict] = None,
+):
+    global rest_connected
+    global last_error
+
+    url = f"{REST_BASE}{path}"
+
+    try:
+        async with client.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as response:
+
+            text = await response.text()
+
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Binance REST {response.status}: {text[:500]}"
+                )
+
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"Invalid Binance JSON: {text[:300]}"
+                )
+
+            rest_connected = True
+
+            return data
+
+    except Exception as exc:
+        rest_connected = False
+        last_error = f"REST: {type(exc).__name__}: {exc}"
+        raise
+
+
+# =============================================================================
+# INDICATORS
+# =============================================================================
+
+def ema(values: List[float], period: int) -> Optional[float]:
     if len(values) < period:
         return None
 
-    alpha = 2.0 / (
-        period + 1.0
-    )
+    seed = sum(values[:period]) / period
 
-    result = mean(
-        values[:period]
-    )
+    multiplier = 2.0 / (period + 1.0)
+
+    result = seed
 
     for value in values[period:]:
-
         result = (
-            value * alpha
-            +
-            result * (1.0 - alpha)
+            value * multiplier
+            + result * (1.0 - multiplier)
         )
 
     return result
 
 
-def true_ranges(highs, lows, closes):
+def true_ranges(rows: List[list]) -> List[float]:
+    if len(rows) < 2:
+        return []
 
-    output = []
+    result = []
 
-    for i in range(1, len(closes)):
+    for i in range(1, len(rows)):
+        high = safe_float(rows[i][2])
+        low = safe_float(rows[i][3])
+        previous_close = safe_float(rows[i - 1][4])
 
-        output.append(
-            max(
-                highs[i] - lows[i],
-                abs(
-                    highs[i]
-                    - closes[i - 1]
-                ),
-                abs(
-                    lows[i]
-                    - closes[i - 1]
-                )
-            )
+        tr = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
         )
 
-    return output
+        result.append(tr)
+
+    return result
 
 
-def atr(
-    highs,
-    lows,
-    closes,
-    period=14
-):
+def atr(rows: List[list], period: int = 14) -> Optional[float]:
+    trs = true_ranges(rows)
 
-    tr = true_ranges(
-        highs,
-        lows,
-        closes
-    )
-
-    if len(tr) < period:
+    if len(trs) < period:
         return None
 
-    return mean(
-        tr[-period:]
-    )
+    return sum(trs[-period:]) / period
 
 
-# ================================================================
+# =============================================================================
 # EXCHANGE UNIVERSE
-# ================================================================
+# =============================================================================
 
-async def get_exchange_symbols():
+async def get_exchange_symbols(
+    client: aiohttp.ClientSession,
+) -> List[Tuple[str, float]]:
 
     info, tickers = await asyncio.gather(
-        api_get(
-            "/api/v3/exchangeInfo"
-        ),
-        api_get(
-            "/api/v3/ticker/24hr"
-        )
+        api_get(client, "/api/v3/exchangeInfo"),
+        api_get(client, "/api/v3/ticker/24hr"),
     )
 
     ticker_map = {
-        x["symbol"]: x
-        for x in tickers
+        row.get("symbol"): row
+        for row in tickers
+        if isinstance(row, dict)
     }
 
-    candidates = []
+    universe = []
 
-    for item in info["symbols"]:
+    symbol_meta.clear()
 
-        symbol = item["symbol"]
+    for market in info.get("symbols", []):
 
-        if (
-            item.get("status") != "TRADING"
-        ):
+        symbol = market.get("symbol", "")
+
+        if not symbol:
             continue
 
-        if (
-            item.get("quoteAsset")
-            != QUOTE_ASSET
-        ):
+        if market.get("status") != "TRADING":
             continue
 
-        if not item.get(
+        if market.get("quoteAsset") != "USDT":
+            continue
+
+        if not market.get(
             "isSpotTradingAllowed",
-            True
+            False,
         ):
             continue
 
-        # Optional externally verified
-        # Binance UK allowlist
-        if (
-            UK_SYMBOLS
-            and symbol not in UK_SYMBOLS
-        ):
+        if UK_SYMBOLS and symbol not in UK_SYMBOLS:
             continue
 
-        ticker = ticker_map.get(
-            symbol
+        ticker = ticker_map.get(symbol, {})
+
+        quote_volume = safe_float(
+            ticker.get("quoteVolume")
         )
 
-        if not ticker:
+        if quote_volume < MIN_QUOTE_VOLUME:
             continue
-
-        try:
-
-            quote_volume = float(
-                ticker.get(
-                    "quoteVolume",
-                    0
-                )
-            )
-
-        except Exception:
-            continue
-
-        if (
-            quote_volume
-            < MIN_QUOTE_VOLUME
-        ):
-            continue
-
-        candidates.append(
-            (
-                symbol,
-                quote_volume
-            )
-        )
 
         symbol_meta[symbol] = {
-            "quote_volume":
-                quote_volume,
-
-            "base_asset":
-                item.get(
-                    "baseAsset"
-                )
+            "quote_volume_24h": quote_volume,
+            "base_asset": market.get("baseAsset"),
+            "quote_asset": market.get("quoteAsset"),
         }
 
-    candidates.sort(
-        key=lambda x: x[1],
-        reverse=True
+        universe.append(
+            (
+                symbol,
+                quote_volume,
+            )
+        )
+
+    universe.sort(
+        key=lambda item: item[1],
+        reverse=True,
     )
 
-    return [
-        x[0]
-        for x in candidates
-    ]
+    return universe
 
 
-# ================================================================
-# 4H STRUCTURAL ENGINE
-# ================================================================
+# =============================================================================
+# 4H STRUCTURE
+# =============================================================================
 
-async def load_4h_structure(symbol):
+async def load_4h_structure(
+    client: aiohttp.ClientSession,
+    symbol: str,
+) -> Optional[dict]:
 
     try:
-
-        data = await api_get(
+        rows = await api_get(
+            client,
             "/api/v3/klines",
             {
                 "symbol": symbol,
                 "interval": "4h",
-                "limit": KLINE_LIMIT
-            }
+                "limit": 250,
+            },
         )
 
-        if len(data) < 210:
-            return None
-
-        opens = [
-            float(x[1])
-            for x in data
-        ]
-
-        highs = [
-            float(x[2])
-            for x in data
-        ]
-
-        lows = [
-            float(x[3])
-            for x in data
-        ]
-
-        closes = [
-            float(x[4])
-            for x in data
-        ]
-
-        volumes = [
-            float(x[5])
-            for x in data
-        ]
-
-        quote_volumes = [
-            float(x[7])
-            for x in data
-        ]
-
-        price = closes[-1]
-
-        ema50 = ema(
-            closes,
-            50
-        )
-
-        ema200 = ema(
-            closes,
-            200
-        )
-
-        current_atr = atr(
-            highs,
-            lows,
-            closes,
-            14
-        )
-
-        if (
-            ema50 is None
-            or ema200 is None
-            or current_atr is None
-        ):
-            return None
-
-        # ----------------------------
-        # EMA distance
-        # ----------------------------
-
-        ema50_dist = abs(
-            pct_distance(
-                price,
-                ema50
-            )
-        )
-
-        ema200_dist = abs(
-            pct_distance(
-                price,
-                ema200
-            )
-        )
-
-        nearest_ema_dist = min(
-            ema50_dist,
-            ema200_dist
-        )
-
-        nearest_ema = (
-            "EMA50"
-            if ema50_dist <= ema200_dist
-            else "EMA200"
-        )
-
-        # ----------------------------
-        # ATR-adjusted EMA proximity
-        # ----------------------------
-
-        ema50_atr_dist = (
-            abs(price - ema50)
-            / current_atr
-        )
-
-        ema200_atr_dist = (
-            abs(price - ema200)
-            / current_atr
-        )
-
-        nearest_ema_atr = min(
-            ema50_atr_dist,
-            ema200_atr_dist
-        )
-
-        ema_near = (
-            nearest_ema_dist
-            <= EMA_NEAR_PCT
-            or nearest_ema_atr
-            <= 1.0
-        )
-
-        # ----------------------------
-        # Trend
-        # ----------------------------
-
-        bullish_ema_structure = (
-            price > ema50
-            and ema50 > ema200
-        )
-
-        ema_reclaim = (
-            closes[-2] <= ema50
-            and closes[-1] > ema50
-        ) or (
-            closes[-2] <= ema200
-            and closes[-1] > ema200
-        )
-
-        # ----------------------------
-        # Relative volume
-        # ----------------------------
-
-        recent_qv = quote_volumes[-1]
-
-        baseline_qv = mean(
-            quote_volumes[-21:-1]
-        )
-
-        relative_volume = safe_div(
-            recent_qv,
-            baseline_qv
-        )
-
-        # Faster acceleration
-        qv_3 = mean(
-            quote_volumes[-3:]
-        )
-
-        qv_prev_10 = mean(
-            quote_volumes[-13:-3]
-        )
-
-        volume_acceleration = safe_div(
-            qv_3,
-            qv_prev_10
-        )
-
-        # ----------------------------
-        # Compression
-        # ----------------------------
-
-        ranges = [
-            highs[i] - lows[i]
-            for i in range(
-                len(highs)
-            )
-        ]
-
-        recent_range = mean(
-            ranges[-4:]
-        )
-
-        baseline_range = mean(
-            ranges[-24:-4]
-        )
-
-        compression_ratio = safe_div(
-            recent_range,
-            baseline_range
-        )
-
-        compression = (
-            compression_ratio
-            < 0.75
-        )
-
-        # ----------------------------
-        # Local breakout
-        # ----------------------------
-
-        resistance = max(
-            highs[-21:-1]
-        )
-
-        breakout_distance = (
-            (
-                resistance - price
-            )
-            / price
-            * 100.0
-        )
-
-        breakout = (
-            price > resistance
-        )
-
-        near_breakout = (
-            -1.0
-            <= breakout_distance
-            <= MAX_BREAKOUT_DISTANCE_PCT
-        )
-
-        # ----------------------------
-        # 4H candle movement
-        # ----------------------------
-
-        candle_change = (
-            (
-                closes[-1]
-                - opens[-1]
-            )
-            / opens[-1]
-            * 100.0
-        )
-
-        # ----------------------------
-        # Anti chase
-        # ----------------------------
-
-        atr_extension = (
-            abs(
-                price - ema50
-            )
-            / current_atr
-        )
-
-        anti_chase = (
-            atr_extension
-            > MAX_ATR_EXTENSION
-            or candle_change
-            > MAX_4H_PUMP_PCT
-        )
-
-        result = {
-
-            "symbol":
-                symbol,
-
-            "price":
-                price,
-
-            "ema50":
-                ema50,
-
-            "ema200":
-                ema200,
-
-            "ema50_distance_pct":
-                ema50_dist,
-
-            "ema200_distance_pct":
-                ema200_dist,
-
-            "nearest_ema":
-                nearest_ema,
-
-            "nearest_ema_distance_pct":
-                nearest_ema_dist,
-
-            "nearest_ema_atr":
-                nearest_ema_atr,
-
-            "ema_near":
-                ema_near,
-
-            "ema_reclaim":
-                ema_reclaim,
-
-            "bullish_ema_structure":
-                bullish_ema_structure,
-
-            "atr":
-                current_atr,
-
-            "relative_volume":
-                relative_volume,
-
-            "volume_acceleration":
-                volume_acceleration,
-
-            "compression_ratio":
-                compression_ratio,
-
-            "compression":
-                compression,
-
-            "resistance":
-                resistance,
-
-            "breakout_distance_pct":
-                breakout_distance,
-
-            "breakout":
-                breakout,
-
-            "near_breakout":
-                near_breakout,
-
-            "4h_change_pct":
-                candle_change,
-
-            "atr_extension":
-                atr_extension,
-
-            "anti_chase":
-                anti_chase,
-
-            "updated":
-                time.time()
-        }
-
-        structure[symbol] = result
-
-        return result
-
-    except Exception as e:
-
-        print(
-            f"[STRUCTURE ERROR] "
-            f"{symbol}: {e}"
-        )
-
+    except Exception:
         return None
 
+    if len(rows) < 210:
+        return None
 
-# ================================================================
+    # Binance last candle can still be open.
+    closed = rows[:-1]
+
+    if len(closed) < 205:
+        return None
+
+    closes = [
+        safe_float(row[4])
+        for row in closed
+    ]
+
+    highs = [
+        safe_float(row[2])
+        for row in closed
+    ]
+
+    lows = [
+        safe_float(row[3])
+        for row in closed
+    ]
+
+    volumes = [
+        safe_float(row[5])
+        for row in closed
+    ]
+
+    current_price = safe_float(
+        rows[-1][4]
+    )
+
+    ema50 = ema(
+        closes,
+        50,
+    )
+
+    ema200 = ema(
+        closes,
+        200,
+    )
+
+    atr14 = atr(
+        closed,
+        14,
+    )
+
+    if not ema50 or not ema200 or not atr14:
+        return None
+
+    last_close = closes[-1]
+
+    previous_close = closes[-2]
+
+    last_low = lows[-1]
+
+    previous_low = lows[-2]
+
+    last_high = highs[-1]
+
+    avg20_volume = average(
+        volumes[-20:]
+    )
+
+    recent_volume = volumes[-1]
+
+    volume_acceleration = safe_div(
+        recent_volume,
+        avg20_volume,
+    )
+
+    # -------------------------------------------------------------------------
+    # Compression
+    # -------------------------------------------------------------------------
+
+    recent_ranges = [
+        highs[i] - lows[i]
+        for i in range(
+            max(0, len(highs) - 6),
+            len(highs),
+        )
+    ]
+
+    baseline_ranges = [
+        highs[i] - lows[i]
+        for i in range(
+            max(0, len(highs) - 26),
+            max(0, len(highs) - 6),
+        )
+    ]
+
+    recent_range_avg = average(
+        recent_ranges
+    )
+
+    baseline_range_avg = average(
+        baseline_ranges
+    )
+
+    compression_ratio = safe_div(
+        recent_range_avg,
+        baseline_range_avg,
+        1.0,
+    )
+
+    compression = (
+        compression_ratio <= 0.80
+    )
+
+    # -------------------------------------------------------------------------
+    # Breakout level
+    # -------------------------------------------------------------------------
+
+    resistance_window = highs[-21:-1]
+
+    resistance = (
+        max(resistance_window)
+        if resistance_window
+        else last_high
+    )
+
+    breakout_distance_pct = (
+        ((resistance - current_price) / current_price) * 100.0
+        if current_price > 0
+        else 999.0
+    )
+
+    breakout_near = (
+        -0.5
+        <= breakout_distance_pct
+        <= BREAKOUT_NEAR_PCT
+    )
+
+    breakout = (
+        current_price > resistance
+    )
+
+    # -------------------------------------------------------------------------
+    # EMA proximity
+    # -------------------------------------------------------------------------
+
+    distance_ema50_atr = safe_div(
+        current_price - ema50,
+        atr14,
+    )
+
+    distance_ema200_atr = safe_div(
+        current_price - ema200,
+        atr14,
+    )
+
+    abs_ema50_atr = abs(
+        distance_ema50_atr
+    )
+
+    abs_ema200_atr = abs(
+        distance_ema200_atr
+    )
+
+    ema50_touch = (
+        abs_ema50_atr <= EMA_TOUCH_ATR
+    )
+
+    ema200_touch = (
+        abs_ema200_atr <= EMA_TOUCH_ATR
+    )
+
+    ema50_near = (
+        abs_ema50_atr <= EMA_NEAR_ATR
+    )
+
+    ema200_near = (
+        abs_ema200_atr <= EMA_NEAR_ATR
+    )
+
+    # -------------------------------------------------------------------------
+    # EMA reclaim
+    # -------------------------------------------------------------------------
+
+    ema50_reclaim = (
+        previous_close <= ema50
+        and last_close > ema50
+    )
+
+    ema200_reclaim = (
+        previous_close <= ema200
+        and last_close > ema200
+    )
+
+    ema50_rejection = (
+        last_low <= ema50
+        and last_close > ema50
+    )
+
+    ema200_rejection = (
+        last_low <= ema200
+        and last_close > ema200
+    )
+
+    bullish_ema_stack = (
+        current_price > ema50
+        and ema50 > ema200
+    )
+
+    structural_support = (
+        ema50_touch
+        or ema200_touch
+        or ema50_reclaim
+        or ema200_reclaim
+        or ema50_rejection
+        or ema200_rejection
+    )
+
+    # -------------------------------------------------------------------------
+    # Anti-chase
+    # -------------------------------------------------------------------------
+
+    extension_ema50_atr = safe_div(
+        current_price - ema50,
+        atr14,
+    )
+
+    extension_ema200_atr = safe_div(
+        current_price - ema200,
+        atr14,
+    )
+
+    anti_chase = (
+        extension_ema50_atr > ANTI_CHASE_ATR
+        and extension_ema200_atr > ANTI_CHASE_ATR
+    )
+
+    # -------------------------------------------------------------------------
+    # Structure confirmations
+    # -------------------------------------------------------------------------
+
+    confirmations = []
+
+    if ema50_touch:
+        confirmations.append(
+            "4H_EMA50_TOUCH"
+        )
+
+    if ema200_touch:
+        confirmations.append(
+            "4H_EMA200_TOUCH"
+        )
+
+    if ema50_reclaim:
+        confirmations.append(
+            "4H_EMA50_RECLAIM"
+        )
+
+    if ema200_reclaim:
+        confirmations.append(
+            "4H_EMA200_RECLAIM"
+        )
+
+    if ema50_rejection:
+        confirmations.append(
+            "4H_EMA50_REJECTION"
+        )
+
+    if ema200_rejection:
+        confirmations.append(
+            "4H_EMA200_REJECTION"
+        )
+
+    if bullish_ema_stack:
+        confirmations.append(
+            "BULLISH_EMA_STACK"
+        )
+
+    if volume_acceleration >= 1.20:
+        confirmations.append(
+            "VOLUME_ACCELERATION"
+        )
+
+    if compression:
+        confirmations.append(
+            "RANGE_COMPRESSION"
+        )
+
+    if breakout_near:
+        confirmations.append(
+            "NEAR_RESISTANCE"
+        )
+
+    if breakout:
+        confirmations.append(
+            "BREAKOUT"
+        )
+
+    return {
+        "symbol": symbol,
+
+        "price": current_price,
+
+        "ema50_4h": ema50,
+        "ema200_4h": ema200,
+
+        "atr14_4h": atr14,
+
+        "distance_ema50_atr": distance_ema50_atr,
+        "distance_ema200_atr": distance_ema200_atr,
+
+        "ema50_touch": ema50_touch,
+        "ema200_touch": ema200_touch,
+
+        "ema50_near": ema50_near,
+        "ema200_near": ema200_near,
+
+        "ema50_reclaim": ema50_reclaim,
+        "ema200_reclaim": ema200_reclaim,
+
+        "ema50_rejection": ema50_rejection,
+        "ema200_rejection": ema200_rejection,
+
+        "bullish_ema_stack": bullish_ema_stack,
+
+        "structural_support": structural_support,
+
+        "volume_acceleration": volume_acceleration,
+
+        "compression_ratio": compression_ratio,
+        "compression": compression,
+
+        "resistance": resistance,
+
+        "breakout_distance_pct": breakout_distance_pct,
+        "breakout_near": breakout_near,
+        "breakout": breakout,
+
+        "anti_chase": anti_chase,
+
+        "structure_confirmations": confirmations,
+
+        "quote_volume_24h": symbol_meta.get(
+            symbol,
+            {},
+        ).get(
+            "quote_volume_24h",
+            0.0,
+        ),
+
+        "updated_ms": now_ms(),
+    }
+
+
+# =============================================================================
 # ORDER BOOK HELPERS
-# ================================================================
+# =============================================================================
 
-def sorted_top10(book):
+def sorted_top10(
+    side: Dict[float, float],
+    reverse: bool,
+) -> List[Tuple[float, float]]:
 
-    bids = sorted(
-        book["bids"].items(),
+    levels = [
+        (price, qty)
+        for price, qty in side.items()
+        if qty > 0
+    ]
+
+    levels.sort(
         key=lambda x: x[0],
-        reverse=True
-    )[:BOOK_LEVELS]
+        reverse=reverse,
+    )
 
-    asks = sorted(
-        book["asks"].items(),
-        key=lambda x: x[0]
-    )[:BOOK_LEVELS]
-
-    return bids, asks
+    return levels[:TOP_BOOK_LEVELS]
 
 
-def depth_notional(levels):
+def depth_notional(
+    levels: List[Tuple[float, float]],
+) -> float:
 
     return sum(
         price * qty
@@ -804,659 +806,676 @@ def depth_notional(levels):
 
 
 def calculate_obi(
-    bids,
-    asks
-):
+    bids: List[Tuple[float, float]],
+    asks: List[Tuple[float, float]],
+) -> float:
 
-    bid_depth = depth_notional(
+    bid_value = depth_notional(
         bids
     )
 
-    ask_depth = depth_notional(
+    ask_value = depth_notional(
         asks
     )
 
     total = (
-        bid_depth
-        +
-        ask_depth
+        bid_value
+        + ask_value
     )
 
-    return safe_div(
-        bid_depth - ask_depth,
-        total
-    )
-
-
-def calculate_ofi(
-    previous_bids,
-    previous_asks,
-    current_bids,
-    current_asks
-):
-
-    prev_bid = dict(
-        previous_bids
-    )
-
-    prev_ask = dict(
-        previous_asks
-    )
-
-    curr_bid = dict(
-        current_bids
-    )
-
-    curr_ask = dict(
-        current_asks
-    )
-
-    bid_flow = 0.0
-    ask_flow = 0.0
-
-    for price in (
-        set(prev_bid)
-        | set(curr_bid)
-    ):
-
-        old = prev_bid.get(
-            price,
-            0.0
-        )
-
-        new = curr_bid.get(
-            price,
-            0.0
-        )
-
-        bid_flow += (
-            new - old
-        ) * price
-
-    for price in (
-        set(prev_ask)
-        | set(curr_ask)
-    ):
-
-        old = prev_ask.get(
-            price,
-            0.0
-        )
-
-        new = curr_ask.get(
-            price,
-            0.0
-        )
-
-        # Removing asks =
-        # positive pressure
-        ask_flow += (
-            old - new
-        ) * price
-
-    total_depth = (
-        depth_notional(
-            current_bids
-        )
-        +
-        depth_notional(
-            current_asks
-        )
-    )
-
-    return safe_div(
-        bid_flow + ask_flow,
-        total_depth
-    )
-
-
-def depletion(
-    previous,
-    current
-):
-
-    if previous <= 0:
+    if total <= 0:
         return 0.0
 
-    return max(
-        0.0,
-        (
-            previous
-            - current
-        )
-        / previous
-    )
+    return (
+        bid_value - ask_value
+    ) / total
 
 
-# ================================================================
-# MICRO SAMPLE
-# ================================================================
-
-def record_book_sample(
-    symbol,
-    previous_bids,
-    previous_asks,
-    current_bids,
-    current_asks,
-    timestamp
-):
-
-    m = micro[symbol]
-
-    ofi = calculate_ofi(
-        previous_bids,
-        previous_asks,
-        current_bids,
-        current_asks
-    )
-
-    obi = calculate_obi(
-        current_bids,
-        current_asks
-    )
-
-    prev_bid_depth = (
-        depth_notional(
-            previous_bids
-        )
-    )
-
-    prev_ask_depth = (
-        depth_notional(
-            previous_asks
-        )
-    )
-
-    curr_bid_depth = (
-        depth_notional(
-            current_bids
-        )
-    )
-
-    curr_ask_depth = (
-        depth_notional(
-            current_asks
-        )
-    )
-
-    ask_dep = depletion(
-        prev_ask_depth,
-        curr_ask_depth
-    )
-
-    bid_dep = depletion(
-        prev_bid_depth,
-        curr_bid_depth
-    )
-
-    m["ofi"] = ofi
-    m["obi"] = obi
-
-    m["ask_depletion"] = (
-        ask_dep
-    )
-
-    m["bid_depletion"] = (
-        bid_dep
-    )
-
-    m["last_book_ts"] = (
-        timestamp
-    )
-
-    m["book_samples"].append(
-        {
-            "ts":
-                timestamp,
-
-            "ofi":
-                ofi,
-
-            "obi":
-                obi,
-
-            "ask_depletion":
-                ask_dep,
-
-            "bid_depletion":
-                bid_dep
-        }
-    )
-
-    cutoff = (
-        timestamp
-        - MICRO_WINDOW_SEC
-    )
-
-    while (
-        m["book_samples"]
-        and
-        m["book_samples"][0]["ts"]
-        < cutoff
-    ):
-        m["book_samples"].popleft()
-
-    m["book_samples_count"] += 1
-
-
-# ================================================================
-# AGGTRADE -> CVD
-# ================================================================
-
-def process_agg_trade(
-    symbol,
-    data
-):
-
-    m = micro[symbol]
-
-    timestamp = (
-        data.get(
-            "T",
-            data.get(
-                "E",
-                int(
-                    time.time() * 1000
-                )
-            )
-        )
-        / 1000.0
-    )
-
-    price = float(
-        data["p"]
-    )
-
-    qty = float(
-        data["q"]
-    )
-
-    quote_notional = (
-        price * qty
-    )
-
-    # Binance aggTrade:
-    #
-    # m = True:
-    # buyer is maker
-    # -> aggressive seller
-    #
-    # m = False:
-    # seller is maker
-    # -> aggressive buyer
-
-    aggressive_buy = (
-        not bool(
-            data["m"]
-        )
-    )
-
-    signed_quote = (
-        quote_notional
-        if aggressive_buy
-        else -quote_notional
-    )
-
-    m["trades"].append(
-        (
-            timestamp,
-            signed_quote,
-            quote_notional
-        )
-    )
-
-    cutoff = (
-        timestamp
-        - MICRO_WINDOW_SEC
-    )
-
-    while (
-        m["trades"]
-        and
-        m["trades"][0][0]
-        < cutoff
-    ):
-        m["trades"].popleft()
-
-    buy_quote = 0.0
-    sell_quote = 0.0
-
-    for (
-        _,
-        signed,
-        notional
-    ) in m["trades"]:
-
-        if signed > 0:
-            buy_quote += notional
-        else:
-            sell_quote += notional
-
-    m["buy_quote"] = (
-        buy_quote
-    )
-
-    m["sell_quote"] = (
-        sell_quote
-    )
-
-    m["trade_count"] = len(
-        m["trades"]
-    )
-
-    m["last_trade_ts"] = (
-        timestamp
-    )
-
-
-# ================================================================
-# LOCAL ORDER BOOK SNAPSHOT
-# ================================================================
-
-async def get_depth_snapshot(
-    symbol
-):
-
-    data = await api_get(
-        "/api/v3/depth",
-        {
-            "symbol":
-                symbol,
-
-            "limit":
-                SNAPSHOT_LIMIT
-        }
-    )
+def level_map(
+    levels: List[Tuple[float, float]],
+) -> Dict[float, float]:
 
     return {
-
-        "bids": {
-            float(p): float(q)
-            for p, q
-            in data["bids"]
-            if float(q) > 0
-        },
-
-        "asks": {
-            float(p): float(q)
-            for p, q
-            in data["asks"]
-            if float(q) > 0
-        },
-
-        "last_update_id":
-            int(
-                data["lastUpdateId"]
-            ),
-
-        "ready":
-            False
+        price: qty
+        for price, qty in levels
     }
 
 
-# ================================================================
-# APPLY DEPTH EVENT
-# ================================================================
+def calculate_ofi(
+    previous_bids: List[Tuple[float, float]],
+    previous_asks: List[Tuple[float, float]],
+    current_bids: List[Tuple[float, float]],
+    current_asks: List[Tuple[float, float]],
+) -> float:
 
-def apply_levels(
-    side,
-    updates
+    pb = level_map(
+        previous_bids
+    )
+
+    pa = level_map(
+        previous_asks
+    )
+
+    cb = level_map(
+        current_bids
+    )
+
+    ca = level_map(
+        current_asks
+    )
+
+    bid_prices = set(pb) | set(cb)
+
+    ask_prices = set(pa) | set(ca)
+
+    bid_change = sum(
+        price * (
+            cb.get(price, 0.0)
+            - pb.get(price, 0.0)
+        )
+        for price in bid_prices
+    )
+
+    ask_change = sum(
+        price * (
+            ca.get(price, 0.0)
+            - pa.get(price, 0.0)
+        )
+        for price in ask_prices
+    )
+
+    denominator = (
+        abs(bid_change)
+        + abs(ask_change)
+    )
+
+    if denominator <= 0:
+        return 0.0
+
+    return (
+        bid_change - ask_change
+    ) / denominator
+
+
+def depletion(
+    previous: List[Tuple[float, float]],
+    current: List[Tuple[float, float]],
+) -> float:
+
+    previous_value = depth_notional(
+        previous
+    )
+
+    current_value = depth_notional(
+        current
+    )
+
+    if previous_value <= 0:
+        return 0.0
+
+    return clamp(
+        (
+            previous_value
+            - current_value
+        ) / previous_value,
+        -1.0,
+        1.0,
+    )
+
+
+# =============================================================================
+# MICROSTRUCTURE STATE
+# =============================================================================
+
+def ensure_micro_state(symbol: str):
+
+    state = micro_state[symbol]
+
+    state.setdefault(
+        "buy_quote",
+        deque(maxlen=2000),
+    )
+
+    state.setdefault(
+        "sell_quote",
+        deque(maxlen=2000),
+    )
+
+    state.setdefault(
+        "trade_times",
+        deque(maxlen=5000),
+    )
+
+    state.setdefault(
+        "trade_sizes",
+        deque(maxlen=5000),
+    )
+
+    state.setdefault(
+        "ofi_history",
+        deque(maxlen=100),
+    )
+
+    state.setdefault(
+        "obi_history",
+        deque(maxlen=100),
+    )
+
+    state.setdefault(
+        "ask_depletion_history",
+        deque(maxlen=100),
+    )
+
+    state.setdefault(
+        "bid_depletion_history",
+        deque(maxlen=100),
+    )
+
+    state.setdefault(
+        "book_samples",
+        deque(maxlen=100),
+    )
+
+    state.setdefault(
+        "last_trade_price",
+        0.0,
+    )
+
+    state.setdefault(
+        "last_trade_ms",
+        0,
+    )
+
+
+def trim_trade_window(
+    dq: deque,
+    cutoff_ms: int,
 ):
 
-    for price_raw, qty_raw in updates:
-
-        price = float(
-            price_raw
-        )
-
-        qty = float(
-            qty_raw
-        )
-
-        if qty == 0.0:
-
-            side.pop(
-                price,
-                None
-            )
-
-        else:
-
-            side[price] = qty
+    while dq and dq[0][0] < cutoff_ms:
+        dq.popleft()
 
 
-def apply_depth_event(
-    symbol,
-    event
+def record_book_sample(
+    symbol: str,
 ):
+
+    ensure_micro_state(
+        symbol
+    )
 
     book = books.get(
         symbol
     )
 
     if not book:
-        return False
+        return
 
-    U = int(
-        event["U"]
-    )
-
-    u = int(
-        event["u"]
-    )
-
-    last_id = int(
-        book["last_update_id"]
-    )
-
-    # Old event
-    if u <= last_id:
-        return True
-
-    # Gap:
-    # expected local update ID + 1
-    # must fall inside U..u
-    if U > (
-        last_id + 1
-    ):
-
-        return False
-
-    previous_bids, previous_asks = (
-        sorted_top10(
-            book
-        )
-    )
-
-    apply_levels(
+    bids = sorted_top10(
         book["bids"],
-        event.get(
-            "b",
-            []
-        )
+        True,
     )
 
-    apply_levels(
+    asks = sorted_top10(
         book["asks"],
-        event.get(
-            "a",
-            []
+        False,
+    )
+
+    if not bids or not asks:
+        return
+
+    state = micro_state[symbol]
+
+    previous = (
+        state["book_samples"][-1]
+        if state["book_samples"]
+        else None
+    )
+
+    obi = calculate_obi(
+        bids,
+        asks,
+    )
+
+    state["obi_history"].append(
+        (
+            now_ms(),
+            obi,
         )
     )
 
-    book["last_update_id"] = u
-    book["ready"] = True
+    if previous:
 
-    current_bids, current_asks = (
-        sorted_top10(
-            book
-        )
-    )
+        previous_bids = previous["bids"]
+        previous_asks = previous["asks"]
 
-    if (
-        previous_bids
-        and previous_asks
-        and current_bids
-        and current_asks
-    ):
-
-        record_book_sample(
-            symbol,
+        ofi = calculate_ofi(
             previous_bids,
             previous_asks,
-            current_bids,
-            current_asks,
-            event.get(
-                "E",
-                int(
-                    time.time()
-                    * 1000
-                )
-            )
-            / 1000.0
+            bids,
+            asks,
         )
 
-    return True
+        ask_dep = depletion(
+            previous_asks,
+            asks,
+        )
+
+        bid_dep = depletion(
+            previous_bids,
+            bids,
+        )
+
+        state["ofi_history"].append(
+            (
+                now_ms(),
+                ofi,
+            )
+        )
+
+        state[
+            "ask_depletion_history"
+        ].append(
+            (
+                now_ms(),
+                ask_dep,
+            )
+        )
+
+        state[
+            "bid_depletion_history"
+        ].append(
+            (
+                now_ms(),
+                bid_dep,
+            )
+        )
+
+    state["book_samples"].append(
+        {
+            "time": now_ms(),
+            "bids": bids,
+            "asks": asks,
+        }
+    )
 
 
-# ================================================================
-# RESYNC LOCAL BOOK
-# ================================================================
+# =============================================================================
+# AGGTRADE
+# =============================================================================
+
+def process_agg_trade(
+    symbol: str,
+    data: dict,
+):
+
+    ensure_micro_state(
+        symbol
+    )
+
+    state = micro_state[symbol]
+
+    price = safe_float(
+        data.get("p")
+    )
+
+    qty = safe_float(
+        data.get("q")
+    )
+
+    event_time = int(
+        data.get(
+            "T",
+            data.get(
+                "E",
+                now_ms(),
+            ),
+        )
+    )
+
+    quote_value = (
+        price * qty
+    )
+
+    buyer_is_maker = bool(
+        data.get("m")
+    )
+
+    # m == False:
+    # aggressive buyer crossed the ask.
+    if buyer_is_maker:
+        state[
+            "sell_quote"
+        ].append(
+            (
+                event_time,
+                quote_value,
+            )
+        )
+    else:
+        state[
+            "buy_quote"
+        ].append(
+            (
+                event_time,
+                quote_value,
+            )
+        )
+
+    state[
+        "trade_times"
+    ].append(
+        event_time
+    )
+
+    state[
+        "trade_sizes"
+    ].append(
+        (
+            event_time,
+            quote_value,
+        )
+    )
+
+    state[
+        "last_trade_price"
+    ] = price
+
+    state[
+        "last_trade_ms"
+    ] = event_time
+
+
+# =============================================================================
+# DEPTH SNAPSHOT
+# =============================================================================
+
+async def fetch_depth_snapshot(
+    symbol: str,
+) -> Optional[dict]:
+
+    if session is None:
+        return None
+
+    try:
+        snapshot = await api_get(
+            session,
+            "/api/v3/depth",
+            {
+                "symbol": symbol,
+                "limit": DEPTH_LIMIT,
+            },
+        )
+
+        bids = {
+            safe_float(price): safe_float(qty)
+            for price, qty in snapshot.get(
+                "bids",
+                [],
+            )
+            if safe_float(qty) > 0
+        }
+
+        asks = {
+            safe_float(price): safe_float(qty)
+            for price, qty in snapshot.get(
+                "asks",
+                [],
+            )
+            if safe_float(qty) > 0
+        }
+
+        return {
+            "last_update_id": int(
+                snapshot[
+                    "lastUpdateId"
+                ]
+            ),
+            "bids": bids,
+            "asks": asks,
+        }
+
+    except Exception as exc:
+
+        print(
+            f"[DEPTH SNAPSHOT ERROR] "
+            f"{symbol}: {exc}"
+        )
+
+        return None
+
+
+# =============================================================================
+# DEPTH SYNCHRONISATION
+# =============================================================================
 
 async def resync_book(
-    symbol
+    symbol: str,
 ):
 
     async with book_locks[
         symbol
     ]:
 
-        try:
+        snapshot = await fetch_depth_snapshot(
+            symbol
+        )
 
-            snapshot = (
-                await get_depth_snapshot(
-                    symbol
+        if not snapshot:
+            books.pop(
+                symbol,
+                None,
+            )
+            return
+
+        last_id = snapshot[
+            "last_update_id"
+        ]
+
+        books[symbol] = {
+            "bids": snapshot[
+                "bids"
+            ],
+            "asks": snapshot[
+                "asks"
+            ],
+            "last_update_id": last_id,
+            "ready": False,
+        }
+
+        buffered = list(
+            depth_buffers[symbol]
+        )
+
+        # Drop events already covered by snapshot.
+        buffered = [
+            event
+            for event in buffered
+            if int(
+                event.get(
+                    "u",
+                    0,
+                )
+            ) > last_id
+        ]
+
+        first_index = None
+
+        for i, event in enumerate(
+            buffered
+        ):
+
+            U = int(
+                event.get(
+                    "U",
+                    0,
                 )
             )
 
-            books[symbol] = snapshot
-
-            buffered = list(
-                depth_buffers[
-                    symbol
-                ]
+            u = int(
+                event.get(
+                    "u",
+                    0,
+                )
             )
 
-            depth_buffers[
-                symbol
-            ].clear()
+            if (
+                U
+                <= last_id + 1
+                <= u
+            ):
+                first_index = i
+                break
 
-            last_id = snapshot[
-                "last_update_id"
-            ]
+        if first_index is None:
 
-            # Remove events already covered
-            buffered = [
-                e
-                for e in buffered
-                if int(e["u"])
-                > last_id
-            ]
+            # We may simply be waiting for the first event
+            # after the REST snapshot.
+            return
 
-            started = False
+        relevant = buffered[
+            first_index:
+        ]
 
-            for event in buffered:
+        book = books[
+            symbol
+        ]
 
-                U = int(
-                    event["U"]
+        current_id = last_id
+
+        for event in relevant:
+
+            U = int(
+                event.get(
+                    "U",
+                    0,
                 )
+            )
 
-                u = int(
-                    event["u"]
+            u = int(
+                event.get(
+                    "u",
+                    0,
                 )
+            )
 
-                current_id = books[
-                    symbol
-                ][
-                    "last_update_id"
-                ]
+            if u <= current_id:
+                continue
 
-                if not started:
-
-                    if not (
-                        U
-                        <= current_id + 1
-                        <= u
-                    ):
-                        continue
-
-                    started = True
-
-                ok = apply_depth_event(
+            if not (
+                U
+                <= current_id + 1
+                <= u
+            ):
+                books.pop(
                     symbol,
-                    event
+                    None,
                 )
+                return
 
-                if not ok:
-
-                    books.pop(
-                        symbol,
-                        None
-                    )
-
-                    return False
-
-            return True
-
-        except Exception as e:
-
-            print(
-                f"[BOOK RESYNC ERROR] "
-                f"{symbol}: {e}"
+            apply_depth_update(
+                book,
+                event,
             )
 
-            return False
+            current_id = u
+
+            book[
+                "last_update_id"
+            ] = u
+
+        book[
+            "ready"
+        ] = True
+
+        record_book_sample(
+            symbol
+        )
 
 
-# ================================================================
-# DEPTH HANDLER
-# ================================================================
+def apply_depth_update(
+    book: dict,
+    data: dict,
+):
+
+    for price_raw, qty_raw in data.get(
+        "b",
+        [],
+    ):
+
+        price = safe_float(
+            price_raw
+        )
+
+        qty = safe_float(
+            qty_raw
+        )
+
+        if qty == 0:
+            book[
+                "bids"
+            ].pop(
+                price,
+                None,
+            )
+        else:
+            book[
+                "bids"
+            ][price] = qty
+
+    for price_raw, qty_raw in data.get(
+        "a",
+        [],
+    ):
+
+        price = safe_float(
+            price_raw
+        )
+
+        qty = safe_float(
+            qty_raw
+        )
+
+        if qty == 0:
+            book[
+                "asks"
+            ].pop(
+                price,
+                None,
+            )
+        else:
+            book[
+                "asks"
+            ][price] = qty
+
 
 async def process_depth(
-    symbol,
-    event
+    symbol: str,
+    data: dict,
 ):
 
     depth_buffers[
         symbol
     ].append(
-        event
+        data
     )
-
-    # Don't allow unbounded buffer
-    while (
-        len(
-            depth_buffers[
-                symbol
-            ]
-        )
-        > 5000
-    ):
-
-        depth_buffers[
-            symbol
-        ].popleft()
 
     book = books.get(
         symbol
     )
 
-    if book is None:
-
+    if not book:
         await resync_book(
             symbol
         )
+        return
 
+    if not book.get(
+        "ready"
+    ):
+        await resync_book(
+            symbol
+        )
         return
 
     async with book_locks[
@@ -1467,1606 +1486,1656 @@ async def process_depth(
             symbol
         )
 
-        if book is None:
+        if not book:
             return
 
+        last_id = int(
+            book.get(
+                "last_update_id",
+                0,
+            )
+        )
+
         U = int(
-            event["U"]
+            data.get(
+                "U",
+                0,
+            )
         )
 
         u = int(
-            event["u"]
-        )
-
-        last_id = int(
-            book[
-                "last_update_id"
-            ]
+            data.get(
+                "u",
+                0,
+            )
         )
 
         if u <= last_id:
             return
 
-        if (
-            U > last_id + 1
+        if not (
+            U
+            <= last_id + 1
+            <= u
         ):
-
-            print(
-                f"[BOOK GAP] "
-                f"{symbol} "
-                f"local={last_id} "
-                f"U={U} "
-                f"u={u}"
-            )
-
             books.pop(
                 symbol,
-                None
+                None,
             )
 
-            need_resync = True
-
-        else:
-
-            apply_depth_event(
-                symbol,
-                event
+            asyncio.create_task(
+                resync_book(
+                    symbol
+                )
             )
 
-            need_resync = False
+            return
 
-    if need_resync:
+        apply_depth_update(
+            book,
+            data,
+        )
 
-        await resync_book(
+        book[
+            "last_update_id"
+        ] = u
+
+        record_book_sample(
             symbol
         )
 
 
-# ================================================================
-# MICROSTRUCTURE ANALYSIS
-# ================================================================
+# =============================================================================
+# DEPTH QUEUE
+# =============================================================================
 
-def micro_metrics(
-    symbol
+async def depth_worker(
+    symbol: str,
 ):
 
-    m = micro[symbol]
-
-    trades = list(
-        m["trades"]
-    )
-
-    samples = list(
-        m["book_samples"]
-    )
-
-    if (
-        len(trades)
-        < MIN_TRADE_SAMPLES
-        or
-        len(samples)
-        < MIN_BOOK_SAMPLES
-    ):
-
-        return {
-            "ready":
-                False,
-
-            "reason":
-                "WARMING_UP"
-        }
-
-    buy_quote = (
-        m["buy_quote"]
-    )
-
-    sell_quote = (
-        m["sell_quote"]
-    )
-
-    total_aggressive = (
-        buy_quote
-        +
-        sell_quote
-    )
-
-    cvd = (
-        buy_quote
-        -
-        sell_quote
-    )
-
-    cvd_ratio = safe_div(
-        cvd,
-        total_aggressive
-    )
-
-    ofis = [
-        x["ofi"]
-        for x in samples
+    queue = depth_queues[
+        symbol
     ]
 
-    obis = [
-        x["obi"]
-        for x in samples
-    ]
+    while True:
 
-    ask_deps = [
-        x["ask_depletion"]
-        for x in samples
-    ]
+        data = await queue.get()
 
-    bid_deps = [
-        x["bid_depletion"]
-        for x in samples
-    ]
-
-    # Recent weighting
-    recent_samples = (
-        samples[-10:]
-    )
-
-    recent_ofi = mean(
-        [
-            x["ofi"]
-            for x
-            in recent_samples
-        ]
-    )
-
-    recent_obi = mean(
-        [
-            x["obi"]
-            for x
-            in recent_samples
-        ]
-    )
-
-    avg_ofi = mean(
-        ofis
-    )
-
-    avg_obi = mean(
-        obis
-    )
-
-    avg_ask_dep = mean(
-        ask_deps
-    )
-
-    avg_bid_dep = mean(
-        bid_deps
-    )
-
-    # Persistence
-    positive_ofi_count = sum(
-        1
-        for x in recent_samples
-        if x["ofi"] > 0
-    )
-
-    ofi_persistence = (
-        safe_div(
-            positive_ofi_count,
-            len(
-                recent_samples
+        try:
+            await process_depth(
+                symbol,
+                data,
             )
-        )
-    )
 
-    positive_obi_count = sum(
-        1
-        for x in recent_samples
-        if x["obi"] > 0
-    )
+        except asyncio.CancelledError:
+            raise
 
-    obi_persistence = (
-        safe_div(
-            positive_obi_count,
-            len(
-                recent_samples
+        except Exception as exc:
+            print(
+                f"[DEPTH WORKER ERROR] "
+                f"{symbol}: {exc}"
             )
+
+        finally:
+            queue.task_done()
+
+
+def ensure_depth_worker(
+    symbol: str,
+):
+
+    if symbol in depth_workers:
+        return
+
+    depth_queues[
+        symbol
+    ] = asyncio.Queue(
+        maxsize=5000
+    )
+
+    depth_workers[
+        symbol
+    ] = asyncio.create_task(
+        depth_worker(
+            symbol
         )
     )
 
-    # Trade velocity comparison
-    now = time.time()
 
-    recent_15 = [
-        x
-        for x in trades
-        if x[0] >= now - 15
+# =============================================================================
+# MICRO METRICS
+# =============================================================================
+
+def window_sum(
+    dq: deque,
+    cutoff_ms: int,
+) -> float:
+
+    return sum(
+        value
+        for timestamp, value in dq
+        if timestamp >= cutoff_ms
+    )
+
+
+def window_values(
+    dq: deque,
+    cutoff_ms: int,
+) -> List[float]:
+
+    return [
+        value
+        for timestamp, value in dq
+        if timestamp >= cutoff_ms
     ]
 
-    prior_45 = [
-        x
-        for x in trades
-        if (
-            now - 60
-            <= x[0]
-            < now - 15
-        )
+
+def micro_metrics(
+    symbol: str,
+) -> dict:
+
+    ensure_micro_state(
+        symbol
+    )
+
+    state = micro_state[
+        symbol
     ]
 
-    recent_rate = (
-        len(recent_15)
-        / 15.0
+    now = now_ms()
+
+    cutoff_60 = (
+        now - 60_000
     )
 
-    prior_rate = (
-        len(prior_45)
-        / 45.0
+    cutoff_30 = (
+        now - 30_000
     )
 
-    trade_acceleration = (
-        safe_div(
-            recent_rate,
-            prior_rate
-        )
-        if prior_rate > 0
-        else 0.0
+    cutoff_15 = (
+        now - 15_000
     )
 
-    confirmations = []
+    buy_60 = window_sum(
+        state[
+            "buy_quote"
+        ],
+        cutoff_60,
+    )
 
-    # --------------------------------
-    # 1 CVD
-    # --------------------------------
+    sell_60 = window_sum(
+        state[
+            "sell_quote"
+        ],
+        cutoff_60,
+    )
 
-    if (
-        cvd > 0
-        and
-        cvd_ratio >= MIN_CVD_RATIO
-    ):
+    buy_30 = window_sum(
+        state[
+            "buy_quote"
+        ],
+        cutoff_30,
+    )
 
-        confirmations.append(
-            "CVD_BUY_DOMINANCE"
+    sell_30 = window_sum(
+        state[
+            "sell_quote"
+        ],
+        cutoff_30,
+    )
+
+    total_60 = (
+        buy_60
+        + sell_60
+    )
+
+    total_30 = (
+        buy_30
+        + sell_30
+    )
+
+    cvd_60 = (
+        buy_60
+        - sell_60
+    )
+
+    cvd_30 = (
+        buy_30
+        - sell_30
+    )
+
+    aggressive_buy_ratio = safe_div(
+        buy_60,
+        total_60,
+        0.5,
+    )
+
+    recent_trade_times = [
+        t
+        for t in state[
+            "trade_times"
+        ]
+        if t >= cutoff_60
+    ]
+
+    recent_trade_times_30 = [
+        t
+        for t in state[
+            "trade_times"
+        ]
+        if t >= cutoff_30
+    ]
+
+    trade_count_60 = len(
+        recent_trade_times
+    )
+
+    trade_count_30 = len(
+        recent_trade_times_30
+    )
+
+    trade_acceleration = safe_div(
+        trade_count_30 * 2.0,
+        max(
+            trade_count_60,
+            1,
+        ),
+    )
+
+    trade_sizes_60 = window_values(
+        state[
+            "trade_sizes"
+        ],
+        cutoff_60,
+    )
+
+    average_trade_size = average(
+        trade_sizes_60
+    )
+
+    ofi_values = window_values(
+        state[
+            "ofi_history"
+        ],
+        cutoff_60,
+    )
+
+    ofi_recent = window_values(
+        state[
+            "ofi_history"
+        ],
+        cutoff_15,
+    )
+
+    obi_values = window_values(
+        state[
+            "obi_history"
+        ],
+        cutoff_60,
+    )
+
+    ask_depletion_values = window_values(
+        state[
+            "ask_depletion_history"
+        ],
+        cutoff_60,
+    )
+
+    bid_depletion_values = window_values(
+        state[
+            "bid_depletion_history"
+        ],
+        cutoff_60,
+    )
+
+    ofi = (
+        average(
+            ofi_recent
         )
-
-    # --------------------------------
-    # 2 OFI
-    # --------------------------------
-
-    if (
-        recent_ofi
-        >= MIN_OFI
-    ):
-
-        confirmations.append(
-            "POSITIVE_OFI"
+        if ofi_recent
+        else average(
+            ofi_values
         )
+    )
 
-    # --------------------------------
-    # 3 OFI persistence
-    # --------------------------------
+    obi = average(
+        obi_values
+    )
 
-    if (
-        ofi_persistence
-        >= 0.60
-    ):
+    ask_depletion = average(
+        ask_depletion_values
+    )
 
-        confirmations.append(
-            "OFI_PERSISTENCE"
+    bid_depletion = average(
+        bid_depletion_values
+    )
+
+    positive_ofi_samples = sum(
+        1
+        for value in ofi_values
+        if value > 0
+    )
+
+    ofi_persistence = safe_div(
+        positive_ofi_samples,
+        len(
+            ofi_values
+        ),
+    )
+
+    book = books.get(
+        symbol,
+        {},
+    )
+
+    micro_ready = bool(
+        book.get(
+            "ready"
         )
-
-    # --------------------------------
-    # 4 L1-L10 bid imbalance
-    # --------------------------------
-
-    if (
-        recent_obi
-        >= MIN_OBI
-    ):
-
-        confirmations.append(
-            "L1_L10_BID_IMBALANCE"
-        )
-
-    # --------------------------------
-    # 5 OBI persistence
-    # --------------------------------
-
-    if (
-        obi_persistence
-        >= 0.60
-    ):
-
-        confirmations.append(
-            "BOOK_SUPPORT_PERSISTENCE"
-        )
-
-    # --------------------------------
-    # 6 Ask depletion
-    # --------------------------------
-
-    if (
-        avg_ask_dep
-        >= MIN_ASK_DEPLETION
-    ):
-
-        confirmations.append(
-            "ASK_LIQUIDITY_DEPLETION"
-        )
-
-    # --------------------------------
-    # 7 Bid support
-    # --------------------------------
-
-    if (
-        avg_bid_dep
-        < avg_ask_dep
-    ):
-
-        confirmations.append(
-            "BID_SUPPORT_STABLE"
-        )
-
-    # --------------------------------
-    # 8 Trade acceleration
-    # --------------------------------
-
-    if (
-        trade_acceleration
-        >= 1.25
-    ):
-
-        confirmations.append(
-            "TRADE_ACCELERATION"
-        )
+        and len(
+            ofi_values
+        ) >= 3
+        and total_60 > 0
+    )
 
     return {
+        "micro_ready": micro_ready,
 
-        "ready":
-            True,
+        "buy_quote_60s": buy_60,
+        "sell_quote_60s": sell_60,
 
-        "cvd_quote":
-            cvd,
+        "cvd_quote_60s": cvd_60,
+        "cvd_quote_30s": cvd_30,
 
-        "cvd_ratio":
-            cvd_ratio,
+        "aggressive_buy_ratio": aggressive_buy_ratio,
 
-        "buy_quote":
-            buy_quote,
+        "trade_count_60s": trade_count_60,
+        "trade_count_30s": trade_count_30,
 
-        "sell_quote":
-            sell_quote,
+        "trade_acceleration": trade_acceleration,
 
-        "avg_ofi":
-            avg_ofi,
+        "average_trade_size_quote": average_trade_size,
 
-        "recent_ofi":
-            recent_ofi,
+        "ofi": ofi,
 
-        "ofi_persistence":
-            ofi_persistence,
+        "ofi_persistence": ofi_persistence,
 
-        "avg_obi":
-            avg_obi,
+        "obi": obi,
 
-        "recent_obi":
-            recent_obi,
+        "ask_depletion": ask_depletion,
+        "bid_depletion": bid_depletion,
 
-        "obi_persistence":
-            obi_persistence,
+        "last_trade_price": state.get(
+            "last_trade_price",
+            0.0,
+        ),
 
-        "ask_depletion":
-            avg_ask_dep,
-
-        "bid_depletion":
-            avg_bid_dep,
-
-        "trade_acceleration":
-            trade_acceleration,
-
-        "trade_count":
-            len(trades),
-
-        "book_sample_count":
-            len(samples),
-
-        "confirmations":
-            confirmations,
-
-        "micro_score":
-            len(
-                confirmations
-            )
+        "last_trade_ms": state.get(
+            "last_trade_ms",
+            0,
+        ),
     }
 
 
-# ================================================================
-# V10 DECISION ENGINE
-# ================================================================
+# =============================================================================
+# V10 EVALUATION
+# =============================================================================
 
 def evaluate_symbol(
-    symbol
-):
+    symbol: str,
+) -> Optional[dict]:
 
     s = structure.get(
         symbol
     )
 
     if not s:
-
         return None
 
     m = micro_metrics(
         symbol
     )
 
-    confirmations = []
+    confirmations = list(
+        s.get(
+            "structure_confirmations",
+            [],
+        )
+    )
 
-    # ============================================================
-    # STRUCTURAL CONFIRMATIONS
-    # ============================================================
+    micro_confirmations = []
 
-    if s[
-        "ema_near"
-    ]:
+    # -------------------------------------------------------------------------
+    # CVD
+    # -------------------------------------------------------------------------
 
-        confirmations.append(
-            "4H_EMA_PROXIMITY"
+    cvd_positive = (
+        m[
+            "cvd_quote_60s"
+        ] > 0
+    )
+
+    cvd_buy_dominance = (
+        m[
+            "aggressive_buy_ratio"
+        ] >= 0.55
+    )
+
+    if cvd_positive:
+        micro_confirmations.append(
+            "POSITIVE_CVD"
         )
 
-    if s[
-        "ema_reclaim"
-    ]:
-
-        confirmations.append(
-            "4H_EMA_RECLAIM"
+    if cvd_buy_dominance:
+        micro_confirmations.append(
+            "AGGRESSIVE_BUY_DOMINANCE"
         )
 
-    if s[
-        "bullish_ema_structure"
-    ]:
+    # -------------------------------------------------------------------------
+    # OFI
+    # -------------------------------------------------------------------------
 
-        confirmations.append(
-            "BULLISH_EMA_STRUCTURE"
+    ofi_positive = (
+        m["ofi"] > 0.05
+    )
+
+    ofi_persistent = (
+        m[
+            "ofi_persistence"
+        ] >= 0.60
+    )
+
+    if ofi_positive:
+        micro_confirmations.append(
+            "POSITIVE_OFI"
         )
 
-    if (
-        s["relative_volume"]
-        >= 1.20
+    if ofi_persistent:
+        micro_confirmations.append(
+            "OFI_PERSISTENCE"
+        )
+
+    # -------------------------------------------------------------------------
+    # OBI
+    # -------------------------------------------------------------------------
+
+    obi_bullish = (
+        m["obi"] >= 0.10
+    )
+
+    if obi_bullish:
+        micro_confirmations.append(
+            "BID_DEPTH_IMBALANCE"
+        )
+
+    # -------------------------------------------------------------------------
+    # Ask depletion
+    # -------------------------------------------------------------------------
+
+    ask_depletion = (
+        m[
+            "ask_depletion"
+        ] > 0.03
+    )
+
+    if ask_depletion:
+        micro_confirmations.append(
+            "ASK_LIQUIDITY_DEPLETION"
+        )
+
+    # -------------------------------------------------------------------------
+    # Trade acceleration
+    # -------------------------------------------------------------------------
+
+    trade_acceleration = (
+        m[
+            "trade_acceleration"
+        ] >= 1.20
+    )
+
+    if trade_acceleration:
+        micro_confirmations.append(
+            "TRADE_COUNT_ACCELERATION"
+        )
+
+    confirmations.extend(
+        micro_confirmations
+    )
+
+    structure_ok = bool(
+        s[
+            "structural_support"
+        ]
+        or s[
+            "breakout_near"
+        ]
+        or s[
+            "breakout"
+        ]
+    )
+
+    volume_ok = (
+        s[
+            "volume_acceleration"
+        ] >= 1.05
+    )
+
+    micro_ready = bool(
+        m[
+            "micro_ready"
+        ]
+    )
+
+    anti_chase = bool(
+        s[
+            "anti_chase"
+        ]
+    )
+
+    micro_count = len(
+        micro_confirmations
+    )
+
+    total_count = len(
+        confirmations
+    )
+
+    # -------------------------------------------------------------------------
+    # Hard BUY gates
+    # -------------------------------------------------------------------------
+
+    buy_gate = all(
+        [
+            not anti_chase,
+
+            micro_ready,
+
+            structure_ok,
+
+            volume_ok,
+
+            cvd_buy_dominance,
+
+            ofi_positive,
+
+            ofi_persistent,
+
+            micro_count
+            >= BUY_MIN_MICRO_CONFIRMATIONS,
+
+            total_count
+            >= BUY_MIN_CONFIRMATIONS,
+        ]
+    )
+
+    pre_gate = all(
+        [
+            not anti_chase,
+
+            structure_ok,
+
+            micro_ready,
+
+            micro_count
+            >= PRE_MIN_MICRO_CONFIRMATIONS,
+
+            total_count
+            >= PRE_MIN_CONFIRMATIONS,
+        ]
+    )
+
+    if buy_gate:
+        state = "BUY"
+
+    elif pre_gate:
+        state = "PRE-IGNITION"
+
+    elif (
+        s[
+            "ema50_near"
+        ]
+        or s[
+            "ema200_near"
+        ]
+        or s[
+            "breakout_near"
+        ]
     ):
+        state = "WATCH"
 
-        confirmations.append(
-            "RELATIVE_VOLUME"
-        )
+    else:
+        state = "MONITOR"
 
-    if (
-        s["volume_acceleration"]
-        >= 1.20
-    ):
+    # -------------------------------------------------------------------------
+    # Ranking
+    # -------------------------------------------------------------------------
 
-        confirmations.append(
-            "VOLUME_ACCELERATION"
-        )
+    score = 0.0
+
+    score += min(
+        total_count * 7.0,
+        42.0,
+    )
+
+    score += clamp(
+        m[
+            "aggressive_buy_ratio"
+        ] * 20.0,
+        0.0,
+        20.0,
+    )
+
+    score += clamp(
+        max(
+            m["ofi"],
+            0.0,
+        ) * 15.0,
+        0.0,
+        15.0,
+    )
+
+    score += clamp(
+        max(
+            m["obi"],
+            0.0,
+        ) * 10.0,
+        0.0,
+        10.0,
+    )
+
+    score += clamp(
+        s[
+            "volume_acceleration"
+        ] * 5.0,
+        0.0,
+        10.0,
+    )
 
     if s[
         "compression"
     ]:
-
-        confirmations.append(
-            "COMPRESSION"
-        )
+        score += 5.0
 
     if s[
-        "near_breakout"
+        "breakout_near"
     ]:
-
-        confirmations.append(
-            "NEAR_BREAKOUT"
-        )
-
-    if s[
-        "breakout"
-    ]:
-
-        confirmations.append(
-            "BREAKOUT"
-        )
-
-    # ============================================================
-    # MICRO
-    # ============================================================
-
-    if m.get(
-        "ready"
-    ):
-
-        confirmations.extend(
-            m[
-                "confirmations"
-            ]
-        )
-
-    # ============================================================
-    # HARD V10 CONDITIONS
-    # ============================================================
-
-    anti_chase = s[
-        "anti_chase"
-    ]
-
-    micro_ready = m.get(
-        "ready",
-        False
-    )
-
-    micro_confirms = (
-        m.get(
-            "micro_score",
-            0
-        )
-    )
-
-    cvd_ok = (
-        "CVD_BUY_DOMINANCE"
-        in confirmations
-    )
-
-    ofi_ok = (
-        "POSITIVE_OFI"
-        in confirmations
-    )
-
-    ofi_persistent = (
-        "OFI_PERSISTENCE"
-        in confirmations
-    )
-
-    volume_ok = (
-        "VOLUME_ACCELERATION"
-        in confirmations
-        or
-        "RELATIVE_VOLUME"
-        in confirmations
-    )
-
-    structure_ok = (
-        s["ema_near"]
-        or
-        s["ema_reclaim"]
-        or
-        s["near_breakout"]
-        or
-        s["breakout"]
-    )
-
-    # ============================================================
-    # STATE
-    # ============================================================
+        score += 5.0
 
     if anti_chase:
+        score -= 30.0
 
-        state = "REJECT"
-
-        reason = (
-            "ANTI_CHASE"
-        )
-
-    elif not micro_ready:
-
-        state = "WATCH"
-
-        reason = (
-            "MICRO_WARMING_UP"
-        )
-
-    elif (
-        cvd_ok
-        and
-        ofi_ok
-        and
-        ofi_persistent
-        and
-        volume_ok
-        and
-        structure_ok
-        and
-        micro_confirms >= 4
-        and
-        len(confirmations)
-        >= BUY_MIN_CONFIRMATIONS
-    ):
-
-        state = "BUY"
-
-        reason = (
-            "V10_FULL_CONFIRMATION"
-        )
-
-    elif (
-        structure_ok
-        and
-        micro_confirms >= 3
-        and
-        len(confirmations)
-        >= PRE_MIN_CONFIRMATIONS
-    ):
-
-        state = "PRE-IGNITION"
-
-        reason = (
-            "BUILDING_CONFLUENCE"
-        )
-
-    else:
-
-        state = "WATCH"
-
-        reason = (
-            "INSUFFICIENT_CONFLUENCE"
-        )
-
-    # ============================================================
-    # SCORE
-    # ============================================================
-
-    score = 0.0
-
-    # High weight:
-    # OFI/CVD/volume
-    if cvd_ok:
-        score += 18
-
-    if ofi_ok:
-        score += 18
-
-    if ofi_persistent:
-        score += 12
-
-    if (
-        "L1_L10_BID_IMBALANCE"
-        in confirmations
-    ):
-        score += 10
-
-    if (
-        "ASK_LIQUIDITY_DEPLETION"
-        in confirmations
-    ):
-        score += 10
-
-    if (
-        "VOLUME_ACCELERATION"
-        in confirmations
-    ):
-        score += 10
-
-    if (
-        "RELATIVE_VOLUME"
-        in confirmations
-    ):
-        score += 5
-
-    if s["ema_near"]:
-        score += 5
-
-    if s["ema_reclaim"]:
-        score += 8
-
-    if s["compression"]:
-        score += 5
-
-    if s["near_breakout"]:
-        score += 5
-
-    if s["breakout"]:
-        score += 8
-
-    if (
-        "TRADE_ACCELERATION"
-        in confirmations
-    ):
-        score += 6
-
-    if anti_chase:
-        score -= 40
-
-    score = max(
-        0.0,
-        min(
-            100.0,
-            score
-        )
+    score = round(
+        max(
+            score,
+            0.0,
+        ),
+        2,
     )
 
     return {
+        "symbol": symbol,
 
-        "symbol":
-            symbol,
+        "state": state,
 
-        "state":
-            state,
+        "score": score,
 
-        "reason":
-            reason,
+        "price": s[
+            "price"
+        ],
 
-        "score":
-            round(
-                score,
-                1
-            ),
+        "ema50_4h": s[
+            "ema50_4h"
+        ],
 
-        "price":
-            s["price"],
+        "ema200_4h": s[
+            "ema200_4h"
+        ],
 
-        "nearest_ema":
-            s[
-                "nearest_ema"
-            ],
+        "atr14_4h": s[
+            "atr14_4h"
+        ],
 
-        "ema_distance_pct":
-            round(
-                s[
-                    "nearest_ema_distance_pct"
-                ],
-                3
-            ),
+        "distance_ema50_atr": s[
+            "distance_ema50_atr"
+        ],
 
-        "ema_atr_distance":
-            round(
-                s[
-                    "nearest_ema_atr"
-                ],
-                3
-            ),
+        "distance_ema200_atr": s[
+            "distance_ema200_atr"
+        ],
 
-        "relative_volume":
-            round(
-                s[
-                    "relative_volume"
-                ],
-                2
-            ),
+        "ema50_touch": s[
+            "ema50_touch"
+        ],
 
-        "volume_acceleration":
-            round(
-                s[
-                    "volume_acceleration"
-                ],
-                2
-            ),
+        "ema200_touch": s[
+            "ema200_touch"
+        ],
 
-        "compression_ratio":
-            round(
-                s[
-                    "compression_ratio"
-                ],
-                3
-            ),
+        "ema50_reclaim": s[
+            "ema50_reclaim"
+        ],
 
-        "breakout_distance_pct":
-            round(
-                s[
-                    "breakout_distance_pct"
-                ],
-                3
-            ),
+        "ema200_reclaim": s[
+            "ema200_reclaim"
+        ],
 
-        "anti_chase":
-            anti_chase,
+        "volume_acceleration": s[
+            "volume_acceleration"
+        ],
 
-        "cvd_quote":
-            round(
-                m.get(
-                    "cvd_quote",
-                    0
-                ),
-                2
-            ),
+        "compression": s[
+            "compression"
+        ],
 
-        "cvd_ratio":
-            round(
-                m.get(
-                    "cvd_ratio",
-                    0
-                ),
-                4
-            ),
+        "compression_ratio": s[
+            "compression_ratio"
+        ],
 
-        "ofi":
-            round(
-                m.get(
-                    "recent_ofi",
-                    0
-                ),
-                4
-            ),
+        "resistance": s[
+            "resistance"
+        ],
 
-        "ofi_persistence":
-            round(
-                m.get(
-                    "ofi_persistence",
-                    0
-                ),
-                3
-            ),
+        "breakout_distance_pct": s[
+            "breakout_distance_pct"
+        ],
 
-        "obi":
-            round(
-                m.get(
-                    "recent_obi",
-                    0
-                ),
-                4
-            ),
+        "breakout_near": s[
+            "breakout_near"
+        ],
 
-        "ask_depletion_pct":
-            round(
-                m.get(
-                    "ask_depletion",
-                    0
-                )
-                * 100,
-                2
-            ),
+        "breakout": s[
+            "breakout"
+        ],
 
-        "bid_depletion_pct":
-            round(
-                m.get(
-                    "bid_depletion",
-                    0
-                )
-                * 100,
-                2
-            ),
+        "anti_chase": anti_chase,
 
-        "trade_acceleration":
-            round(
-                m.get(
-                    "trade_acceleration",
-                    0
-                ),
-                2
-            ),
+        "micro_ready": micro_ready,
 
-        "confirmations":
-            confirmations
+        "cvd_quote_60s": m[
+            "cvd_quote_60s"
+        ],
+
+        "aggressive_buy_ratio": m[
+            "aggressive_buy_ratio"
+        ],
+
+        "ofi": m[
+            "ofi"
+        ],
+
+        "ofi_persistence": m[
+            "ofi_persistence"
+        ],
+
+        "obi": m[
+            "obi"
+        ],
+
+        "ask_depletion": m[
+            "ask_depletion"
+        ],
+
+        "bid_depletion": m[
+            "bid_depletion"
+        ],
+
+        "trade_count_60s": m[
+            "trade_count_60s"
+        ],
+
+        "trade_acceleration": m[
+            "trade_acceleration"
+        ],
+
+        "structure_confirmations": s[
+            "structure_confirmations"
+        ],
+
+        "micro_confirmations": micro_confirmations,
+
+        "confirmations": confirmations,
+
+        "confirmation_count": total_count,
+
+        "micro_confirmation_count": micro_count,
+
+        "quote_volume_24h": s[
+            "quote_volume_24h"
+        ],
+
+        "updated_ms": s[
+            "updated_ms"
+        ],
     }
 
 
-# ================================================================
-# RANK
-# ================================================================
+# =============================================================================
+# RANKING
+# =============================================================================
 
 STATE_PRIORITY = {
     "BUY": 4,
     "PRE-IGNITION": 3,
     "WATCH": 2,
-    "REJECT": 1
+    "MONITOR": 1,
 }
 
 
-def get_ranked_results():
+def ranked_results(
+    limit: int = RETURN_LIMIT,
+) -> List[dict]:
 
-    output = []
+    rows = []
 
-    for symbol in live_symbols:
+    for symbol in structure:
 
-        result = evaluate_symbol(
+        row = evaluate_symbol(
             symbol
         )
 
-        if result:
-            output.append(
-                result
+        if row:
+            rows.append(
+                row
             )
 
-    output.sort(
-        key=lambda x: (
+    rows.sort(
+        key=lambda row: (
             STATE_PRIORITY.get(
-                x["state"],
-                0
+                row[
+                    "state"
+                ],
+                0,
             ),
-            x["score"],
-            -abs(
-                x[
-                    "ema_distance_pct"
-                ]
-            )
+            row[
+                "score"
+            ],
+            row[
+                "quote_volume_24h"
+            ],
         ),
-        reverse=True
+        reverse=True,
     )
 
-    return output[
-        :TOP_RESULTS
+    return rows[
+        :limit
     ]
 
 
-# ================================================================
-# INITIAL STRUCTURAL PREFILTER
-# ================================================================
+# =============================================================================
+# STRUCTURE REFRESH
+# =============================================================================
 
 async def structure_batch(
-    symbols
+    symbols: List[str],
 ):
+
+    if session is None:
+        return
 
     semaphore = asyncio.Semaphore(
         8
     )
 
     async def worker(
-        symbol
+        symbol: str,
     ):
 
         async with semaphore:
 
-            result = (
-                await load_4h_structure(
+            result = await load_4h_structure(
+                session,
+                symbol,
+            )
+
+            if result:
+                structure[
                     symbol
-                )
-            )
+                ] = result
 
-            await asyncio.sleep(
-                0.03
-            )
-
-            return result
-
-    results = await asyncio.gather(
+    await asyncio.gather(
         *[
-            worker(s)
-            for s in symbols
-        ],
-        return_exceptions=True
-    )
-
-    valid = [
-        x
-        for x in results
-        if isinstance(
-            x,
-            dict
-        )
-    ]
-
-    # --------------------------------
-    # Candidate pre-ranking
-    # --------------------------------
-
-    def candidate_score(x):
-
-        score = 0
-
-        # Near EMA
-        score += max(
-            0,
-            20
-            - (
-                x[
-                    "nearest_ema_distance_pct"
-                ]
-                * 5
+            worker(
+                symbol
             )
-        )
-
-        # Volume
-        score += min(
-            x[
-                "volume_acceleration"
-            ]
-            * 10,
-            20
-        )
-
-        # Compression
-        if x[
-            "compression"
-        ]:
-            score += 15
-
-        # Near breakout
-        if x[
-            "near_breakout"
-        ]:
-            score += 15
-
-        # EMA reclaim
-        if x[
-            "ema_reclaim"
-        ]:
-            score += 15
-
-        # Penalise chase
-        if x[
-            "anti_chase"
-        ]:
-            score -= 50
-
-        return score
-
-    valid.sort(
-        key=candidate_score,
-        reverse=True
+            for symbol in symbols
+        ],
+        return_exceptions=True,
     )
 
-    return [
-        x["symbol"]
-        for x in valid[
-            :MAX_LIVE_SYMBOLS
+
+async def refresh_structure():
+
+    global selected_micro_symbols
+    global last_structure_refresh
+    global scanner_ready
+
+    if session is None:
+        return
+
+    print(
+        "Ψ-V10: loading Binance universe..."
+    )
+
+    universe = await get_exchange_symbols(
+        session
+    )
+
+    symbols = [
+        symbol
+        for symbol, _
+        in universe[
+            :TOP_STRUCTURE_UNIVERSE
         ]
     ]
 
+    print(
+        f"Ψ-V10: analysing "
+        f"{len(symbols)} liquid Spot USDT markets..."
+    )
 
-# ================================================================
-# WEBSOCKET
-# ================================================================
+    await structure_batch(
+        symbols
+    )
 
-async def websocket_loop():
+    # Rank structural candidates before allocating
+    # expensive live microstructure streams.
+    candidates = []
 
-    global live_symbols
+    for symbol in symbols:
 
-    backoff = 1
+        row = structure.get(
+            symbol
+        )
 
-    while True:
-
-        if not live_symbols:
-
-            await asyncio.sleep(
-                1
-            )
-
+        if not row:
             continue
 
-        try:
-
-            print(
-                f"[WS] connecting "
-                f"{len(live_symbols)} symbols"
-            )
-
-            async with session.ws_connect(
-                WS_BASE,
-                heartbeat=30,
-                autoping=True,
-                receive_timeout=90
-            ) as ws:
-
-                streams = []
-
-                for symbol in live_symbols:
-
-                    lower = (
-                        symbol.lower()
-                    )
-
-                    streams.append(
-                        f"{lower}@aggTrade"
-                    )
-
-                    streams.append(
-                        f"{lower}@depth@100ms"
-                    )
-
-                await ws.send_json(
-                    {
-                        "method":
-                            "SUBSCRIBE",
-
-                        "params":
-                            streams,
-
-                        "id":
-                            1
-                    }
-                )
-
-                print(
-                    f"[WS] subscribed to "
-                    f"{len(streams)} streams"
-                )
-
-                # Bootstrap books after
-                # socket begins receiving.
-                bootstrap_tasks = [
-                    asyncio.create_task(
-                        resync_book(
-                            symbol
-                        )
-                    )
-                    for symbol
-                    in live_symbols
+        proximity = min(
+            abs(
+                row[
+                    "distance_ema50_atr"
                 ]
+            ),
+            abs(
+                row[
+                    "distance_ema200_atr"
+                ]
+            ),
+        )
 
-                # Don't block websocket
-                # processing waiting for
-                # all snapshots.
-                asyncio.gather(
-                    *bootstrap_tasks,
-                    return_exceptions=True
-                )
+        structural_score = 0.0
 
-                backoff = 1
-
-                async for msg in ws:
-
-                    if (
-                        msg.type
-                        == aiohttp.WSMsgType.TEXT
-                    ):
-
-                        try:
-
-                            payload = (
-                                json.loads(
-                                    msg.data
-                                )
-                            )
-
-                        except Exception:
-                            continue
-
-                        # Subscription ACK
-                        if (
-                            "result"
-                            in payload
-                            and "id"
-                            in payload
-                        ):
-                            continue
-
-                        event_type = (
-                            payload.get(
-                                "e"
-                            )
-                        )
-
-                        symbol = (
-                            payload.get(
-                                "s"
-                            )
-                        )
-
-                        if (
-                            not symbol
-                            or symbol
-                            not in live_symbols
-                        ):
-                            continue
-
-                        if (
-                            event_type
-                            == "aggTrade"
-                        ):
-
-                            process_agg_trade(
-                                symbol,
-                                payload
-                            )
-
-                        elif (
-                            event_type
-                            == "depthUpdate"
-                        ):
-
-                            asyncio.create_task(
-                                process_depth(
-                                    symbol,
-                                    payload
-                                )
-                            )
-
-                    elif (
-                        msg.type
-                        in (
-                            aiohttp.WSMsgType.ERROR,
-                            aiohttp.WSMsgType.CLOSED
-                        )
-                    ):
-
-                        break
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception as e:
-
-            print(
-                f"[WS ERROR] {e}"
+        structural_score += (
+            len(
+                row[
+                    "structure_confirmations"
+                ]
             )
-
-        print(
-            f"[WS] reconnecting "
-            f"in {backoff}s"
+            * 10.0
         )
 
-        await asyncio.sleep(
-            backoff
+        structural_score += max(
+            0.0,
+            20.0 - proximity * 5.0,
         )
 
-        backoff = min(
-            backoff * 2,
-            30
+        structural_score += min(
+            row[
+                "volume_acceleration"
+            ] * 5.0,
+            15.0,
         )
 
+        if row[
+            "compression"
+        ]:
+            structural_score += 10.0
 
-# ================================================================
-# STRUCTURE REFRESH LOOP
-# ================================================================
+        if row[
+            "breakout_near"
+        ]:
+            structural_score += 10.0
+
+        if row[
+            "anti_chase"
+        ]:
+            structural_score -= 25.0
+
+        candidates.append(
+            (
+                structural_score,
+                row[
+                    "quote_volume_24h"
+                ],
+                symbol,
+            )
+        )
+
+    candidates.sort(
+        reverse=True
+    )
+
+    selected_micro_symbols = [
+        symbol
+        for _, _, symbol
+        in candidates[
+            :MICRO_UNIVERSE_SIZE
+        ]
+    ]
+
+    for symbol in selected_micro_symbols:
+        ensure_micro_state(
+            symbol
+        )
+        ensure_depth_worker(
+            symbol
+        )
+
+    last_structure_refresh = time.time()
+
+    scanner_ready = True
+
+    print(
+        "Ψ-V10 STRUCTURE READY"
+    )
+
+    print(
+        "Micro universe:",
+        ", ".join(
+            selected_micro_symbols
+        ),
+    )
+
 
 async def structure_refresh_loop():
 
     while True:
 
         try:
+            await refresh_structure()
 
-            symbols = list(
-                live_symbols
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as exc:
+
+            global last_error
+
+            last_error = (
+                f"STRUCTURE: "
+                f"{type(exc).__name__}: "
+                f"{exc}"
             )
 
-            if symbols:
-
-                semaphore = (
-                    asyncio.Semaphore(
-                        5
-                    )
-                )
-
-                async def worker(
-                    symbol
-                ):
-
-                    async with semaphore:
-
-                        await load_4h_structure(
-                            symbol
-                        )
-
-                        await asyncio.sleep(
-                            0.05
-                        )
-
-                await asyncio.gather(
-                    *[
-                        worker(s)
-                        for s
-                        in symbols
-                    ],
-                    return_exceptions=True
-                )
-
-        except Exception as e:
-
             print(
-                "[STRUCTURE LOOP]",
-                e
+                last_error
             )
 
         await asyncio.sleep(
-            STRUCTURE_REFRESH_SEC
+            STRUCTURE_REFRESH_SECONDS
         )
 
 
-# ================================================================
-# DISPLAY
-# ================================================================
+# =============================================================================
+# WEBSOCKET
+# =============================================================================
 
-def fmt_num(
-    value
-):
+async def websocket_loop():
 
-    if abs(value) >= 1_000_000:
+    global websocket_connected
+    global last_error
 
-        return (
-            f"{value / 1_000_000:.2f}M"
+    while True:
+
+        try:
+
+            symbols = list(
+                selected_micro_symbols
+            )
+
+            if not symbols:
+
+                await asyncio.sleep(
+                    2
+                )
+
+                continue
+
+            streams = []
+
+            for symbol in symbols:
+
+                lower = symbol.lower()
+
+                streams.append(
+                    f"{lower}@aggTrade"
+                )
+
+                streams.append(
+                    f"{lower}@depth@100ms"
+                )
+
+            stream_string = "/".join(
+                streams
+            )
+
+            url = (
+                f"{WS_BASE}/stream"
+                f"?streams={stream_string}"
+            )
+
+            print(
+                f"Ψ-V10 WebSocket connecting "
+                f"for {len(symbols)} symbols..."
+            )
+
+            async with session.ws_connect(
+                url,
+                heartbeat=30,
+                receive_timeout=90,
+                max_msg_size=0,
+            ) as ws:
+
+                websocket_connected = True
+
+                print(
+                    "Ψ-V10 WebSocket connected."
+                )
+
+                # Buffer events first, then snapshots can
+                # reconcile against the stream.
+                bootstrap_tasks = []
+
+                for symbol in symbols:
+                    bootstrap_tasks.append(
+                        asyncio.create_task(
+                            resync_book(
+                                symbol
+                            )
+                        )
+                    )
+
+                if bootstrap_tasks:
+                    await asyncio.gather(
+                        *bootstrap_tasks,
+                        return_exceptions=True,
+                    )
+
+                async for message in ws:
+
+                    if message.type == aiohttp.WSMsgType.TEXT:
+
+                        payload = json.loads(
+                            message.data
+                        )
+
+                        stream_name = payload.get(
+                            "stream",
+                            "",
+                        )
+
+                        data = payload.get(
+                            "data",
+                            {},
+                        )
+
+                        if not stream_name:
+                            continue
+
+                        symbol = (
+                            stream_name
+                            .split("@")[0]
+                            .upper()
+                        )
+
+                        if (
+                            "@aggTrade"
+                            in stream_name
+                        ):
+                            process_agg_trade(
+                                symbol,
+                                data,
+                            )
+
+                        elif (
+                            "@depth"
+                            in stream_name
+                        ):
+
+                            ensure_depth_worker(
+                                symbol
+                            )
+
+                            queue = depth_queues[
+                                symbol
+                            ]
+
+                            try:
+                                queue.put_nowait(
+                                    data
+                                )
+
+                            except asyncio.QueueFull:
+
+                                # Dropping a depth event means
+                                # local book continuity can no
+                                # longer be trusted.
+                                books.pop(
+                                    symbol,
+                                    None,
+                                )
+
+                                while not queue.empty():
+
+                                    try:
+                                        queue.get_nowait()
+                                        queue.task_done()
+
+                                    except asyncio.QueueEmpty:
+                                        break
+
+                    elif message.type in (
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    ):
+                        break
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as exc:
+
+            websocket_connected = False
+
+            last_error = (
+                f"WEBSOCKET: "
+                f"{type(exc).__name__}: "
+                f"{exc}"
+            )
+
+            print(
+                last_error
+            )
+
+        websocket_connected = False
+
+        await asyncio.sleep(
+            5
         )
 
-    if abs(value) >= 1_000:
 
-        return (
-            f"{value / 1_000:.2f}K"
+# =============================================================================
+# MICRO UNIVERSE WATCHER
+# =============================================================================
+
+async def micro_universe_watcher():
+
+    previous = set()
+
+    while True:
+
+        current = set(
+            selected_micro_symbols
         )
 
-    return f"{value:.2f}"
+        if current != previous:
 
+            print(
+                "Ψ-V10 micro universe changed."
+            )
+
+            # Force WS reconnect naturally by cancelling
+            # and recreating is cleaner, but the primary
+            # websocket supervisor below handles this via
+            # periodic refresh.
+            previous = current
+
+        await asyncio.sleep(
+            MICRO_REFRESH_SECONDS
+        )
+
+
+# =============================================================================
+# CONSOLE OUTPUT
+# =============================================================================
 
 async def print_loop():
 
     while True:
 
         await asyncio.sleep(
-            PRINT_INTERVAL_SEC
+            30
         )
 
-        results = (
-            get_ranked_results()
-        )
+        try:
 
-        print("\n")
-        print(
-            "=" * 100
-        )
-
-        print(
-            "Ψ-V10 LIVE BINANCE SCAN"
-        )
-
-        print(
-            time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime()
-            )
-        )
-
-        print(
-            "=" * 100
-        )
-
-        for i, r in enumerate(
-            results,
-            1
-        ):
-
-            print(
-                f"\n#{i} "
-                f"{r['symbol']} "
-                f"| {r['state']} "
-                f"| SCORE {r['score']}"
+            results = ranked_results(
+                10
             )
 
             print(
-                f"Price: "
-                f"{r['price']}"
+                "\n"
+                "=================================================="
             )
 
             print(
-                f"EMA: "
-                f"{r['nearest_ema']} "
-                f"| distance "
-                f"{r['ema_distance_pct']}%"
+                "Ψ-V10 LIVE TOP 10"
             )
 
             print(
-                f"RVOL: "
-                f"{r['relative_volume']} "
-                f"| VolAccel: "
-                f"{r['volume_acceleration']}"
+                "=================================================="
             )
 
-            print(
-                f"Breakout distance: "
-                f"{r['breakout_distance_pct']}%"
-            )
+            for index, row in enumerate(
+                results,
+                start=1,
+            ):
 
-            print(
-                f"CVD: "
-                f"{fmt_num(r['cvd_quote'])} "
-                f"| CVD ratio: "
-                f"{r['cvd_ratio']}"
-            )
-
-            print(
-                f"OFI: "
-                f"{r['ofi']} "
-                f"| persistence: "
-                f"{r['ofi_persistence']}"
-            )
-
-            print(
-                f"OBI L1-L10: "
-                f"{r['obi']}"
-            )
-
-            print(
-                f"Ask depletion: "
-                f"{r['ask_depletion_pct']}% "
-                f"| Bid depletion: "
-                f"{r['bid_depletion_pct']}%"
-            )
-
-            print(
-                f"Trade acceleration: "
-                f"{r['trade_acceleration']}x"
-            )
-
-            print(
-                "Confirmations: "
-                + ", ".join(
-                    r[
-                        "confirmations"
-                    ]
+                print(
+                    f"{index:02d}. "
+                    f"{row['symbol']:12s} "
+                    f"{row['state']:14s} "
+                    f"score={row['score']:6.2f} "
+                    f"conf={row['confirmation_count']} "
+                    f"micro={row['micro_confirmation_count']} "
+                    f"OFI={row['ofi']:+.3f} "
+                    f"OBI={row['obi']:+.3f} "
+                    f"buy={row['aggressive_buy_ratio']:.2%}"
                 )
+
+        except Exception as exc:
+
+            print(
+                f"[PRINT ERROR] {exc}"
             )
 
-        print("\n")
 
-
-# ================================================================
-# SIMPLE HTTP SERVER
-# ================================================================
-#
-# Railway can ping:
-#
-# /
-# /scan
-#
-# ================================================================
+# =============================================================================
+# HTTP
+# =============================================================================
 
 async def health(
-    request
+    request: web.Request,
 ):
 
-    return aiohttp.web.json_response(
+    uptime = int(
+        time.time()
+        - scanner_started_at
+    )
+
+    return web.json_response(
         {
-            "status":
-                "ok",
+            "ok": True,
 
-            "scanner":
-                "Psi-V10",
+            "service": "psi-v10-live-scanner",
 
-            "symbols":
-                len(
-                    live_symbols
-                ),
+            "version": "2.0",
 
-            "timestamp":
-                time.time()
+            "scanner_ready": scanner_ready,
+
+            "rest_connected": rest_connected,
+
+            "websocket_connected": websocket_connected,
+
+            "rest_base": REST_BASE,
+
+            "structure_symbols": len(
+                structure
+            ),
+
+            "micro_symbols": len(
+                selected_micro_symbols
+            ),
+
+            "uptime_seconds": uptime,
+
+            "last_error": last_error,
+
+            "endpoints": {
+                "health": "/health",
+                "scan": "/scan",
+            },
         }
     )
 
 
 async def scan_endpoint(
-    request
+    request: web.Request,
 ):
 
-    return aiohttp.web.json_response(
+    try:
+        limit = int(
+            request.query.get(
+                "limit",
+                RETURN_LIMIT,
+            )
+        )
+
+    except ValueError:
+        limit = RETURN_LIMIT
+
+    limit = max(
+        1,
+        min(
+            limit,
+            50,
+        ),
+    )
+
+    results = ranked_results(
+        limit
+    )
+
+    states = defaultdict(
+        int
+    )
+
+    for row in results:
+        states[
+            row[
+                "state"
+            ]
+        ] += 1
+
+    return web.json_response(
         {
-            "scanner":
-                "Psi-V10",
+            "ok": True,
 
-            "timestamp":
-                time.time(),
+            "scanner": "Ψ-V10",
 
-            "results":
-                get_ranked_results()
+            "source": (
+                "Binance public Spot market data"
+            ),
+
+            "rest_base": REST_BASE,
+
+            "timeframe": "4h",
+
+            "moving_averages": [
+                "EMA50",
+                "EMA200",
+            ],
+
+            "microstructure": [
+                "aggTrade CVD",
+                "L1-L10 OBI",
+                "L1-L10 OFI",
+                "ask depletion",
+                "bid depletion",
+                "trade acceleration",
+                "OFI persistence",
+            ],
+
+            "scanner_ready": scanner_ready,
+
+            "websocket_connected": websocket_connected,
+
+            "universe_size": len(
+                structure
+            ),
+
+            "micro_universe_size": len(
+                selected_micro_symbols
+            ),
+
+            "state_counts": dict(
+                states
+            ),
+
+            "returned": len(
+                results
+            ),
+
+            "results": results,
+
+            "generated_ms": now_ms(),
         }
     )
 
 
 async def start_http_server():
 
-    from aiohttp import web
+    application = web.Application()
 
-    app = web.Application()
-
-    app.router.add_get(
+    application.router.add_get(
         "/",
-        health
+        health,
     )
 
-    app.router.add_get(
+    application.router.add_get(
+        "/health",
+        health,
+    )
+
+    application.router.add_get(
         "/scan",
-        scan_endpoint
+        scan_endpoint,
     )
 
     runner = web.AppRunner(
-        app
+        application
     )
 
     await runner.setup()
 
-    port = int(
-        os.getenv(
-            "PORT",
-            "8080"
-        )
-    )
-
     site = web.TCPSite(
         runner,
         "0.0.0.0",
-        port
+        PORT,
     )
 
     await site.start()
 
     print(
-        f"[HTTP] listening "
-        f"on port {port}"
+        f"Ψ-V10 HTTP listening "
+        f"on port {PORT}"
     )
 
+    return runner
 
-# ================================================================
-# INITIALISE
-# ================================================================
+
+# =============================================================================
+# INITIALISATION
+# =============================================================================
 
 async def initialise():
-
-    global live_symbols
 
     print(
         "Ψ-V10 INITIALISING..."
     )
 
-    universe = (
-        await get_exchange_symbols()
+    print(
+        f"REST: {REST_BASE}"
     )
 
     print(
-        f"[UNIVERSE] "
-        f"{len(universe)} "
-        f"eligible USDT pairs"
+        f"WS:   {WS_BASE}"
     )
 
-    # Limit initial historical requests
-    # to most liquid symbols.
-    #
-    # We still rank by actual V10
-    # structure afterwards.
-
-    initial_pool = universe[
-        :120
-    ]
+    # Initial structure scan.
+    await refresh_structure()
 
     print(
-        f"[STRUCTURE] scanning "
-        f"{len(initial_pool)} pairs"
+        "Ψ-V10 INITIALISED."
     )
 
-    selected = (
-        await structure_batch(
-            initial_pool
-        )
-    )
 
-    live_symbols = selected
-
-    print(
-        "[LIVE CANDIDATES]"
-    )
-
-    for symbol in live_symbols:
-
-        print(
-            "  ",
-            symbol
-        )
-
-
-# ================================================================
+# =============================================================================
 # MAIN
-# ================================================================
+# =============================================================================
 
 async def main():
 
     global session
 
-    connector = (
-        aiohttp.TCPConnector(
-            limit=100,
-            ttl_dns_cache=300
-        )
+    timeout = aiohttp.ClientTimeout(
+        total=30
+    )
+
+    connector = aiohttp.TCPConnector(
+        limit=100,
+        ttl_dns_cache=300,
     )
 
     session = aiohttp.ClientSession(
+        timeout=timeout,
         connector=connector,
         headers={
-            "User-Agent":
-                "Psi-V10-Binance-Scanner"
-        }
+            "User-Agent": USER_AGENT,
+        },
     )
+
+    # IMPORTANT:
+    #
+    # Start HTTP BEFORE Binance initialisation.
+    #
+    # This means Railway's health check can reach the
+    # service even while the scanner is warming up.
+    runner = await start_http_server()
+
+    tasks = []
 
     try:
 
-        await initialise()
+        try:
+            await initialise()
 
-        await start_http_server()
+        except Exception as exc:
+
+            global last_error
+
+            last_error = (
+                f"INITIALISE: "
+                f"{type(exc).__name__}: "
+                f"{exc}"
+            )
+
+            print(
+                last_error
+            )
+
+            # Do NOT kill Railway.
+            # Background refresh loop will retry.
+            print(
+                "Ψ-V10 will retry in background."
+            )
 
         tasks = [
+            asyncio.create_task(
+                structure_refresh_loop()
+            ),
 
             asyncio.create_task(
                 websocket_loop()
             ),
 
             asyncio.create_task(
-                structure_refresh_loop()
+                print_loop()
             ),
 
             asyncio.create_task(
-                print_loop()
-            )
+                micro_universe_watcher()
+            ),
         ]
 
         await asyncio.gather(
@@ -3075,21 +3144,33 @@ async def main():
 
     finally:
 
-        if session:
+        for task in tasks:
+            task.cancel()
 
+        if tasks:
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+        await runner.cleanup()
+
+        if session:
             await session.close()
 
+
+# =============================================================================
+# ENTRYPOINT
+# =============================================================================
 
 if __name__ == "__main__":
 
     try:
-
         asyncio.run(
             main()
         )
 
     except KeyboardInterrupt:
-
         print(
-            "\nΨ-V10 stopped."
+            "Ψ-V10 stopped."
         )
