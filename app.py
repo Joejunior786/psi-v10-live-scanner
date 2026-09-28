@@ -1,1445 +1,3095 @@
-import os
+# ================================================================
+# Ψ-V10 BINANCE LIVE SCANNER
+# ================================================================
+#
+# LIVE DATA:
+#   Binance Spot REST + WebSocket
+#
+# CORE:
+#   - Binance USDT universe
+#   - 4H EMA50 / EMA200
+#   - ATR
+#   - Relative volume acceleration
+#   - Range compression
+#   - Breakout distance
+#   - Anti-chase filter
+#
+# LIVE MICROSTRUCTURE:
+#   - Sequential local order book
+#   - L1-L10 depth
+#   - Order Flow Imbalance (OFI)
+#   - Order Book Imbalance (OBI)
+#   - Rolling aggressive-buy CVD
+#   - Ask liquidity depletion
+#   - Bid liquidity depletion
+#   - Persistence
+#
+# OUTPUT:
+#   BUY
+#   PRE-IGNITION
+#   WATCH
+#   REJECT
+#
+# IMPORTANT:
+#   Scanner only. No automatic order execution.
+#
+# ================================================================
+
 import asyncio
-import statistics
+import json
+import math
+import os
+import time
+from collections import defaultdict, deque
+from statistics import mean
 
-import httpx
-from fastapi import FastAPI, Query
-from fastmcp import FastMCP
+import aiohttp
 
 
-app = FastAPI(
-    title="Psi V10 Live Scanner",
-    version="2.3.0",
-    description="Psi-V10 Binance EMA + Spot Microstructure Scanner",
+# ================================================================
+# CONFIG
+# ================================================================
+
+REST_BASE = os.getenv(
+    "BINANCE_REST",
+    "https://api.binance.com"
 )
 
+WS_BASE = os.getenv(
+    "BINANCE_WS",
+    "wss://stream.binance.com:9443/ws"
+)
 
-# ============================================================
-# CONFIG
-# ============================================================
+QUOTE_ASSET = "USDT"
 
-BASES = [
-    url.strip().rstrip("/")
-    for url in os.getenv(
-        "BINANCE_BASE_URLS",
-        (
-            "https://data-api.binance.vision,"
-            "https://api1.binance.com,"
-            "https://api2.binance.com,"
-            "https://api3.binance.com,"
-            "https://api4.binance.com,"
-            "https://api.binance.com"
-        ),
-    ).split(",")
-    if url.strip()
-]
+# How many high-liquidity pairs receive full live microstructure
+MAX_LIVE_SYMBOLS = int(
+    os.getenv("MAX_LIVE_SYMBOLS", "30")
+)
 
-CONCURRENCY = int(os.getenv("CONCURRENCY", "12"))
-MIN_QUOTE_VOLUME = float(os.getenv("MIN_QUOTE_VOLUME", "1000000"))
+# Scanner returns this many
+TOP_RESULTS = int(
+    os.getenv("TOP_RESULTS", "10")
+)
 
-# Only strongest preliminary candidates get expensive microstructure calls
-MICRO_SHORTLIST = int(os.getenv("MICRO_SHORTLIST", "20"))
+# Minimum 24h USDT quote volume
+MIN_QUOTE_VOLUME = float(
+    os.getenv("MIN_QUOTE_VOLUME", "5000000")
+)
 
-SEM = asyncio.Semaphore(CONCURRENCY)
+# 4H historical candles
+KLINE_LIMIT = 260
+
+# Book
+BOOK_LEVELS = 10
+SNAPSHOT_LIMIT = 1000
+
+# Rolling microstructure window
+MICRO_WINDOW_SEC = 60
+
+# Need some data before trusting microstructure
+MIN_BOOK_SAMPLES = 10
+MIN_TRADE_SAMPLES = 10
+
+# Refresh structural analysis
+STRUCTURE_REFRESH_SEC = 60
+
+# Full universe refresh
+UNIVERSE_REFRESH_SEC = 1800
+
+# Scanner output refresh
+PRINT_INTERVAL_SEC = 15
+
+# EMA proximity
+EMA_NEAR_PCT = 2.0
+
+# Anti-chase
+MAX_ATR_EXTENSION = 2.25
+MAX_4H_PUMP_PCT = 8.0
+
+# Breakout proximity
+MAX_BREAKOUT_DISTANCE_PCT = 2.5
+
+# Micro thresholds
+MIN_CVD_RATIO = 0.10
+MIN_OFI = 0.03
+MIN_OBI = 0.08
+MIN_ASK_DEPLETION = 0.05
+
+# V10
+BUY_MIN_CONFIRMATIONS = 5
+PRE_MIN_CONFIRMATIONS = 4
 
 
-STABLE_BASES = {
-    "U", "USDC", "FDUSD", "TUSD", "USDP", "DAI",
-    "USDE", "USD1", "RLUSD", "PYUSD", "EUR", "EURC",
-    "AEUR", "EURI", "BUSD", "USDS", "XUSD", "BFUSD",
+# ================================================================
+# OPTIONAL SYMBOL FILTER
+# ================================================================
+#
+# If you have a confirmed Binance-UK symbol allowlist, place it in:
+#
+# UK_SYMBOLS=BTCUSDT,ETHUSDT,XRPUSDT,...
+#
+# If absent, scanner uses active Binance Spot USDT pairs.
+#
+# ================================================================
+
+UK_SYMBOLS_ENV = os.getenv(
+    "UK_SYMBOLS",
+    ""
+).strip()
+
+UK_SYMBOLS = {
+    x.strip().upper()
+    for x in UK_SYMBOLS_ENV.split(",")
+    if x.strip()
 }
 
 
-# ============================================================
-# STABLECOIN DETECTOR
-# ============================================================
+# ================================================================
+# GLOBAL STATE
+# ================================================================
 
-def looks_like_stablecoin(ticker):
+session = None
 
-    try:
-        last_price = float(ticker.get("lastPrice", 0) or 0)
-        high_price = float(ticker.get("highPrice", 0) or 0)
-        low_price = float(ticker.get("lowPrice", 0) or 0)
+symbol_meta = {}
+structure = {}
 
-        if last_price <= 0 or high_price <= 0 or low_price <= 0:
-            return False
+books = {}
+book_locks = defaultdict(asyncio.Lock)
 
-        near_one = 0.985 <= last_price <= 1.015
+depth_buffers = defaultdict(deque)
 
-        range_pct = (
-            (high_price - low_price)
-            / last_price
-            * 100
-        )
+micro = defaultdict(
+    lambda: {
+        "trades": deque(),
+        "book_samples": deque(),
 
-        return near_one and range_pct <= 0.75
+        "buy_quote": 0.0,
+        "sell_quote": 0.0,
 
-    except (TypeError, ValueError, ZeroDivisionError):
-        return False
+        "trade_count": 0,
 
+        "ofi": 0.0,
+        "obi": 0.0,
 
-# ============================================================
-# BINANCE API
-# ============================================================
+        "ask_depletion": 0.0,
+        "bid_depletion": 0.0,
 
-async def api_get(client, path, params=None):
+        "book_samples_count": 0,
 
-    last_error = None
+        "last_trade_ts": 0,
+        "last_book_ts": 0,
+    }
+)
 
-    async with SEM:
+live_symbols = []
 
-        for base in BASES:
-
-            try:
-                response = await client.get(
-                    base + path,
-                    params=params,
-                    timeout=20,
-                )
-
-                response.raise_for_status()
-                return response.json()
-
-            except (
-                httpx.HTTPStatusError,
-                httpx.RequestError,
-            ) as exc:
-                last_error = exc
-
-    if last_error:
-        raise last_error
-
-    raise RuntimeError("No Binance market-data host available")
+last_universe_refresh = 0
 
 
-# ============================================================
-# EMA
-# ============================================================
+# ================================================================
+# HTTP
+# ================================================================
+
+async def api_get(path, params=None, timeout=15):
+
+    url = REST_BASE + path
+
+    async with session.get(
+        url,
+        params=params,
+        timeout=aiohttp.ClientTimeout(total=timeout)
+    ) as r:
+
+        if r.status == 429:
+            retry = float(
+                r.headers.get("Retry-After", "2")
+            )
+
+            await asyncio.sleep(
+                max(retry, 1)
+            )
+
+            raise RuntimeError(
+                "Binance rate limit 429"
+            )
+
+        if r.status != 200:
+
+            text = await r.text()
+
+            raise RuntimeError(
+                f"Binance HTTP {r.status}: {text}"
+            )
+
+        return await r.json()
+
+
+# ================================================================
+# BASIC MATH
+# ================================================================
+
+def safe_div(a, b):
+
+    if not b:
+        return 0.0
+
+    return a / b
+
+
+def pct_distance(price, reference):
+
+    if reference <= 0:
+        return 999.0
+
+    return (
+        (price - reference)
+        / reference
+    ) * 100.0
+
 
 def ema(values, period):
 
     if len(values) < period:
         return None
 
-    current = sum(values[:period]) / period
-    multiplier = 2.0 / (period + 1.0)
+    alpha = 2.0 / (
+        period + 1.0
+    )
 
-    for price in values[period:]:
-        current = (
-            (price - current)
-            * multiplier
-            + current
+    result = mean(
+        values[:period]
+    )
+
+    for value in values[period:]:
+
+        result = (
+            value * alpha
+            +
+            result * (1.0 - alpha)
         )
 
-    return current
+    return result
 
 
-# ============================================================
-# ATR
-# ============================================================
+def true_ranges(highs, lows, closes):
 
-def atr(rows, period=14):
+    output = []
 
-    if len(rows) < period + 1:
-        return None
+    for i in range(1, len(closes)):
 
-    values = []
-
-    for i in range(1, len(rows)):
-
-        high = float(rows[i][2])
-        low = float(rows[i][3])
-        prev_close = float(rows[i - 1][4])
-
-        values.append(
+        output.append(
             max(
-                high - low,
-                abs(high - prev_close),
-                abs(low - prev_close),
+                highs[i] - lows[i],
+                abs(
+                    highs[i]
+                    - closes[i - 1]
+                ),
+                abs(
+                    lows[i]
+                    - closes[i - 1]
+                )
             )
         )
 
-    return sum(values[-period:]) / period
+    return output
 
 
-# ============================================================
-# HELPERS
-# ============================================================
+def atr(
+    highs,
+    lows,
+    closes,
+    period=14
+):
 
-def pct_distance(price, level):
+    tr = true_ranges(
+        highs,
+        lows,
+        closes
+    )
 
-    if not level:
+    if len(tr) < period:
         return None
 
-    return ((price - level) / level) * 100
-
-
-def proximity(price, level, atr_value):
-
-    if not level:
-        return {
-            "pct": None,
-            "atr": None,
-            "near": False,
-        }
-
-    distance = abs(price - level)
-
-    pct = abs(
-        pct_distance(price, level)
+    return mean(
+        tr[-period:]
     )
 
-    atr_distance = (
-        distance / atr_value
-        if atr_value
-        else None
-    )
 
-    near = (
-        pct <= 0.50
-        or (
-            atr_distance is not None
-            and atr_distance <= 1.0
+# ================================================================
+# EXCHANGE UNIVERSE
+# ================================================================
+
+async def get_exchange_symbols():
+
+    info, tickers = await asyncio.gather(
+        api_get(
+            "/api/v3/exchangeInfo"
+        ),
+        api_get(
+            "/api/v3/ticker/24hr"
         )
     )
 
-    return {
-        "pct": pct,
-        "atr": atr_distance,
-        "near": near,
+    ticker_map = {
+        x["symbol"]: x
+        for x in tickers
     }
 
+    candidates = []
 
-# ============================================================
-# CANDLE METRICS
-# ============================================================
+    for item in info["symbols"]:
 
-def candle_metrics(rows):
+        symbol = item["symbol"]
 
-    closed = rows[:-1]
+        if (
+            item.get("status") != "TRADING"
+        ):
+            continue
 
-    if len(closed) < 200:
-        return None
+        if (
+            item.get("quoteAsset")
+            != QUOTE_ASSET
+        ):
+            continue
 
-    closes = [
-        float(row[4])
-        for row in closed
+        if not item.get(
+            "isSpotTradingAllowed",
+            True
+        ):
+            continue
+
+        # Optional externally verified
+        # Binance UK allowlist
+        if (
+            UK_SYMBOLS
+            and symbol not in UK_SYMBOLS
+        ):
+            continue
+
+        ticker = ticker_map.get(
+            symbol
+        )
+
+        if not ticker:
+            continue
+
+        try:
+
+            quote_volume = float(
+                ticker.get(
+                    "quoteVolume",
+                    0
+                )
+            )
+
+        except Exception:
+            continue
+
+        if (
+            quote_volume
+            < MIN_QUOTE_VOLUME
+        ):
+            continue
+
+        candidates.append(
+            (
+                symbol,
+                quote_volume
+            )
+        )
+
+        symbol_meta[symbol] = {
+            "quote_volume":
+                quote_volume,
+
+            "base_asset":
+                item.get(
+                    "baseAsset"
+                )
+        }
+
+    candidates.sort(
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return [
+        x[0]
+        for x in candidates
     ]
 
-    volumes = [
-        float(row[5])
-        for row in closed
-    ]
 
-    last = closed[-1]
+# ================================================================
+# 4H STRUCTURAL ENGINE
+# ================================================================
 
-    atr14 = atr(closed, 14)
+async def load_4h_structure(symbol):
 
-    ema7_value = ema(closes, 7)
-    ema50_value = ema(closes, 50)
-    ema200_value = ema(closes, 200)
+    try:
 
-    avg20vol = sum(volumes[-20:]) / 20
-
-    volume_acceleration = (
-        volumes[-1] / avg20vol
-        if avg20vol
-        else 0
-    )
-
-    total_volume = float(last[5])
-    taker_buy = float(last[9])
-
-    candle_taker_buy_ratio = (
-        taker_buy / total_volume
-        if total_volume
-        else 0
-    )
-
-    ranges = [
-        float(row[2]) - float(row[3])
-        for row in closed[-20:]
-    ]
-
-    recent_range = statistics.mean(ranges[-5:])
-    baseline_range = statistics.mean(ranges)
-
-    compression = (
-        recent_range / baseline_range
-        if baseline_range
-        else 1
-    )
-
-    high20 = max(
-        float(row[2])
-        for row in closed[-20:]
-    )
-
-    breakout_distance = (
-        ((high20 - closes[-1]) / closes[-1]) * 100
-        if closes[-1]
-        else 999
-    )
-
-    return {
-        "atr": atr14,
-        "ema7": ema7_value,
-        "ema50": ema50_value,
-        "ema200": ema200_value,
-
-        "volume_acceleration": volume_acceleration,
-        "candle_taker_buy_ratio": candle_taker_buy_ratio,
-        "trade_count": int(last[8]),
-
-        "compression_ratio": compression,
-        "breakout_distance_pct": breakout_distance,
-
-        "last_close": closes[-1],
-        "last_low": float(last[3]),
-        "last_high": float(last[2]),
-    }
-
-
-def reclaimed_ema(metrics, level, prox):
-
-    if not level:
-        return False
-
-    return (
-        prox["near"]
-        and metrics["last_low"] <= level
-        and metrics["last_close"] >= level
-    )
-
-
-# ============================================================
-# PRELIMINARY EMA ANALYSIS
-# ============================================================
-
-async def analyse_preliminary(
-    client,
-    symbol,
-    quote_volume,
-):
-
-    rows4, rows1 = await asyncio.gather(
-
-        api_get(
-            client,
+        data = await api_get(
             "/api/v3/klines",
             {
                 "symbol": symbol,
                 "interval": "4h",
-                "limit": 1000,
-            },
-        ),
+                "limit": KLINE_LIMIT
+            }
+        )
 
-        api_get(
-            client,
-            "/api/v3/klines",
-            {
-                "symbol": symbol,
-                "interval": "1h",
-                "limit": 1000,
-            },
-        ),
-    )
+        if len(data) < 210:
+            return None
 
-    m4 = candle_metrics(rows4)
-    m1 = candle_metrics(rows1)
+        opens = [
+            float(x[1])
+            for x in data
+        ]
 
-    if not m4 or not m1:
-        return None
+        highs = [
+            float(x[2])
+            for x in data
+        ]
 
-    price = float(rows4[-1][4])
+        lows = [
+            float(x[3])
+            for x in data
+        ]
 
-    p4_50 = proximity(price, m4["ema50"], m4["atr"])
-    p4_200 = proximity(price, m4["ema200"], m4["atr"])
+        closes = [
+            float(x[4])
+            for x in data
+        ]
 
-    p1_50 = proximity(price, m1["ema50"], m1["atr"])
-    p1_200 = proximity(price, m1["ema200"], m1["atr"])
+        volumes = [
+            float(x[5])
+            for x in data
+        ]
 
-    reclaim50 = reclaimed_ema(
-        m4,
-        m4["ema50"],
-        p4_50,
-    )
+        quote_volumes = [
+            float(x[7])
+            for x in data
+        ]
 
-    reclaim200 = reclaimed_ema(
-        m4,
-        m4["ema200"],
-        p4_200,
-    )
+        price = closes[-1]
 
-    reclaim = reclaim50 or reclaim200
+        ema50 = ema(
+            closes,
+            50
+        )
 
-    confirmations = {
+        ema200 = ema(
+            closes,
+            200
+        )
 
-        "4h_ema50_near":
-            p4_50["near"],
+        current_atr = atr(
+            highs,
+            lows,
+            closes,
+            14
+        )
 
-        "4h_ema200_near":
-            p4_200["near"],
+        if (
+            ema50 is None
+            or ema200 is None
+            or current_atr is None
+        ):
+            return None
 
-        "4h_ema50_reclaim":
-            reclaim50,
+        # ----------------------------
+        # EMA distance
+        # ----------------------------
 
-        "4h_ema200_reclaim":
-            reclaim200,
+        ema50_dist = abs(
+            pct_distance(
+                price,
+                ema50
+            )
+        )
 
-        "1h_ema50_near":
-            p1_50["near"],
+        ema200_dist = abs(
+            pct_distance(
+                price,
+                ema200
+            )
+        )
 
-        "1h_ema200_near":
-            p1_200["near"],
+        nearest_ema_dist = min(
+            ema50_dist,
+            ema200_dist
+        )
 
-        "volume_acceleration":
-            m4["volume_acceleration"] >= 1.20,
+        nearest_ema = (
+            "EMA50"
+            if ema50_dist <= ema200_dist
+            else "EMA200"
+        )
 
-        "candle_aggressive_buy_proxy":
-            m4["candle_taker_buy_ratio"] >= 0.55,
+        # ----------------------------
+        # ATR-adjusted EMA proximity
+        # ----------------------------
 
-        "range_compression":
-            m4["compression_ratio"] <= 0.80,
+        ema50_atr_dist = (
+            abs(price - ema50)
+            / current_atr
+        )
 
-        "near_20bar_breakout":
-            0 <= m4["breakout_distance_pct"] <= 2.0,
+        ema200_atr_dist = (
+            abs(price - ema200)
+            / current_atr
+        )
 
-        "above_4h_ema50":
-            price >= m4["ema50"],
+        nearest_ema_atr = min(
+            ema50_atr_dist,
+            ema200_atr_dist
+        )
 
-        "above_4h_ema200":
-            price >= m4["ema200"],
+        ema_near = (
+            nearest_ema_dist
+            <= EMA_NEAR_PCT
+            or nearest_ema_atr
+            <= 1.0
+        )
 
-        "ema7_above_ema50":
-            m4["ema7"] >= m4["ema50"],
-    }
+        # ----------------------------
+        # Trend
+        # ----------------------------
 
-    count = sum(
-        bool(v)
-        for v in confirmations.values()
-    )
+        bullish_ema_structure = (
+            price > ema50
+            and ema50 > ema200
+        )
 
-    extension_atr = (
-        (price - m4["ema50"])
-        / m4["atr"]
-        if m4["atr"]
-        else 0
-    )
+        ema_reclaim = (
+            closes[-2] <= ema50
+            and closes[-1] > ema50
+        ) or (
+            closes[-2] <= ema200
+            and closes[-1] > ema200
+        )
 
-    anti_chase = extension_atr <= 2.0
+        # ----------------------------
+        # Relative volume
+        # ----------------------------
 
-    four_hour_near = (
-        p4_50["near"]
-        or p4_200["near"]
-    )
+        recent_qv = quote_volumes[-1]
 
-    one_hour_near = (
-        p1_50["near"]
-        or p1_200["near"]
-    )
+        baseline_qv = mean(
+            quote_volumes[-21:-1]
+        )
 
-    momentum = (
-        confirmations["volume_acceleration"]
-        or confirmations["candle_aggressive_buy_proxy"]
-    )
+        relative_volume = safe_div(
+            recent_qv,
+            baseline_qv
+        )
 
-    structure = (
-        confirmations["range_compression"]
-        or confirmations["near_20bar_breakout"]
-    )
+        # Faster acceleration
+        qv_3 = mean(
+            quote_volumes[-3:]
+        )
 
-    # IMPORTANT:
-    # Preliminary layer cannot issue final BUY anymore.
+        qv_prev_10 = mean(
+            quote_volumes[-13:-3]
+        )
 
-    if not anti_chase:
-        preliminary_state = "EXTENDED"
+        volume_acceleration = safe_div(
+            qv_3,
+            qv_prev_10
+        )
 
-    elif (
-        four_hour_near
-        and reclaim
-        and count >= 5
-        and momentum
-        and structure
-    ):
-        preliminary_state = "PRE_IGNITION"
+        # ----------------------------
+        # Compression
+        # ----------------------------
 
-    elif (
-        four_hour_near
-        and count >= 4
-        and (momentum or structure)
-    ):
-        preliminary_state = "PRE_IGNITION"
+        ranges = [
+            highs[i] - lows[i]
+            for i in range(
+                len(highs)
+            )
+        ]
 
-    elif one_hour_near or four_hour_near:
-        preliminary_state = "WATCH"
+        recent_range = mean(
+            ranges[-4:]
+        )
 
-    else:
-        preliminary_state = "OBSERVE"
+        baseline_range = mean(
+            ranges[-24:-4]
+        )
 
-    score = count * 8
+        compression_ratio = safe_div(
+            recent_range,
+            baseline_range
+        )
 
-    if reclaim50:
-        score += 10
+        compression = (
+            compression_ratio
+            < 0.75
+        )
 
-    if reclaim200:
-        score += 14
+        # ----------------------------
+        # Local breakout
+        # ----------------------------
 
-    if confirmations["volume_acceleration"]:
-        score += min(
-            m4["volume_acceleration"],
-            2.5,
-        ) * 5
+        resistance = max(
+            highs[-21:-1]
+        )
 
-    if confirmations["range_compression"]:
-        score += 7
+        breakout_distance = (
+            (
+                resistance - price
+            )
+            / price
+            * 100.0
+        )
 
-    if confirmations["near_20bar_breakout"]:
-        score += 8
+        breakout = (
+            price > resistance
+        )
 
-    if not anti_chase:
-        score -= 20
+        near_breakout = (
+            -1.0
+            <= breakout_distance
+            <= MAX_BREAKOUT_DISTANCE_PCT
+        )
 
-    return {
-        "symbol": symbol,
-        "price": price,
-        "quote_volume_24h": quote_volume,
+        # ----------------------------
+        # 4H candle movement
+        # ----------------------------
 
-        "state": preliminary_state,
-        "preliminary_score": round(score, 2),
+        candle_change = (
+            (
+                closes[-1]
+                - opens[-1]
+            )
+            / opens[-1]
+            * 100.0
+        )
 
-        "confirmations": count,
-        "confirmation_map": confirmations,
+        # ----------------------------
+        # Anti chase
+        # ----------------------------
 
-        "ema_reclaim": reclaim,
+        atr_extension = (
+            abs(
+                price - ema50
+            )
+            / current_atr
+        )
 
-        "momentum_confirmation": momentum,
-        "structure_confirmation": structure,
+        anti_chase = (
+            atr_extension
+            > MAX_ATR_EXTENSION
+            or candle_change
+            > MAX_4H_PUMP_PCT
+        )
 
-        "anti_chase_ok": anti_chase,
+        result = {
 
-        "4h": {
-            "ema7": m4["ema7"],
-            "ema50": m4["ema50"],
-            "ema200": m4["ema200"],
+            "symbol":
+                symbol,
+
+            "price":
+                price,
+
+            "ema50":
+                ema50,
+
+            "ema200":
+                ema200,
 
             "ema50_distance_pct":
-                pct_distance(price, m4["ema50"]),
+                ema50_dist,
 
             "ema200_distance_pct":
-                pct_distance(price, m4["ema200"]),
+                ema200_dist,
 
-            "ema50_near":
-                p4_50["near"],
+            "nearest_ema":
+                nearest_ema,
 
-            "ema200_near":
-                p4_200["near"],
+            "nearest_ema_distance_pct":
+                nearest_ema_dist,
 
-            "ema50_reclaim":
-                reclaim50,
+            "nearest_ema_atr":
+                nearest_ema_atr,
 
-            "ema200_reclaim":
-                reclaim200,
+            "ema_near":
+                ema_near,
 
-            "atr14":
-                m4["atr"],
+            "ema_reclaim":
+                ema_reclaim,
 
-            "volume_vs_20avg":
-                m4["volume_acceleration"],
+            "bullish_ema_structure":
+                bullish_ema_structure,
 
-            "candle_taker_buy_ratio":
-                m4["candle_taker_buy_ratio"],
+            "atr":
+                current_atr,
+
+            "relative_volume":
+                relative_volume,
+
+            "volume_acceleration":
+                volume_acceleration,
 
             "compression_ratio":
-                m4["compression_ratio"],
+                compression_ratio,
+
+            "compression":
+                compression,
+
+            "resistance":
+                resistance,
 
             "breakout_distance_pct":
-                m4["breakout_distance_pct"],
-        },
+                breakout_distance,
 
-        "1h": {
-            "ema7": m1["ema7"],
-            "ema50": m1["ema50"],
-            "ema200": m1["ema200"],
+            "breakout":
+                breakout,
 
-            "ema50_near":
-                p1_50["near"],
+            "near_breakout":
+                near_breakout,
 
-            "ema200_near":
-                p1_200["near"],
-        },
-    }
+            "4h_change_pct":
+                candle_change,
 
+            "atr_extension":
+                atr_extension,
 
-# ============================================================
-# REAL ORDER BOOK MICROSTRUCTURE
-# ============================================================
+            "anti_chase":
+                anti_chase,
 
-def analyse_order_book(depth):
+            "updated":
+                time.time()
+        }
 
-    bids = depth.get("bids", [])[:10]
-    asks = depth.get("asks", [])[:10]
+        structure[symbol] = result
 
-    if not bids or not asks:
+        return result
+
+    except Exception as e:
+
+        print(
+            f"[STRUCTURE ERROR] "
+            f"{symbol}: {e}"
+        )
+
         return None
 
-    bid_notional = sum(
-        float(price) * float(qty)
-        for price, qty in bids
+
+# ================================================================
+# ORDER BOOK HELPERS
+# ================================================================
+
+def sorted_top10(book):
+
+    bids = sorted(
+        book["bids"].items(),
+        key=lambda x: x[0],
+        reverse=True
+    )[:BOOK_LEVELS]
+
+    asks = sorted(
+        book["asks"].items(),
+        key=lambda x: x[0]
+    )[:BOOK_LEVELS]
+
+    return bids, asks
+
+
+def depth_notional(levels):
+
+    return sum(
+        price * qty
+        for price, qty in levels
     )
 
-    ask_notional = sum(
-        float(price) * float(qty)
-        for price, qty in asks
+
+def calculate_obi(
+    bids,
+    asks
+):
+
+    bid_depth = depth_notional(
+        bids
     )
 
-    total = bid_notional + ask_notional
-
-    obi = (
-        bid_notional / total
-        if total
-        else 0.5
+    ask_depth = depth_notional(
+        asks
     )
 
-    best_bid = float(bids[0][0])
-    best_ask = float(asks[0][0])
-
-    midpoint = (
-        best_bid + best_ask
-    ) / 2
-
-    spread_pct = (
-        ((best_ask - best_bid) / midpoint) * 100
-        if midpoint
-        else 999
+    total = (
+        bid_depth
+        +
+        ask_depth
     )
 
-    depth_ratio = (
-        bid_notional / ask_notional
-        if ask_notional
-        else 999
+    return safe_div(
+        bid_depth - ask_depth,
+        total
+    )
+
+
+def calculate_ofi(
+    previous_bids,
+    previous_asks,
+    current_bids,
+    current_asks
+):
+
+    prev_bid = dict(
+        previous_bids
+    )
+
+    prev_ask = dict(
+        previous_asks
+    )
+
+    curr_bid = dict(
+        current_bids
+    )
+
+    curr_ask = dict(
+        current_asks
+    )
+
+    bid_flow = 0.0
+    ask_flow = 0.0
+
+    for price in (
+        set(prev_bid)
+        | set(curr_bid)
+    ):
+
+        old = prev_bid.get(
+            price,
+            0.0
+        )
+
+        new = curr_bid.get(
+            price,
+            0.0
+        )
+
+        bid_flow += (
+            new - old
+        ) * price
+
+    for price in (
+        set(prev_ask)
+        | set(curr_ask)
+    ):
+
+        old = prev_ask.get(
+            price,
+            0.0
+        )
+
+        new = curr_ask.get(
+            price,
+            0.0
+        )
+
+        # Removing asks =
+        # positive pressure
+        ask_flow += (
+            old - new
+        ) * price
+
+    total_depth = (
+        depth_notional(
+            current_bids
+        )
+        +
+        depth_notional(
+            current_asks
+        )
+    )
+
+    return safe_div(
+        bid_flow + ask_flow,
+        total_depth
+    )
+
+
+def depletion(
+    previous,
+    current
+):
+
+    if previous <= 0:
+        return 0.0
+
+    return max(
+        0.0,
+        (
+            previous
+            - current
+        )
+        / previous
+    )
+
+
+# ================================================================
+# MICRO SAMPLE
+# ================================================================
+
+def record_book_sample(
+    symbol,
+    previous_bids,
+    previous_asks,
+    current_bids,
+    current_asks,
+    timestamp
+):
+
+    m = micro[symbol]
+
+    ofi = calculate_ofi(
+        previous_bids,
+        previous_asks,
+        current_bids,
+        current_asks
+    )
+
+    obi = calculate_obi(
+        current_bids,
+        current_asks
+    )
+
+    prev_bid_depth = (
+        depth_notional(
+            previous_bids
+        )
+    )
+
+    prev_ask_depth = (
+        depth_notional(
+            previous_asks
+        )
+    )
+
+    curr_bid_depth = (
+        depth_notional(
+            current_bids
+        )
+    )
+
+    curr_ask_depth = (
+        depth_notional(
+            current_asks
+        )
+    )
+
+    ask_dep = depletion(
+        prev_ask_depth,
+        curr_ask_depth
+    )
+
+    bid_dep = depletion(
+        prev_bid_depth,
+        curr_bid_depth
+    )
+
+    m["ofi"] = ofi
+    m["obi"] = obi
+
+    m["ask_depletion"] = (
+        ask_dep
+    )
+
+    m["bid_depletion"] = (
+        bid_dep
+    )
+
+    m["last_book_ts"] = (
+        timestamp
+    )
+
+    m["book_samples"].append(
+        {
+            "ts":
+                timestamp,
+
+            "ofi":
+                ofi,
+
+            "obi":
+                obi,
+
+            "ask_depletion":
+                ask_dep,
+
+            "bid_depletion":
+                bid_dep
+        }
+    )
+
+    cutoff = (
+        timestamp
+        - MICRO_WINDOW_SEC
+    )
+
+    while (
+        m["book_samples"]
+        and
+        m["book_samples"][0]["ts"]
+        < cutoff
+    ):
+        m["book_samples"].popleft()
+
+    m["book_samples_count"] += 1
+
+
+# ================================================================
+# AGGTRADE -> CVD
+# ================================================================
+
+def process_agg_trade(
+    symbol,
+    data
+):
+
+    m = micro[symbol]
+
+    timestamp = (
+        data.get(
+            "T",
+            data.get(
+                "E",
+                int(
+                    time.time() * 1000
+                )
+            )
+        )
+        / 1000.0
+    )
+
+    price = float(
+        data["p"]
+    )
+
+    qty = float(
+        data["q"]
+    )
+
+    quote_notional = (
+        price * qty
+    )
+
+    # Binance aggTrade:
+    #
+    # m = True:
+    # buyer is maker
+    # -> aggressive seller
+    #
+    # m = False:
+    # seller is maker
+    # -> aggressive buyer
+
+    aggressive_buy = (
+        not bool(
+            data["m"]
+        )
+    )
+
+    signed_quote = (
+        quote_notional
+        if aggressive_buy
+        else -quote_notional
+    )
+
+    m["trades"].append(
+        (
+            timestamp,
+            signed_quote,
+            quote_notional
+        )
+    )
+
+    cutoff = (
+        timestamp
+        - MICRO_WINDOW_SEC
+    )
+
+    while (
+        m["trades"]
+        and
+        m["trades"][0][0]
+        < cutoff
+    ):
+        m["trades"].popleft()
+
+    buy_quote = 0.0
+    sell_quote = 0.0
+
+    for (
+        _,
+        signed,
+        notional
+    ) in m["trades"]:
+
+        if signed > 0:
+            buy_quote += notional
+        else:
+            sell_quote += notional
+
+    m["buy_quote"] = (
+        buy_quote
+    )
+
+    m["sell_quote"] = (
+        sell_quote
+    )
+
+    m["trade_count"] = len(
+        m["trades"]
+    )
+
+    m["last_trade_ts"] = (
+        timestamp
+    )
+
+
+# ================================================================
+# LOCAL ORDER BOOK SNAPSHOT
+# ================================================================
+
+async def get_depth_snapshot(
+    symbol
+):
+
+    data = await api_get(
+        "/api/v3/depth",
+        {
+            "symbol":
+                symbol,
+
+            "limit":
+                SNAPSHOT_LIMIT
+        }
     )
 
     return {
+
+        "bids": {
+            float(p): float(q)
+            for p, q
+            in data["bids"]
+            if float(q) > 0
+        },
+
+        "asks": {
+            float(p): float(q)
+            for p, q
+            in data["asks"]
+            if float(q) > 0
+        },
+
         "last_update_id":
-            depth.get("lastUpdateId"),
+            int(
+                data["lastUpdateId"]
+            ),
 
-        "levels":
-            10,
-
-        "bid_notional":
-            bid_notional,
-
-        "ask_notional":
-            ask_notional,
-
-        "obi":
-            obi,
-
-        "obi_pct":
-            obi * 100,
-
-        "bid_ask_depth_ratio":
-            depth_ratio,
-
-        "best_bid":
-            best_bid,
-
-        "best_ask":
-            best_ask,
-
-        "spread_pct":
-            spread_pct,
+        "ready":
+            False
     }
 
 
-# ============================================================
-# REAL AGGREGATE TRADE FLOW / CVD
-# ============================================================
+# ================================================================
+# APPLY DEPTH EVENT
+# ================================================================
 
-def trade_flow_metrics(trades):
+def apply_levels(
+    side,
+    updates
+):
 
-    if not trades:
-        return None
+    for price_raw, qty_raw in updates:
 
-    parsed = []
+        price = float(
+            price_raw
+        )
 
-    for trade in trades:
+        qty = float(
+            qty_raw
+        )
 
-        price = float(trade["p"])
-        qty = float(trade["q"])
+        if qty == 0.0:
 
-        notional = price * qty
+            side.pop(
+                price,
+                None
+            )
 
-        # Binance:
-        # m = Was the buyer the maker?
-        #
-        # m=False -> buyer was taker -> aggressive buy
-        # m=True  -> buyer was maker -> seller was taker
-        #            -> aggressive sell
+        else:
 
-        aggressive_buy = not trade["m"]
+            side[price] = qty
 
-        parsed.append({
-            "notional": notional,
-            "buy": aggressive_buy,
-        })
 
-    if not parsed:
-        return None
+def apply_depth_event(
+    symbol,
+    event
+):
 
-    buy_notional = sum(
-        x["notional"]
-        for x in parsed
-        if x["buy"]
+    book = books.get(
+        symbol
     )
 
-    sell_notional = sum(
-        x["notional"]
-        for x in parsed
-        if not x["buy"]
+    if not book:
+        return False
+
+    U = int(
+        event["U"]
     )
 
-    total_notional = (
-        buy_notional
-        + sell_notional
+    u = int(
+        event["u"]
+    )
+
+    last_id = int(
+        book["last_update_id"]
+    )
+
+    # Old event
+    if u <= last_id:
+        return True
+
+    # Gap:
+    # expected local update ID + 1
+    # must fall inside U..u
+    if U > (
+        last_id + 1
+    ):
+
+        return False
+
+    previous_bids, previous_asks = (
+        sorted_top10(
+            book
+        )
+    )
+
+    apply_levels(
+        book["bids"],
+        event.get(
+            "b",
+            []
+        )
+    )
+
+    apply_levels(
+        book["asks"],
+        event.get(
+            "a",
+            []
+        )
+    )
+
+    book["last_update_id"] = u
+    book["ready"] = True
+
+    current_bids, current_asks = (
+        sorted_top10(
+            book
+        )
+    )
+
+    if (
+        previous_bids
+        and previous_asks
+        and current_bids
+        and current_asks
+    ):
+
+        record_book_sample(
+            symbol,
+            previous_bids,
+            previous_asks,
+            current_bids,
+            current_asks,
+            event.get(
+                "E",
+                int(
+                    time.time()
+                    * 1000
+                )
+            )
+            / 1000.0
+        )
+
+    return True
+
+
+# ================================================================
+# RESYNC LOCAL BOOK
+# ================================================================
+
+async def resync_book(
+    symbol
+):
+
+    async with book_locks[
+        symbol
+    ]:
+
+        try:
+
+            snapshot = (
+                await get_depth_snapshot(
+                    symbol
+                )
+            )
+
+            books[symbol] = snapshot
+
+            buffered = list(
+                depth_buffers[
+                    symbol
+                ]
+            )
+
+            depth_buffers[
+                symbol
+            ].clear()
+
+            last_id = snapshot[
+                "last_update_id"
+            ]
+
+            # Remove events already covered
+            buffered = [
+                e
+                for e in buffered
+                if int(e["u"])
+                > last_id
+            ]
+
+            started = False
+
+            for event in buffered:
+
+                U = int(
+                    event["U"]
+                )
+
+                u = int(
+                    event["u"]
+                )
+
+                current_id = books[
+                    symbol
+                ][
+                    "last_update_id"
+                ]
+
+                if not started:
+
+                    if not (
+                        U
+                        <= current_id + 1
+                        <= u
+                    ):
+                        continue
+
+                    started = True
+
+                ok = apply_depth_event(
+                    symbol,
+                    event
+                )
+
+                if not ok:
+
+                    books.pop(
+                        symbol,
+                        None
+                    )
+
+                    return False
+
+            return True
+
+        except Exception as e:
+
+            print(
+                f"[BOOK RESYNC ERROR] "
+                f"{symbol}: {e}"
+            )
+
+            return False
+
+
+# ================================================================
+# DEPTH HANDLER
+# ================================================================
+
+async def process_depth(
+    symbol,
+    event
+):
+
+    depth_buffers[
+        symbol
+    ].append(
+        event
+    )
+
+    # Don't allow unbounded buffer
+    while (
+        len(
+            depth_buffers[
+                symbol
+            ]
+        )
+        > 5000
+    ):
+
+        depth_buffers[
+            symbol
+        ].popleft()
+
+    book = books.get(
+        symbol
+    )
+
+    if book is None:
+
+        await resync_book(
+            symbol
+        )
+
+        return
+
+    async with book_locks[
+        symbol
+    ]:
+
+        book = books.get(
+            symbol
+        )
+
+        if book is None:
+            return
+
+        U = int(
+            event["U"]
+        )
+
+        u = int(
+            event["u"]
+        )
+
+        last_id = int(
+            book[
+                "last_update_id"
+            ]
+        )
+
+        if u <= last_id:
+            return
+
+        if (
+            U > last_id + 1
+        ):
+
+            print(
+                f"[BOOK GAP] "
+                f"{symbol} "
+                f"local={last_id} "
+                f"U={U} "
+                f"u={u}"
+            )
+
+            books.pop(
+                symbol,
+                None
+            )
+
+            need_resync = True
+
+        else:
+
+            apply_depth_event(
+                symbol,
+                event
+            )
+
+            need_resync = False
+
+    if need_resync:
+
+        await resync_book(
+            symbol
+        )
+
+
+# ================================================================
+# MICROSTRUCTURE ANALYSIS
+# ================================================================
+
+def micro_metrics(
+    symbol
+):
+
+    m = micro[symbol]
+
+    trades = list(
+        m["trades"]
+    )
+
+    samples = list(
+        m["book_samples"]
+    )
+
+    if (
+        len(trades)
+        < MIN_TRADE_SAMPLES
+        or
+        len(samples)
+        < MIN_BOOK_SAMPLES
+    ):
+
+        return {
+            "ready":
+                False,
+
+            "reason":
+                "WARMING_UP"
+        }
+
+    buy_quote = (
+        m["buy_quote"]
+    )
+
+    sell_quote = (
+        m["sell_quote"]
+    )
+
+    total_aggressive = (
+        buy_quote
+        +
+        sell_quote
     )
 
     cvd = (
-        buy_notional
-        - sell_notional
+        buy_quote
+        -
+        sell_quote
     )
 
-    buy_ratio = (
-        buy_notional / total_notional
-        if total_notional
-        else 0.5
+    cvd_ratio = safe_div(
+        cvd,
+        total_aggressive
     )
 
-    buy_trades = [
-        x["notional"]
-        for x in parsed
-        if x["buy"]
+    ofis = [
+        x["ofi"]
+        for x in samples
     ]
 
-    sell_trades = [
-        x["notional"]
-        for x in parsed
-        if not x["buy"]
+    obis = [
+        x["obi"]
+        for x in samples
     ]
 
-    avg_buy_size = (
-        sum(buy_trades) / len(buy_trades)
-        if buy_trades
-        else 0
+    ask_deps = [
+        x["ask_depletion"]
+        for x in samples
+    ]
+
+    bid_deps = [
+        x["bid_depletion"]
+        for x in samples
+    ]
+
+    # Recent weighting
+    recent_samples = (
+        samples[-10:]
     )
 
-    avg_sell_size = (
-        sum(sell_trades) / len(sell_trades)
-        if sell_trades
-        else 0
+    recent_ofi = mean(
+        [
+            x["ofi"]
+            for x
+            in recent_samples
+        ]
     )
 
-    # Split aggregate trades into older/recent halves
-    midpoint = max(1, len(parsed) // 2)
+    recent_obi = mean(
+        [
+            x["obi"]
+            for x
+            in recent_samples
+        ]
+    )
 
-    older = parsed[:midpoint]
-    recent = parsed[midpoint:]
+    avg_ofi = mean(
+        ofis
+    )
 
-    def window_cvd(window):
+    avg_obi = mean(
+        obis
+    )
 
-        return sum(
-            x["notional"]
-            if x["buy"]
-            else -x["notional"]
-            for x in window
+    avg_ask_dep = mean(
+        ask_deps
+    )
+
+    avg_bid_dep = mean(
+        bid_deps
+    )
+
+    # Persistence
+    positive_ofi_count = sum(
+        1
+        for x in recent_samples
+        if x["ofi"] > 0
+    )
+
+    ofi_persistence = (
+        safe_div(
+            positive_ofi_count,
+            len(
+                recent_samples
+            )
+        )
+    )
+
+    positive_obi_count = sum(
+        1
+        for x in recent_samples
+        if x["obi"] > 0
+    )
+
+    obi_persistence = (
+        safe_div(
+            positive_obi_count,
+            len(
+                recent_samples
+            )
+        )
+    )
+
+    # Trade velocity comparison
+    now = time.time()
+
+    recent_15 = [
+        x
+        for x in trades
+        if x[0] >= now - 15
+    ]
+
+    prior_45 = [
+        x
+        for x in trades
+        if (
+            now - 60
+            <= x[0]
+            < now - 15
+        )
+    ]
+
+    recent_rate = (
+        len(recent_15)
+        / 15.0
+    )
+
+    prior_rate = (
+        len(prior_45)
+        / 45.0
+    )
+
+    trade_acceleration = (
+        safe_div(
+            recent_rate,
+            prior_rate
+        )
+        if prior_rate > 0
+        else 0.0
+    )
+
+    confirmations = []
+
+    # --------------------------------
+    # 1 CVD
+    # --------------------------------
+
+    if (
+        cvd > 0
+        and
+        cvd_ratio >= MIN_CVD_RATIO
+    ):
+
+        confirmations.append(
+            "CVD_BUY_DOMINANCE"
         )
 
-    old_cvd = window_cvd(older)
-    recent_cvd = window_cvd(recent)
+    # --------------------------------
+    # 2 OFI
+    # --------------------------------
 
-    cvd_accelerating = (
-        recent_cvd > old_cvd
-        and recent_cvd > 0
-    )
+    if (
+        recent_ofi
+        >= MIN_OFI
+    ):
 
-    recent_buy_notional = sum(
-        x["notional"]
-        for x in recent
-        if x["buy"]
-    )
+        confirmations.append(
+            "POSITIVE_OFI"
+        )
 
-    recent_sell_notional = sum(
-        x["notional"]
-        for x in recent
-        if not x["buy"]
-    )
+    # --------------------------------
+    # 3 OFI persistence
+    # --------------------------------
 
-    recent_total = (
-        recent_buy_notional
-        + recent_sell_notional
-    )
+    if (
+        ofi_persistence
+        >= 0.60
+    ):
 
-    recent_buy_ratio = (
-        recent_buy_notional / recent_total
-        if recent_total
-        else 0.5
-    )
+        confirmations.append(
+            "OFI_PERSISTENCE"
+        )
+
+    # --------------------------------
+    # 4 L1-L10 bid imbalance
+    # --------------------------------
+
+    if (
+        recent_obi
+        >= MIN_OBI
+    ):
+
+        confirmations.append(
+            "L1_L10_BID_IMBALANCE"
+        )
+
+    # --------------------------------
+    # 5 OBI persistence
+    # --------------------------------
+
+    if (
+        obi_persistence
+        >= 0.60
+    ):
+
+        confirmations.append(
+            "BOOK_SUPPORT_PERSISTENCE"
+        )
+
+    # --------------------------------
+    # 6 Ask depletion
+    # --------------------------------
+
+    if (
+        avg_ask_dep
+        >= MIN_ASK_DEPLETION
+    ):
+
+        confirmations.append(
+            "ASK_LIQUIDITY_DEPLETION"
+        )
+
+    # --------------------------------
+    # 7 Bid support
+    # --------------------------------
+
+    if (
+        avg_bid_dep
+        < avg_ask_dep
+    ):
+
+        confirmations.append(
+            "BID_SUPPORT_STABLE"
+        )
+
+    # --------------------------------
+    # 8 Trade acceleration
+    # --------------------------------
+
+    if (
+        trade_acceleration
+        >= 1.25
+    ):
+
+        confirmations.append(
+            "TRADE_ACCELERATION"
+        )
 
     return {
-        "aggregate_trade_count":
-            len(parsed),
 
-        "aggressive_buy_notional":
-            buy_notional,
+        "ready":
+            True,
 
-        "aggressive_sell_notional":
-            sell_notional,
-
-        "aggressive_buy_ratio":
-            buy_ratio,
-
-        "spot_cvd_quote":
+        "cvd_quote":
             cvd,
 
-        "older_half_cvd_quote":
-            old_cvd,
+        "cvd_ratio":
+            cvd_ratio,
 
-        "recent_half_cvd_quote":
-            recent_cvd,
+        "buy_quote":
+            buy_quote,
 
-        "cvd_accelerating":
-            cvd_accelerating,
+        "sell_quote":
+            sell_quote,
 
-        "recent_aggressive_buy_ratio":
-            recent_buy_ratio,
+        "avg_ofi":
+            avg_ofi,
 
-        "average_aggressive_buy_size":
-            avg_buy_size,
+        "recent_ofi":
+            recent_ofi,
 
-        "average_aggressive_sell_size":
-            avg_sell_size,
+        "ofi_persistence":
+            ofi_persistence,
 
-        "buy_trade_size_dominance":
-            avg_buy_size > avg_sell_size,
+        "avg_obi":
+            avg_obi,
+
+        "recent_obi":
+            recent_obi,
+
+        "obi_persistence":
+            obi_persistence,
+
+        "ask_depletion":
+            avg_ask_dep,
+
+        "bid_depletion":
+            avg_bid_dep,
+
+        "trade_acceleration":
+            trade_acceleration,
+
+        "trade_count":
+            len(trades),
+
+        "book_sample_count":
+            len(samples),
+
+        "confirmations":
+            confirmations,
+
+        "micro_score":
+            len(
+                confirmations
+            )
     }
 
 
-# ============================================================
-# MICROSTRUCTURE ENRICHMENT
-# ============================================================
+# ================================================================
+# V10 DECISION ENGINE
+# ================================================================
 
-async def enrich_microstructure(client, candidate):
+def evaluate_symbol(
+    symbol
+):
 
-    symbol = candidate["symbol"]
+    s = structure.get(
+        symbol
+    )
+
+    if not s:
+
+        return None
+
+    m = micro_metrics(
+        symbol
+    )
+
+    confirmations = []
+
+    # ============================================================
+    # STRUCTURAL CONFIRMATIONS
+    # ============================================================
+
+    if s[
+        "ema_near"
+    ]:
+
+        confirmations.append(
+            "4H_EMA_PROXIMITY"
+        )
+
+    if s[
+        "ema_reclaim"
+    ]:
+
+        confirmations.append(
+            "4H_EMA_RECLAIM"
+        )
+
+    if s[
+        "bullish_ema_structure"
+    ]:
+
+        confirmations.append(
+            "BULLISH_EMA_STRUCTURE"
+        )
+
+    if (
+        s["relative_volume"]
+        >= 1.20
+    ):
+
+        confirmations.append(
+            "RELATIVE_VOLUME"
+        )
+
+    if (
+        s["volume_acceleration"]
+        >= 1.20
+    ):
+
+        confirmations.append(
+            "VOLUME_ACCELERATION"
+        )
+
+    if s[
+        "compression"
+    ]:
+
+        confirmations.append(
+            "COMPRESSION"
+        )
+
+    if s[
+        "near_breakout"
+    ]:
+
+        confirmations.append(
+            "NEAR_BREAKOUT"
+        )
+
+    if s[
+        "breakout"
+    ]:
+
+        confirmations.append(
+            "BREAKOUT"
+        )
+
+    # ============================================================
+    # MICRO
+    # ============================================================
+
+    if m.get(
+        "ready"
+    ):
+
+        confirmations.extend(
+            m[
+                "confirmations"
+            ]
+        )
+
+    # ============================================================
+    # HARD V10 CONDITIONS
+    # ============================================================
+
+    anti_chase = s[
+        "anti_chase"
+    ]
+
+    micro_ready = m.get(
+        "ready",
+        False
+    )
+
+    micro_confirms = (
+        m.get(
+            "micro_score",
+            0
+        )
+    )
+
+    cvd_ok = (
+        "CVD_BUY_DOMINANCE"
+        in confirmations
+    )
+
+    ofi_ok = (
+        "POSITIVE_OFI"
+        in confirmations
+    )
+
+    ofi_persistent = (
+        "OFI_PERSISTENCE"
+        in confirmations
+    )
+
+    volume_ok = (
+        "VOLUME_ACCELERATION"
+        in confirmations
+        or
+        "RELATIVE_VOLUME"
+        in confirmations
+    )
+
+    structure_ok = (
+        s["ema_near"]
+        or
+        s["ema_reclaim"]
+        or
+        s["near_breakout"]
+        or
+        s["breakout"]
+    )
+
+    # ============================================================
+    # STATE
+    # ============================================================
+
+    if anti_chase:
+
+        state = "REJECT"
+
+        reason = (
+            "ANTI_CHASE"
+        )
+
+    elif not micro_ready:
+
+        state = "WATCH"
+
+        reason = (
+            "MICRO_WARMING_UP"
+        )
+
+    elif (
+        cvd_ok
+        and
+        ofi_ok
+        and
+        ofi_persistent
+        and
+        volume_ok
+        and
+        structure_ok
+        and
+        micro_confirms >= 4
+        and
+        len(confirmations)
+        >= BUY_MIN_CONFIRMATIONS
+    ):
+
+        state = "BUY"
+
+        reason = (
+            "V10_FULL_CONFIRMATION"
+        )
+
+    elif (
+        structure_ok
+        and
+        micro_confirms >= 3
+        and
+        len(confirmations)
+        >= PRE_MIN_CONFIRMATIONS
+    ):
+
+        state = "PRE-IGNITION"
+
+        reason = (
+            "BUILDING_CONFLUENCE"
+        )
+
+    else:
+
+        state = "WATCH"
+
+        reason = (
+            "INSUFFICIENT_CONFLUENCE"
+        )
+
+    # ============================================================
+    # SCORE
+    # ============================================================
+
+    score = 0.0
+
+    # High weight:
+    # OFI/CVD/volume
+    if cvd_ok:
+        score += 18
+
+    if ofi_ok:
+        score += 18
+
+    if ofi_persistent:
+        score += 12
+
+    if (
+        "L1_L10_BID_IMBALANCE"
+        in confirmations
+    ):
+        score += 10
+
+    if (
+        "ASK_LIQUIDITY_DEPLETION"
+        in confirmations
+    ):
+        score += 10
+
+    if (
+        "VOLUME_ACCELERATION"
+        in confirmations
+    ):
+        score += 10
+
+    if (
+        "RELATIVE_VOLUME"
+        in confirmations
+    ):
+        score += 5
+
+    if s["ema_near"]:
+        score += 5
+
+    if s["ema_reclaim"]:
+        score += 8
+
+    if s["compression"]:
+        score += 5
+
+    if s["near_breakout"]:
+        score += 5
+
+    if s["breakout"]:
+        score += 8
+
+    if (
+        "TRADE_ACCELERATION"
+        in confirmations
+    ):
+        score += 6
+
+    if anti_chase:
+        score -= 40
+
+    score = max(
+        0.0,
+        min(
+            100.0,
+            score
+        )
+    )
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "state":
+            state,
+
+        "reason":
+            reason,
+
+        "score":
+            round(
+                score,
+                1
+            ),
+
+        "price":
+            s["price"],
+
+        "nearest_ema":
+            s[
+                "nearest_ema"
+            ],
+
+        "ema_distance_pct":
+            round(
+                s[
+                    "nearest_ema_distance_pct"
+                ],
+                3
+            ),
+
+        "ema_atr_distance":
+            round(
+                s[
+                    "nearest_ema_atr"
+                ],
+                3
+            ),
+
+        "relative_volume":
+            round(
+                s[
+                    "relative_volume"
+                ],
+                2
+            ),
+
+        "volume_acceleration":
+            round(
+                s[
+                    "volume_acceleration"
+                ],
+                2
+            ),
+
+        "compression_ratio":
+            round(
+                s[
+                    "compression_ratio"
+                ],
+                3
+            ),
+
+        "breakout_distance_pct":
+            round(
+                s[
+                    "breakout_distance_pct"
+                ],
+                3
+            ),
+
+        "anti_chase":
+            anti_chase,
+
+        "cvd_quote":
+            round(
+                m.get(
+                    "cvd_quote",
+                    0
+                ),
+                2
+            ),
+
+        "cvd_ratio":
+            round(
+                m.get(
+                    "cvd_ratio",
+                    0
+                ),
+                4
+            ),
+
+        "ofi":
+            round(
+                m.get(
+                    "recent_ofi",
+                    0
+                ),
+                4
+            ),
+
+        "ofi_persistence":
+            round(
+                m.get(
+                    "ofi_persistence",
+                    0
+                ),
+                3
+            ),
+
+        "obi":
+            round(
+                m.get(
+                    "recent_obi",
+                    0
+                ),
+                4
+            ),
+
+        "ask_depletion_pct":
+            round(
+                m.get(
+                    "ask_depletion",
+                    0
+                )
+                * 100,
+                2
+            ),
+
+        "bid_depletion_pct":
+            round(
+                m.get(
+                    "bid_depletion",
+                    0
+                )
+                * 100,
+                2
+            ),
+
+        "trade_acceleration":
+            round(
+                m.get(
+                    "trade_acceleration",
+                    0
+                ),
+                2
+            ),
+
+        "confirmations":
+            confirmations
+    }
+
+
+# ================================================================
+# RANK
+# ================================================================
+
+STATE_PRIORITY = {
+    "BUY": 4,
+    "PRE-IGNITION": 3,
+    "WATCH": 2,
+    "REJECT": 1
+}
+
+
+def get_ranked_results():
+
+    output = []
+
+    for symbol in live_symbols:
+
+        result = evaluate_symbol(
+            symbol
+        )
+
+        if result:
+            output.append(
+                result
+            )
+
+    output.sort(
+        key=lambda x: (
+            STATE_PRIORITY.get(
+                x["state"],
+                0
+            ),
+            x["score"],
+            -abs(
+                x[
+                    "ema_distance_pct"
+                ]
+            )
+        ),
+        reverse=True
+    )
+
+    return output[
+        :TOP_RESULTS
+    ]
+
+
+# ================================================================
+# INITIAL STRUCTURAL PREFILTER
+# ================================================================
+
+async def structure_batch(
+    symbols
+):
+
+    semaphore = asyncio.Semaphore(
+        8
+    )
+
+    async def worker(
+        symbol
+    ):
+
+        async with semaphore:
+
+            result = (
+                await load_4h_structure(
+                    symbol
+                )
+            )
+
+            await asyncio.sleep(
+                0.03
+            )
+
+            return result
+
+    results = await asyncio.gather(
+        *[
+            worker(s)
+            for s in symbols
+        ],
+        return_exceptions=True
+    )
+
+    valid = [
+        x
+        for x in results
+        if isinstance(
+            x,
+            dict
+        )
+    ]
+
+    # --------------------------------
+    # Candidate pre-ranking
+    # --------------------------------
+
+    def candidate_score(x):
+
+        score = 0
+
+        # Near EMA
+        score += max(
+            0,
+            20
+            - (
+                x[
+                    "nearest_ema_distance_pct"
+                ]
+                * 5
+            )
+        )
+
+        # Volume
+        score += min(
+            x[
+                "volume_acceleration"
+            ]
+            * 10,
+            20
+        )
+
+        # Compression
+        if x[
+            "compression"
+        ]:
+            score += 15
+
+        # Near breakout
+        if x[
+            "near_breakout"
+        ]:
+            score += 15
+
+        # EMA reclaim
+        if x[
+            "ema_reclaim"
+        ]:
+            score += 15
+
+        # Penalise chase
+        if x[
+            "anti_chase"
+        ]:
+            score -= 50
+
+        return score
+
+    valid.sort(
+        key=candidate_score,
+        reverse=True
+    )
+
+    return [
+        x["symbol"]
+        for x in valid[
+            :MAX_LIVE_SYMBOLS
+        ]
+    ]
+
+
+# ================================================================
+# WEBSOCKET
+# ================================================================
+
+async def websocket_loop():
+
+    global live_symbols
+
+    backoff = 1
+
+    while True:
+
+        if not live_symbols:
+
+            await asyncio.sleep(
+                1
+            )
+
+            continue
+
+        try:
+
+            print(
+                f"[WS] connecting "
+                f"{len(live_symbols)} symbols"
+            )
+
+            async with session.ws_connect(
+                WS_BASE,
+                heartbeat=30,
+                autoping=True,
+                receive_timeout=90
+            ) as ws:
+
+                streams = []
+
+                for symbol in live_symbols:
+
+                    lower = (
+                        symbol.lower()
+                    )
+
+                    streams.append(
+                        f"{lower}@aggTrade"
+                    )
+
+                    streams.append(
+                        f"{lower}@depth@100ms"
+                    )
+
+                await ws.send_json(
+                    {
+                        "method":
+                            "SUBSCRIBE",
+
+                        "params":
+                            streams,
+
+                        "id":
+                            1
+                    }
+                )
+
+                print(
+                    f"[WS] subscribed to "
+                    f"{len(streams)} streams"
+                )
+
+                # Bootstrap books after
+                # socket begins receiving.
+                bootstrap_tasks = [
+                    asyncio.create_task(
+                        resync_book(
+                            symbol
+                        )
+                    )
+                    for symbol
+                    in live_symbols
+                ]
+
+                # Don't block websocket
+                # processing waiting for
+                # all snapshots.
+                asyncio.gather(
+                    *bootstrap_tasks,
+                    return_exceptions=True
+                )
+
+                backoff = 1
+
+                async for msg in ws:
+
+                    if (
+                        msg.type
+                        == aiohttp.WSMsgType.TEXT
+                    ):
+
+                        try:
+
+                            payload = (
+                                json.loads(
+                                    msg.data
+                                )
+                            )
+
+                        except Exception:
+                            continue
+
+                        # Subscription ACK
+                        if (
+                            "result"
+                            in payload
+                            and "id"
+                            in payload
+                        ):
+                            continue
+
+                        event_type = (
+                            payload.get(
+                                "e"
+                            )
+                        )
+
+                        symbol = (
+                            payload.get(
+                                "s"
+                            )
+                        )
+
+                        if (
+                            not symbol
+                            or symbol
+                            not in live_symbols
+                        ):
+                            continue
+
+                        if (
+                            event_type
+                            == "aggTrade"
+                        ):
+
+                            process_agg_trade(
+                                symbol,
+                                payload
+                            )
+
+                        elif (
+                            event_type
+                            == "depthUpdate"
+                        ):
+
+                            asyncio.create_task(
+                                process_depth(
+                                    symbol,
+                                    payload
+                                )
+                            )
+
+                    elif (
+                        msg.type
+                        in (
+                            aiohttp.WSMsgType.ERROR,
+                            aiohttp.WSMsgType.CLOSED
+                        )
+                    ):
+
+                        break
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as e:
+
+            print(
+                f"[WS ERROR] {e}"
+            )
+
+        print(
+            f"[WS] reconnecting "
+            f"in {backoff}s"
+        )
+
+        await asyncio.sleep(
+            backoff
+        )
+
+        backoff = min(
+            backoff * 2,
+            30
+        )
+
+
+# ================================================================
+# STRUCTURE REFRESH LOOP
+# ================================================================
+
+async def structure_refresh_loop():
+
+    while True:
+
+        try:
+
+            symbols = list(
+                live_symbols
+            )
+
+            if symbols:
+
+                semaphore = (
+                    asyncio.Semaphore(
+                        5
+                    )
+                )
+
+                async def worker(
+                    symbol
+                ):
+
+                    async with semaphore:
+
+                        await load_4h_structure(
+                            symbol
+                        )
+
+                        await asyncio.sleep(
+                            0.05
+                        )
+
+                await asyncio.gather(
+                    *[
+                        worker(s)
+                        for s
+                        in symbols
+                    ],
+                    return_exceptions=True
+                )
+
+        except Exception as e:
+
+            print(
+                "[STRUCTURE LOOP]",
+                e
+            )
+
+        await asyncio.sleep(
+            STRUCTURE_REFRESH_SEC
+        )
+
+
+# ================================================================
+# DISPLAY
+# ================================================================
+
+def fmt_num(
+    value
+):
+
+    if abs(value) >= 1_000_000:
+
+        return (
+            f"{value / 1_000_000:.2f}M"
+        )
+
+    if abs(value) >= 1_000:
+
+        return (
+            f"{value / 1_000:.2f}K"
+        )
+
+    return f"{value:.2f}"
+
+
+async def print_loop():
+
+    while True:
+
+        await asyncio.sleep(
+            PRINT_INTERVAL_SEC
+        )
+
+        results = (
+            get_ranked_results()
+        )
+
+        print("\n")
+        print(
+            "=" * 100
+        )
+
+        print(
+            "Ψ-V10 LIVE BINANCE SCAN"
+        )
+
+        print(
+            time.strftime(
+                "%Y-%m-%d %H:%M:%S UTC",
+                time.gmtime()
+            )
+        )
+
+        print(
+            "=" * 100
+        )
+
+        for i, r in enumerate(
+            results,
+            1
+        ):
+
+            print(
+                f"\n#{i} "
+                f"{r['symbol']} "
+                f"| {r['state']} "
+                f"| SCORE {r['score']}"
+            )
+
+            print(
+                f"Price: "
+                f"{r['price']}"
+            )
+
+            print(
+                f"EMA: "
+                f"{r['nearest_ema']} "
+                f"| distance "
+                f"{r['ema_distance_pct']}%"
+            )
+
+            print(
+                f"RVOL: "
+                f"{r['relative_volume']} "
+                f"| VolAccel: "
+                f"{r['volume_acceleration']}"
+            )
+
+            print(
+                f"Breakout distance: "
+                f"{r['breakout_distance_pct']}%"
+            )
+
+            print(
+                f"CVD: "
+                f"{fmt_num(r['cvd_quote'])} "
+                f"| CVD ratio: "
+                f"{r['cvd_ratio']}"
+            )
+
+            print(
+                f"OFI: "
+                f"{r['ofi']} "
+                f"| persistence: "
+                f"{r['ofi_persistence']}"
+            )
+
+            print(
+                f"OBI L1-L10: "
+                f"{r['obi']}"
+            )
+
+            print(
+                f"Ask depletion: "
+                f"{r['ask_depletion_pct']}% "
+                f"| Bid depletion: "
+                f"{r['bid_depletion_pct']}%"
+            )
+
+            print(
+                f"Trade acceleration: "
+                f"{r['trade_acceleration']}x"
+            )
+
+            print(
+                "Confirmations: "
+                + ", ".join(
+                    r[
+                        "confirmations"
+                    ]
+                )
+            )
+
+        print("\n")
+
+
+# ================================================================
+# SIMPLE HTTP SERVER
+# ================================================================
+#
+# Railway can ping:
+#
+# /
+# /scan
+#
+# ================================================================
+
+async def health(
+    request
+):
+
+    return aiohttp.web.json_response(
+        {
+            "status":
+                "ok",
+
+            "scanner":
+                "Psi-V10",
+
+            "symbols":
+                len(
+                    live_symbols
+                ),
+
+            "timestamp":
+                time.time()
+        }
+    )
+
+
+async def scan_endpoint(
+    request
+):
+
+    return aiohttp.web.json_response(
+        {
+            "scanner":
+                "Psi-V10",
+
+            "timestamp":
+                time.time(),
+
+            "results":
+                get_ranked_results()
+        }
+    )
+
+
+async def start_http_server():
+
+    from aiohttp import web
+
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        health
+    )
+
+    app.router.add_get(
+        "/scan",
+        scan_endpoint
+    )
+
+    runner = web.AppRunner(
+        app
+    )
+
+    await runner.setup()
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "8080"
+        )
+    )
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port
+    )
+
+    await site.start()
+
+    print(
+        f"[HTTP] listening "
+        f"on port {port}"
+    )
+
+
+# ================================================================
+# INITIALISE
+# ================================================================
+
+async def initialise():
+
+    global live_symbols
+
+    print(
+        "Ψ-V10 INITIALISING..."
+    )
+
+    universe = (
+        await get_exchange_symbols()
+    )
+
+    print(
+        f"[UNIVERSE] "
+        f"{len(universe)} "
+        f"eligible USDT pairs"
+    )
+
+    # Limit initial historical requests
+    # to most liquid symbols.
+    #
+    # We still rank by actual V10
+    # structure afterwards.
+
+    initial_pool = universe[
+        :120
+    ]
+
+    print(
+        f"[STRUCTURE] scanning "
+        f"{len(initial_pool)} pairs"
+    )
+
+    selected = (
+        await structure_batch(
+            initial_pool
+        )
+    )
+
+    live_symbols = selected
+
+    print(
+        "[LIVE CANDIDATES]"
+    )
+
+    for symbol in live_symbols:
+
+        print(
+            "  ",
+            symbol
+        )
+
+
+# ================================================================
+# MAIN
+# ================================================================
+
+async def main():
+
+    global session
+
+    connector = (
+        aiohttp.TCPConnector(
+            limit=100,
+            ttl_dns_cache=300
+        )
+    )
+
+    session = aiohttp.ClientSession(
+        connector=connector,
+        headers={
+            "User-Agent":
+                "Psi-V10-Binance-Scanner"
+        }
+    )
 
     try:
 
-        depth, trades = await asyncio.gather(
+        await initialise()
 
-            api_get(
-                client,
-                "/api/v3/depth",
-                {
-                    "symbol": symbol,
-                    "limit": 20,
-                },
+        await start_http_server()
+
+        tasks = [
+
+            asyncio.create_task(
+                websocket_loop()
             ),
 
-            api_get(
-                client,
-                "/api/v3/aggTrades",
-                {
-                    "symbol": symbol,
-                    "limit": 500,
-                },
-            ),
-        )
-
-        book = analyse_order_book(depth)
-        flow = trade_flow_metrics(trades)
-
-        if not book or not flow:
-            candidate["microstructure_verified"] = False
-            candidate["state"] = "PRE_IGNITION"
-            return candidate
-
-        # ----------------------------------------------------
-        # MICRO CONFIRMATIONS
-        # ----------------------------------------------------
-
-        micro = {
-
-            # 55%+ of L1-L10 notional on bid side
-            "bid_depth_dominant":
-                book["obi"] >= 0.55,
-
-            # Stronger institutional-style imbalance
-            "obi_60_plus":
-                book["obi"] >= 0.60,
-
-            # Spread protection
-            "spread_tight":
-                book["spread_pct"] <= 0.15,
-
-            # Real aggressive trade flow
-            "aggressive_buy_dominant":
-                flow["aggressive_buy_ratio"] >= 0.55,
-
-            "recent_aggressive_buy_dominant":
-                flow["recent_aggressive_buy_ratio"] >= 0.55,
-
-            # Positive actual spot CVD
-            "positive_spot_cvd":
-                flow["spot_cvd_quote"] > 0,
-
-            # Recent CVD improving
-            "cvd_accelerating":
-                flow["cvd_accelerating"],
-
-            # Average aggressive buys larger than sells
-            "buy_size_dominance":
-                flow["buy_trade_size_dominance"],
-        }
-
-        micro_count = sum(
-            bool(v)
-            for v in micro.values()
-        )
-
-        # ----------------------------------------------------
-        # CORE ORDER-FLOW REQUIREMENT
-        # ----------------------------------------------------
-
-        real_flow_confirmation = (
-            micro["spread_tight"]
-            and micro["aggressive_buy_dominant"]
-            and micro["positive_spot_cvd"]
-            and (
-                micro["bid_depth_dominant"]
-                or micro["cvd_accelerating"]
-            )
-        )
-
-        # ----------------------------------------------------
-        # FINAL BUY
-        # ----------------------------------------------------
-
-        final_buy = (
-            candidate["state"] == "PRE_IGNITION"
-            and candidate["ema_reclaim"]
-            and candidate["anti_chase_ok"]
-            and candidate["momentum_confirmation"]
-            and candidate["structure_confirmation"]
-            and real_flow_confirmation
-            and micro_count >= 5
-        )
-
-        if final_buy:
-            candidate["state"] = "BUY"
-
-        elif candidate["state"] == "PRE_IGNITION":
-            candidate["state"] = "PRE_IGNITION"
-
-        # ----------------------------------------------------
-        # FINAL SCORE
-        # ----------------------------------------------------
-
-        micro_score = 0
-
-        if micro["bid_depth_dominant"]:
-            micro_score += 8
-
-        if micro["obi_60_plus"]:
-            micro_score += 5
-
-        if micro["spread_tight"]:
-            micro_score += 5
-
-        if micro["aggressive_buy_dominant"]:
-            micro_score += 10
-
-        if micro["recent_aggressive_buy_dominant"]:
-            micro_score += 8
-
-        if micro["positive_spot_cvd"]:
-            micro_score += 10
-
-        if micro["cvd_accelerating"]:
-            micro_score += 12
-
-        if micro["buy_size_dominance"]:
-            micro_score += 7
-
-        candidate["microstructure_verified"] = True
-
-        candidate["micro_confirmations"] = micro_count
-
-        candidate["micro_confirmation_map"] = micro
-
-        candidate["real_flow_confirmation"] = (
-            real_flow_confirmation
-        )
-
-        candidate["order_book"] = book
-        candidate["trade_flow"] = flow
-
-        candidate["score"] = round(
-            candidate["preliminary_score"]
-            + micro_score,
-            2,
-        )
-
-        return candidate
-
-    except Exception as exc:
-
-        candidate["microstructure_verified"] = False
-
-        candidate["microstructure_error"] = (
-            type(exc).__name__
-        )
-
-        candidate["score"] = (
-            candidate["preliminary_score"]
-        )
-
-        # Never promote without verified telemetry
-        if candidate["state"] == "PRE_IGNITION":
-            candidate["state"] = "PRE_IGNITION"
-
-        return candidate
-
-
-# ============================================================
-# FULL SCAN
-# ============================================================
-
-async def run_scan(limit=10):
-
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent":
-                "psi-v10-live-scanner/2.3"
-        }
-    ) as client:
-
-        exchange_info, tickers = await asyncio.gather(
-
-            api_get(
-                client,
-                "/api/v3/exchangeInfo",
+            asyncio.create_task(
+                structure_refresh_loop()
             ),
 
-            api_get(
-                client,
-                "/api/v3/ticker/24hr",
-            ),
-        )
-
-        ticker_map = {
-            row["symbol"]: row
-            for row in tickers
-        }
-
-        universe = []
-
-        excluded_known = 0
-        excluded_dynamic = 0
-
-        for market in exchange_info["symbols"]:
-
-            symbol = market["symbol"]
-            base = market.get("baseAsset", "")
-
-            if market.get("status") != "TRADING":
-                continue
-
-            if market.get("quoteAsset") != "USDT":
-                continue
-
-            if not market.get(
-                "isSpotTradingAllowed",
-                False,
-            ):
-                continue
-
-            if base in STABLE_BASES:
-                excluded_known += 1
-                continue
-
-            ticker = ticker_map.get(symbol, {})
-
-            if looks_like_stablecoin(ticker):
-                excluded_dynamic += 1
-                continue
-
-            quote_volume = float(
-                ticker.get("quoteVolume", 0)
-                or 0
-            )
-
-            if quote_volume >= MIN_QUOTE_VOLUME:
-                universe.append(
-                    (symbol, quote_volume)
-                )
-
-        universe.sort(
-            key=lambda x: x[1],
-            reverse=True,
-        )
-
-        universe = universe[:160]
-
-        preliminary_raw = await asyncio.gather(
-
-            *(
-                analyse_preliminary(
-                    client,
-                    symbol,
-                    quote_volume,
-                )
-                for symbol, quote_volume
-                in universe
-            ),
-
-            return_exceptions=True,
-        )
-
-        preliminary = [
-            x
-            for x in preliminary_raw
-            if isinstance(x, dict)
-        ]
-
-        # ----------------------------------------------------
-        # RANK PRELIMINARY CANDIDATES
-        # ----------------------------------------------------
-
-        pre_priority = {
-            "PRE_IGNITION": 0,
-            "WATCH": 1,
-            "OBSERVE": 2,
-            "EXTENDED": 3,
-        }
-
-        preliminary.sort(
-            key=lambda x: (
-                pre_priority.get(
-                    x["state"],
-                    9,
-                ),
-                -x["preliminary_score"],
-            )
-        )
-
-        shortlist = preliminary[
-            :min(
-                MICRO_SHORTLIST,
-                len(preliminary),
+            asyncio.create_task(
+                print_loop()
             )
         ]
 
-        # ----------------------------------------------------
-        # REAL MICROSTRUCTURE STAGE
-        # ----------------------------------------------------
-
-        enriched = await asyncio.gather(
-
-            *(
-                enrich_microstructure(
-                    client,
-                    candidate,
-                )
-                for candidate in shortlist
-            ),
-
-            return_exceptions=True,
+        await asyncio.gather(
+            *tasks
         )
 
-        enriched = [
-            x
-            for x in enriched
-            if isinstance(x, dict)
-        ]
+    finally:
 
-    # --------------------------------------------------------
-    # FINAL RANKING
-    # --------------------------------------------------------
+        if session:
 
-    final_priority = {
-        "BUY": 0,
-        "PRE_IGNITION": 1,
-        "WATCH": 2,
-        "OBSERVE": 3,
-        "EXTENDED": 4,
-    }
-
-    enriched.sort(
-        key=lambda x: (
-            final_priority.get(
-                x["state"],
-                9,
-            ),
-            -x.get(
-                "score",
-                x["preliminary_score"],
-            ),
-        )
-    )
-
-    return {
-
-        "source":
-            "Binance public Spot market-data API",
-
-        "engine":
-            "Psi-V10 EMA + Spot Microstructure v2.3",
-
-        "version":
-            "2.3.0",
-
-        "ema_configuration": {
-            "periods": [7, 50, 200],
-            "source": "close",
-            "timeframes": ["1h", "4h"],
-        },
-
-        "microstructure": {
-            "enabled": True,
-
-            "shortlist_size":
-                MICRO_SHORTLIST,
-
-            "order_book":
-                "L1-L10 Binance Spot depth snapshot",
-
-            "aggregate_trades":
-                500,
-
-            "obi":
-                "real current depth imbalance",
-
-            "cvd":
-                "real aggregate-trade-derived Spot CVD",
-
-            "true_ofi":
-                False,
-
-            "true_ofi_note":
-                (
-                    "Requires sequential order-book "
-                    "updates/WebSocket state."
-                ),
-        },
-
-        "stablecoin_filter": {
-            "known": True,
-            "dynamic": True,
-            "excluded_known":
-                excluded_known,
-            "excluded_dynamic":
-                excluded_dynamic,
-        },
-
-        "markets_preliminary_scanned":
-            len(preliminary),
-
-        "markets_microstructure_checked":
-            len(enriched),
-
-        "returned":
-            min(limit, len(enriched)),
-
-        "buy_rule":
-            (
-                "4H EMA50/EMA200 reclaim + "
-                "EMA/volume/structure qualification + "
-                "verified real Spot order-flow confirmation + "
-                "at least 5 microstructure confirmations + "
-                "anti-chase."
-            ),
-
-        "telemetry_note":
-            (
-                "OBI and Spot CVD are derived from real "
-                "Binance public market data. "
-                "True sequential OFI, futures OI/funding "
-                "and iceberg persistence are not fabricated."
-            ),
-
-        "results":
-            enriched[:limit],
-    }
+            await session.close()
 
 
-# ============================================================
-# FASTAPI
-# ============================================================
+if __name__ == "__main__":
 
-@app.get("/health")
-async def health():
+    try:
 
-    return {
-        "ok": True,
-        "service":
-            "psi-v10-live-scanner",
-
-        "version":
-            "2.3.0",
-
-        "moving_average_type":
-            "EMA",
-
-        "ema_periods":
-            [7, 50, 200],
-
-        "spot_microstructure":
-            True,
-
-        "obi":
-            True,
-
-        "spot_cvd":
-            True,
-
-        "true_sequential_ofi":
-            False,
-
-        "mcp":
-            "/mcp",
-    }
-
-
-@app.get("/scan")
-async def scan(
-    limit: int = Query(
-        10,
-        ge=1,
-        le=20,
-    )
-):
-    return await run_scan(limit)
-
-
-@app.get("/")
-async def root():
-
-    return {
-        "service":
-            "Psi V10 Live Scanner",
-
-        "version":
-            "2.3.0",
-
-        "engine":
-            "EMA + Spot Microstructure",
-
-        "scan":
-            "/scan",
-
-        "health":
-            "/health",
-
-        "mcp":
-            "/mcp",
-    }
-
-
-# ============================================================
-# MCP
-# ============================================================
-
-mcp = FastMCP(
-    "Psi V10 Live Scanner"
-)
-
-
-@mcp.tool()
-async def scanner_health() -> dict:
-
-    return await health()
-
-
-@mcp.tool()
-async def scan_top(
-    limit: int = 10,
-) -> dict:
-
-    return await run_scan(
-        max(
-            1,
-            min(
-                int(limit),
-                20,
-            ),
-        )
-    )
-
-
-@mcp.tool()
-async def symbol_detail(
-    symbol: str,
-) -> dict:
-
-    symbol = symbol.upper().strip()
-
-    if not symbol.endswith("USDT"):
-        symbol += "USDT"
-
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent":
-                "psi-v10-live-scanner/2.3"
-        }
-    ) as client:
-
-        ticker = await api_get(
-            client,
-            "/api/v3/ticker/24hr",
-            {
-                "symbol": symbol,
-            },
+        asyncio.run(
+            main()
         )
 
-        quote_volume = float(
-            ticker.get(
-                "quoteVolume",
-                0,
-            )
-            or 0
+    except KeyboardInterrupt:
+
+        print(
+            "\nΨ-V10 stopped."
         )
-
-        preliminary = await analyse_preliminary(
-            client,
-            symbol,
-            quote_volume,
-        )
-
-        if not preliminary:
-
-            return {
-                "ok": False,
-                "symbol": symbol,
-                "error":
-                    "Insufficient data or unsupported symbol",
-            }
-
-        return await enrich_microstructure(
-            client,
-            preliminary,
-        )
-
-
-# ============================================================
-# MCP HTTP
-# ============================================================
-
-mcp_app = mcp.http_app(
-    path="/"
-)
-
-app.mount(
-    "/mcp",
-    mcp_app,
-)
