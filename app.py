@@ -9,7 +9,7 @@ from fastmcp import FastMCP
 
 app = FastAPI(
     title="Psi V10 Live Scanner",
-    version="2.1.0",
+    version="2.2.0",
     description="Verified Binance Spot Psi-V10 EMA pre-breakout scanner",
 )
 
@@ -38,11 +38,78 @@ CONCURRENCY = int(os.getenv("CONCURRENCY", "12"))
 MIN_QUOTE_VOLUME = float(os.getenv("MIN_QUOTE_VOLUME", "1000000"))
 SEM = asyncio.Semaphore(CONCURRENCY)
 
+
+# ============================================================
+# STABLE / PEGGED ASSET EXCLUSION
+# ============================================================
+
 STABLE_BASES = {
-    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "USDE",
-    "USD1", "RLUSD", "PYUSD", "EUR", "EURC", "AEUR",
-    "EURI", "BUSD", "USDS", "XUSD", "BFUSD"
+    "U",
+    "USDC",
+    "FDUSD",
+    "TUSD",
+    "USDP",
+    "DAI",
+    "USDE",
+    "USD1",
+    "RLUSD",
+    "PYUSD",
+    "EUR",
+    "EURC",
+    "AEUR",
+    "EURI",
+    "BUSD",
+    "USDS",
+    "XUSD",
+    "BFUSD",
 }
+
+
+def looks_like_stablecoin(ticker):
+    """
+    Conservative second-line filter for unknown USD-pegged assets.
+
+    A token is NOT excluded simply because it trades near $1.
+    It must be near $1 AND have an extremely tight 24h range.
+    """
+
+    try:
+        last_price = float(ticker.get("lastPrice", 0) or 0)
+        high_price = float(ticker.get("highPrice", 0) or 0)
+        low_price = float(ticker.get("lowPrice", 0) or 0)
+
+        if (
+            last_price <= 0
+            or high_price <= 0
+            or low_price <= 0
+        ):
+            return False
+
+        near_one_dollar = (
+            0.985 <= last_price <= 1.015
+        )
+
+        range_pct = (
+            (high_price - low_price)
+            / last_price
+            * 100.0
+        )
+
+        extremely_low_volatility = (
+            range_pct <= 0.75
+        )
+
+        return (
+            near_one_dollar
+            and extremely_low_volatility
+        )
+
+    except (
+        TypeError,
+        ValueError,
+        ZeroDivisionError,
+    ):
+        return False
 
 
 # ============================================================
@@ -50,26 +117,38 @@ STABLE_BASES = {
 # ============================================================
 
 async def api_get(client, path, params=None):
+
     last_error = None
 
     async with SEM:
+
         for base in BASES:
+
             try:
+
                 response = await client.get(
                     base + path,
                     params=params,
                     timeout=20,
                 )
+
                 response.raise_for_status()
+
                 return response.json()
 
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            except (
+                httpx.HTTPStatusError,
+                httpx.RequestError,
+            ) as exc:
+
                 last_error = exc
 
     if last_error:
         raise last_error
 
-    raise RuntimeError("No Binance market-data hosts configured")
+    raise RuntimeError(
+        "No Binance market-data hosts configured"
+    )
 
 
 # ============================================================
@@ -78,60 +157,105 @@ async def api_get(client, path, params=None):
 
 def ema(values, period):
     """
-    Standard EMA:
-    1. Seed with SMA of first 'period' closes.
-    2. Apply multiplier 2 / (period + 1).
+    Standard exponential moving average.
+
+    Seed:
+        SMA of first N closes.
+
+    Multiplier:
+        2 / (N + 1)
     """
 
     if len(values) < period:
         return None
 
-    seed = sum(values[:period]) / period
-    multiplier = 2.0 / (period + 1.0)
+    current_ema = (
+        sum(values[:period])
+        / period
+    )
 
-    current_ema = seed
+    multiplier = (
+        2.0
+        / (period + 1.0)
+    )
 
     for price in values[period:]:
+
         current_ema = (
-            (price - current_ema) * multiplier
+            (price - current_ema)
+            * multiplier
             + current_ema
         )
 
     return current_ema
 
 
+# ============================================================
+# ATR
+# ============================================================
+
 def atr(rows, period=14):
+
     if len(rows) < period + 1:
         return None
 
     values = []
 
     for i in range(1, len(rows)):
+
         high = float(rows[i][2])
         low = float(rows[i][3])
         previous_close = float(rows[i - 1][4])
 
-        values.append(
-            max(
-                high - low,
-                abs(high - previous_close),
-                abs(low - previous_close),
-            )
+        true_range = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
         )
 
-    return sum(values[-period:]) / period
+        values.append(true_range)
 
+    return (
+        sum(values[-period:])
+        / period
+    )
+
+
+# ============================================================
+# DISTANCE / PROXIMITY
+# ============================================================
 
 def percentage_distance(price, level):
+
     if not level:
         return None
 
-    return ((price - level) / level) * 100.0
+    return (
+        (price - level)
+        / level
+        * 100.0
+    )
 
 
 def proximity(price, level, atr_value):
-    distance = abs(price - level)
-    pct = abs(percentage_distance(price, level))
+
+    if not level:
+        return {
+            "pct": None,
+            "atr": None,
+            "near": False,
+        }
+
+    distance = abs(
+        price - level
+    )
+
+    pct = abs(
+        percentage_distance(
+            price,
+            level,
+        )
+    )
 
     atr_distance = (
         distance / atr_value
@@ -139,8 +263,6 @@ def proximity(price, level, atr_value):
         else None
     )
 
-    # V10 dynamic proximity:
-    # within 0.5% OR within 1 ATR
     near = (
         pct <= 0.50
         or (
@@ -162,44 +284,82 @@ def proximity(price, level, atr_value):
 
 def candle_metrics(rows):
 
-    # Closed candles only for confirmation logic
+    # Do not use the still-forming candle
+    # for confirmation calculations.
     closed = rows[:-1]
 
-    closes = [float(row[4]) for row in closed]
-    volumes = [float(row[5]) for row in closed]
+    if len(closed) < 200:
+        return None
+
+    closes = [
+        float(row[4])
+        for row in closed
+    ]
+
+    volumes = [
+        float(row[5])
+        for row in closed
+    ]
 
     last = closed[-1]
 
-    atr14 = atr(closed, 14)
+    atr14 = atr(
+        closed,
+        14,
+    )
 
-    ema7 = ema(closes, 7)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200)
+    ema7_value = ema(
+        closes,
+        7,
+    )
 
-    average_20_volume = sum(volumes[-20:]) / 20
+    ema50_value = ema(
+        closes,
+        50,
+    )
+
+    ema200_value = ema(
+        closes,
+        200,
+    )
+
+    average_20_volume = (
+        sum(volumes[-20:])
+        / 20
+    )
 
     volume_acceleration = (
-        volumes[-1] / average_20_volume
+        volumes[-1]
+        / average_20_volume
         if average_20_volume
         else 0
     )
 
-    total_volume = float(last[5])
-    taker_buy_volume = float(last[9])
+    total_volume = float(
+        last[5]
+    )
+
+    taker_buy_volume = float(
+        last[9]
+    )
 
     taker_buy_ratio = (
-        taker_buy_volume / total_volume
+        taker_buy_volume
+        / total_volume
         if total_volume
         else 0
     )
 
     ranges = [
-        float(row[2]) - float(row[3])
+        float(row[2])
+        - float(row[3])
         for row in closed[-20:]
     ]
 
     recent_range = (
-        statistics.mean(ranges[-5:])
+        statistics.mean(
+            ranges[-5:]
+        )
         if ranges[-5:]
         else 0
     )
@@ -211,7 +371,8 @@ def candle_metrics(rows):
     )
 
     compression_ratio = (
-        recent_range / baseline_range
+        recent_range
+        / baseline_range
         if baseline_range
         else 1
     )
@@ -222,7 +383,12 @@ def candle_metrics(rows):
     )
 
     breakout_distance = (
-        ((high_20 - closes[-1]) / closes[-1]) * 100
+        (
+            high_20
+            - closes[-1]
+        )
+        / closes[-1]
+        * 100.0
         if closes[-1]
         else 999
     )
@@ -230,21 +396,36 @@ def candle_metrics(rows):
     return {
         "closed": closed,
         "closes": closes,
+
         "atr": atr14,
 
-        "ema7": ema7,
-        "ema50": ema50,
-        "ema200": ema200,
+        "ema7": ema7_value,
+        "ema50": ema50_value,
+        "ema200": ema200_value,
 
-        "volume_acceleration": volume_acceleration,
-        "taker_buy_ratio": taker_buy_ratio,
-        "trade_count": int(last[8]),
-        "compression_ratio": compression_ratio,
-        "breakout_distance_pct": breakout_distance,
+        "volume_acceleration":
+            volume_acceleration,
 
-        "last_close": closes[-1],
-        "last_low": float(last[3]),
-        "last_high": float(last[2]),
+        "taker_buy_ratio":
+            taker_buy_ratio,
+
+        "trade_count":
+            int(last[8]),
+
+        "compression_ratio":
+            compression_ratio,
+
+        "breakout_distance_pct":
+            breakout_distance,
+
+        "last_close":
+            closes[-1],
+
+        "last_low":
+            float(last[3]),
+
+        "last_high":
+            float(last[2]),
     }
 
 
@@ -252,15 +433,21 @@ def candle_metrics(rows):
 # EMA RECLAIM
 # ============================================================
 
-def reclaimed_ema(metrics, ema_level, proximity_data):
+def reclaimed_ema(
+    metrics,
+    ema_level,
+    proximity_data,
+):
 
     if not ema_level:
         return False
 
     return (
         proximity_data["near"]
-        and metrics["last_low"] <= ema_level
-        and metrics["last_close"] >= ema_level
+        and metrics["last_low"]
+        <= ema_level
+        and metrics["last_close"]
+        >= ema_level
     )
 
 
@@ -268,7 +455,11 @@ def reclaimed_ema(metrics, ema_level, proximity_data):
 # SYMBOL ANALYSIS
 # ============================================================
 
-async def analyse_symbol(client, symbol, quote_volume):
+async def analyse_symbol(
+    client,
+    symbol,
+    quote_volume,
+):
 
     rows_4h, rows_1h = await asyncio.gather(
 
@@ -293,11 +484,23 @@ async def analyse_symbol(client, symbol, quote_volume):
         ),
     )
 
-    m4 = candle_metrics(rows_4h)
-    m1 = candle_metrics(rows_1h)
+    m4 = candle_metrics(
+        rows_4h
+    )
 
-    # Current Binance market price from current candle
-    price = float(rows_4h[-1][4])
+    m1 = candle_metrics(
+        rows_1h
+    )
+
+    if (
+        m4 is None
+        or m1 is None
+    ):
+        return None
+
+    price = float(
+        rows_4h[-1][4]
+    )
 
     if (
         not m4["ema50"]
@@ -338,7 +541,7 @@ async def analyse_symbol(client, symbol, quote_volume):
 
 
     # ========================================================
-    # EXACT EMA RECLAIM IDENTIFICATION
+    # EMA RECLAIM
     # ========================================================
 
     reclaim_4h_50 = reclaimed_ema(
@@ -360,7 +563,7 @@ async def analyse_symbol(client, symbol, quote_volume):
 
 
     # ========================================================
-    # V10 CONFIRMATIONS
+    # CONFIRMATIONS
     # ========================================================
 
     confirmations = {
@@ -384,30 +587,54 @@ async def analyse_symbol(client, symbol, quote_volume):
             p1_200["near"],
 
         "volume_acceleration":
-            m4["volume_acceleration"] >= 1.20,
+            (
+                m4["volume_acceleration"]
+                >= 1.20
+            ),
 
         "aggressive_buy_proxy":
-            m4["taker_buy_ratio"] >= 0.55,
+            (
+                m4["taker_buy_ratio"]
+                >= 0.55
+            ),
 
         "range_compression":
-            m4["compression_ratio"] <= 0.80,
+            (
+                m4["compression_ratio"]
+                <= 0.80
+            ),
 
         "near_20bar_breakout":
-            0 <= m4["breakout_distance_pct"] <= 2.0,
+            (
+                0
+                <= m4["breakout_distance_pct"]
+                <= 2.0
+            ),
 
         "above_4h_ema50":
-            price >= m4["ema50"],
+            (
+                price
+                >= m4["ema50"]
+            ),
 
         "above_4h_ema200":
-            price >= m4["ema200"],
+            (
+                price
+                >= m4["ema200"]
+            ),
 
         "ema7_above_ema50":
-            m4["ema7"] >= m4["ema50"],
+            (
+                m4["ema7"]
+                >= m4["ema50"]
+            ),
     }
+
 
     confirmation_count = sum(
         bool(value)
-        for value in confirmations.values()
+        for value
+        in confirmations.values()
     )
 
 
@@ -416,16 +643,22 @@ async def analyse_symbol(client, symbol, quote_volume):
     # ========================================================
 
     extension_atr = (
-        (price - m4["ema50"]) / m4["atr"]
+        (
+            price
+            - m4["ema50"]
+        )
+        / m4["atr"]
         if m4["atr"]
         else 0
     )
 
-    anti_chase_ok = extension_atr <= 2.0
+    anti_chase_ok = (
+        extension_atr <= 2.0
+    )
 
 
     # ========================================================
-    # STRICT PRE-BREAKOUT REQUIREMENTS
+    # STRUCTURE
     # ========================================================
 
     four_hour_ema_near = (
@@ -439,13 +672,21 @@ async def analyse_symbol(client, symbol, quote_volume):
     )
 
     momentum_confirmation = (
-        confirmations["volume_acceleration"]
-        or confirmations["aggressive_buy_proxy"]
+        confirmations[
+            "volume_acceleration"
+        ]
+        or confirmations[
+            "aggressive_buy_proxy"
+        ]
     )
 
     structure_confirmation = (
-        confirmations["range_compression"]
-        or confirmations["near_20bar_breakout"]
+        confirmations[
+            "range_compression"
+        ]
+        or confirmations[
+            "near_20bar_breakout"
+        ]
     )
 
 
@@ -457,6 +698,7 @@ async def analyse_symbol(client, symbol, quote_volume):
 
         state = "EXTENDED"
 
+
     elif (
         four_hour_ema_near
         and reclaim_4h
@@ -466,6 +708,7 @@ async def analyse_symbol(client, symbol, quote_volume):
     ):
 
         state = "BUY"
+
 
     elif (
         four_hour_ema_near
@@ -478,12 +721,14 @@ async def analyse_symbol(client, symbol, quote_volume):
 
         state = "PRE_IGNITION"
 
+
     elif (
         one_hour_ema_near
         or four_hour_ema_near
     ):
 
         state = "WATCH"
+
 
     else:
 
@@ -494,7 +739,10 @@ async def analyse_symbol(client, symbol, quote_volume):
     # SCORE
     # ========================================================
 
-    score = confirmation_count * 8
+    score = (
+        confirmation_count
+        * 8
+    )
 
     if reclaim_4h_50:
         score += 10
@@ -502,21 +750,42 @@ async def analyse_symbol(client, symbol, quote_volume):
     if reclaim_4h_200:
         score += 14
 
-    if confirmations["volume_acceleration"]:
-        score += min(
-            m4["volume_acceleration"],
-            2.5,
-        ) * 5
+    if confirmations[
+        "volume_acceleration"
+    ]:
 
-    if confirmations["aggressive_buy_proxy"]:
         score += (
-            m4["taker_buy_ratio"] - 0.50
-        ) * 40
+            min(
+                m4[
+                    "volume_acceleration"
+                ],
+                2.5,
+            )
+            * 5
+        )
 
-    if confirmations["range_compression"]:
+    if confirmations[
+        "aggressive_buy_proxy"
+    ]:
+
+        score += (
+            (
+                m4[
+                    "taker_buy_ratio"
+                ]
+                - 0.50
+            )
+            * 40
+        )
+
+    if confirmations[
+        "range_compression"
+    ]:
         score += 7
 
-    if confirmations["near_20bar_breakout"]:
+    if confirmations[
+        "near_20bar_breakout"
+    ]:
         score += 8
 
     if not anti_chase_ok:
@@ -524,43 +793,71 @@ async def analyse_symbol(client, symbol, quote_volume):
 
 
     # ========================================================
-    # IDENTIFY ACTIVE EMA
+    # ACTIVE EMA
     # ========================================================
 
     active_4h_ema = []
 
     if p4_50["near"]:
-        active_4h_ema.append("EMA50")
+        active_4h_ema.append(
+            "EMA50"
+        )
 
     if p4_200["near"]:
-        active_4h_ema.append("EMA200")
+        active_4h_ema.append(
+            "EMA200"
+        )
+
 
     active_1h_ema = []
 
     if p1_50["near"]:
-        active_1h_ema.append("EMA50")
+        active_1h_ema.append(
+            "EMA50"
+        )
 
     if p1_200["near"]:
-        active_1h_ema.append("EMA200")
+        active_1h_ema.append(
+            "EMA200"
+        )
 
+
+    # ========================================================
+    # RESULT
+    # ========================================================
 
     return {
 
-        "symbol": symbol,
-        "price": price,
-        "quote_volume_24h": quote_volume,
+        "symbol":
+            symbol,
 
-        "state": state,
-        "score": round(score, 2),
+        "price":
+            price,
 
-        "confirmations": confirmation_count,
-        "confirmation_map": confirmations,
+        "quote_volume_24h":
+            quote_volume,
+
+        "state":
+            state,
+
+        "score":
+            round(
+                score,
+                2,
+            ),
+
+        "confirmations":
+            confirmation_count,
+
+        "confirmation_map":
+            confirmations,
 
         "active_4h_ema":
             active_4h_ema,
 
         "active_1h_ema":
             active_1h_ema,
+
 
         "4h": {
 
@@ -607,20 +904,31 @@ async def analyse_symbol(client, symbol, quote_volume):
                 m4["atr"],
 
             "volume_vs_20avg":
-                m4["volume_acceleration"],
+                m4[
+                    "volume_acceleration"
+                ],
 
             "taker_buy_ratio":
-                m4["taker_buy_ratio"],
+                m4[
+                    "taker_buy_ratio"
+                ],
 
             "trade_count":
-                m4["trade_count"],
+                m4[
+                    "trade_count"
+                ],
 
             "compression_ratio":
-                m4["compression_ratio"],
+                m4[
+                    "compression_ratio"
+                ],
 
             "breakout_distance_pct":
-                m4["breakout_distance_pct"],
+                m4[
+                    "breakout_distance_pct"
+                ],
         },
+
 
         "1h": {
 
@@ -658,14 +966,21 @@ async def analyse_symbol(client, symbol, quote_volume):
                 p1_200["near"],
         },
 
+
         "anti_chase_ok":
             anti_chase_ok,
 
+
         "unavailable_in_this_endpoint": [
+
             "persistent websocket L1-L10 sequence/OFI",
+
             "true multi-window CVD",
+
             "futures OI change",
+
             "funding-rate shift",
+
             "iceberg/whale persistence",
         ],
     }
@@ -680,40 +995,71 @@ async def run_scan(limit=10):
     async with httpx.AsyncClient(
         headers={
             "User-Agent":
-                "psi-v10-live-scanner/2.1"
+                "psi-v10-live-scanner/2.2"
         }
     ) as client:
 
-        exchange_info, tickers = await asyncio.gather(
 
-            api_get(
-                client,
-                "/api/v3/exchangeInfo",
-            ),
+        exchange_info, tickers = (
+            await asyncio.gather(
 
-            api_get(
-                client,
-                "/api/v3/ticker/24hr",
-            ),
+                api_get(
+                    client,
+                    "/api/v3/exchangeInfo",
+                ),
+
+                api_get(
+                    client,
+                    "/api/v3/ticker/24hr",
+                ),
+            )
         )
 
+
         ticker_map = {
+
             row["symbol"]: row
-            for row in tickers
+
+            for row
+            in tickers
         }
+
 
         universe = []
 
-        for market in exchange_info["symbols"]:
+        excluded_known_stables = 0
+        excluded_dynamic_pegs = 0
 
-            symbol = market["symbol"]
-            base_asset = market.get("baseAsset", "")
 
-            if market.get("status") != "TRADING":
+        for market in exchange_info[
+            "symbols"
+        ]:
+
+            symbol = market[
+                "symbol"
+            ]
+
+            base_asset = market.get(
+                "baseAsset",
+                "",
+            )
+
+
+            if (
+                market.get("status")
+                != "TRADING"
+            ):
                 continue
 
-            if market.get("quoteAsset") != "USDT":
+
+            if (
+                market.get(
+                    "quoteAsset"
+                )
+                != "USDT"
+            ):
                 continue
+
 
             if not market.get(
                 "isSpotTradingAllowed",
@@ -721,70 +1067,131 @@ async def run_scan(limit=10):
             ):
                 continue
 
-            if base_asset in STABLE_BASES:
+
+            # Known stablecoin / fiat exclusions
+            if (
+                base_asset
+                in STABLE_BASES
+            ):
+
+                excluded_known_stables += 1
                 continue
 
+
+            ticker = ticker_map.get(
+                symbol,
+                {},
+            )
+
+
+            # Dynamic peg protection
+            if looks_like_stablecoin(
+                ticker
+            ):
+
+                excluded_dynamic_pegs += 1
+                continue
+
+
             quote_volume = float(
-                ticker_map
-                .get(symbol, {})
-                .get("quoteVolume", 0)
+
+                ticker.get(
+                    "quoteVolume",
+                    0,
+                )
+
                 or 0
             )
 
-            if quote_volume >= MIN_QUOTE_VOLUME:
+
+            if (
+                quote_volume
+                >= MIN_QUOTE_VOLUME
+            ):
+
                 universe.append(
-                    (symbol, quote_volume)
+                    (
+                        symbol,
+                        quote_volume,
+                    )
                 )
 
 
-        # Highest-liquidity markets first
+        # Highest liquidity first
         universe.sort(
-            key=lambda item: item[1],
+            key=lambda item:
+                item[1],
             reverse=True,
         )
 
+
+        # Request-load protection
         universe = universe[:160]
 
 
-        raw_results = await asyncio.gather(
+        raw_results = (
+            await asyncio.gather(
 
-            *(
-                analyse_symbol(
-                    client,
-                    symbol,
-                    quote_volume,
-                )
+                *(
+                    analyse_symbol(
+                        client,
+                        symbol,
+                        quote_volume,
+                    )
 
-                for symbol, quote_volume
-                in universe
-            ),
+                    for (
+                        symbol,
+                        quote_volume,
+                    )
+                    in universe
+                ),
 
-            return_exceptions=True,
+                return_exceptions=True,
+            )
         )
 
 
     results = [
+
         result
-        for result in raw_results
-        if isinstance(result, dict)
+
+        for result
+        in raw_results
+
+        if isinstance(
+            result,
+            dict,
+        )
     ]
 
 
+    # ========================================================
+    # PRIORITY
+    # ========================================================
+
     priority = {
+
         "BUY": 0,
+
         "PRE_IGNITION": 1,
+
         "WATCH": 2,
+
         "OBSERVE": 3,
+
         "EXTENDED": 4,
     }
 
 
     results.sort(
+
         key=lambda row: (
+
             priority.get(
                 row["state"],
                 9,
             ),
+
             -row["score"],
         )
     )
@@ -796,33 +1203,73 @@ async def run_scan(limit=10):
             "Binance public Spot market-data API",
 
         "engine":
-            "Psi-V10 Binance EMA pre-breakout v2.1",
+            "Psi-V10 Binance EMA pre-breakout v2.2",
 
         "ema_configuration": {
-            "fast": 7,
-            "medium": 50,
-            "long": 200,
-            "source": "close",
+
+            "fast":
+                7,
+
+            "medium":
+                50,
+
+            "long":
+                200,
+
+            "source":
+                "close",
+
             "timeframes": [
                 "1h",
                 "4h",
             ],
         },
 
+
+        "stablecoin_filter": {
+
+            "known_stablecoin_list":
+                True,
+
+            "dynamic_peg_filter":
+                True,
+
+            "dynamic_price_band":
+                "0.985-1.015 USDT",
+
+            "dynamic_max_24h_range_pct":
+                0.75,
+
+            "excluded_known":
+                excluded_known_stables,
+
+            "excluded_dynamic":
+                excluded_dynamic_pegs,
+        },
+
+
         "universe":
             (
                 "Liquid Binance USDT spot markets; "
-                "stable/pegged bases excluded"
+                "known stablecoins and conservative "
+                "dynamic peg matches excluded"
             ),
+
 
         "minimum_24h_quote_volume_usdt":
             MIN_QUOTE_VOLUME,
 
+
         "scanned":
             len(results),
 
+
         "returned":
-            min(limit, len(results)),
+            min(
+                limit,
+                len(results),
+            ),
+
 
         "signal_rules": {
 
@@ -835,22 +1282,26 @@ async def run_scan(limit=10):
             "PRE_IGNITION":
                 (
                     "4H EMA proximity plus >=4 "
-                    "confirmations and momentum/structure."
+                    "confirmations and "
+                    "momentum/structure."
                 ),
 
             "BUY":
                 (
-                    "4H EMA50/EMA200 proximity + reclaim + "
-                    ">=5 confirmations + momentum + "
-                    "pre-breakout structure + anti-chase."
+                    "4H EMA50/EMA200 proximity + "
+                    "reclaim + >=5 confirmations + "
+                    "momentum + pre-breakout "
+                    "structure + anti-chase."
                 ),
         },
 
+
         "telemetry_note":
             (
-                "Unavailable microstructure and derivatives "
-                "fields are never fabricated."
+                "Unavailable microstructure and "
+                "derivatives fields are never fabricated."
             ),
+
 
         "results":
             results[:limit],
@@ -865,42 +1316,76 @@ async def run_scan(limit=10):
 async def health():
 
     return {
-        "ok": True,
-        "service": "psi-v10-live-scanner",
-        "version": "2.1.0",
-        "moving_average_type": "EMA",
-        "ema_periods": [7, 50, 200],
-        "mcp": "/mcp",
-        "market_data_hosts": BASES,
+
+        "ok":
+            True,
+
+        "service":
+            "psi-v10-live-scanner",
+
+        "version":
+            "2.2.0",
+
+        "moving_average_type":
+            "EMA",
+
+        "ema_periods":
+            [
+                7,
+                50,
+                200,
+            ],
+
+        "stablecoin_filter":
+            True,
+
+        "mcp":
+            "/mcp",
+
+        "market_data_hosts":
+            BASES,
     }
 
 
 @app.get("/scan")
 async def scan(
+
     limit: int = Query(
         10,
         ge=1,
         le=50,
     )
+
 ):
-    return await run_scan(limit)
+
+    return await run_scan(
+        limit
+    )
 
 
 @app.get("/")
 async def root():
 
     return {
+
         "service":
             "Psi V10 Live Scanner",
 
         "version":
-            "2.1.0",
+            "2.2.0",
 
         "moving_average_type":
             "EMA",
 
         "ema_periods":
-            [7, 50, 200],
+            [
+                7,
+                50,
+                200,
+            ],
+
+        "stablecoin_filter":
+            True,
 
         "health":
             "/health",
@@ -926,10 +1411,26 @@ mcp = FastMCP(
 async def scanner_health() -> dict:
 
     return {
-        "ok": True,
-        "version": "2.1.0",
-        "moving_average_type": "EMA",
-        "ema_periods": [7, 50, 200],
+
+        "ok":
+            True,
+
+        "version":
+            "2.2.0",
+
+        "moving_average_type":
+            "EMA",
+
+        "ema_periods":
+            [
+                7,
+                50,
+                200,
+            ],
+
+        "stablecoin_filter":
+            True,
+
         "source":
             "Binance public Spot market-data API",
     }
@@ -942,10 +1443,15 @@ async def scan_top(
 
     limit = max(
         1,
-        min(int(limit), 50),
+        min(
+            int(limit),
+            50,
+        ),
     )
 
-    return await run_scan(limit)
+    return await run_scan(
+        limit
+    )
 
 
 @mcp.tool()
@@ -953,36 +1459,58 @@ async def symbol_detail(
     symbol: str,
 ) -> dict:
 
-    symbol = symbol.upper().strip()
+    symbol = (
+        symbol
+        .upper()
+        .strip()
+    )
 
-    if not symbol.endswith("USDT"):
+
+    if not symbol.endswith(
+        "USDT"
+    ):
+
         symbol += "USDT"
 
 
     async with httpx.AsyncClient(
         headers={
             "User-Agent":
-                "psi-v10-live-scanner/2.1"
+                "psi-v10-live-scanner/2.2"
         }
     ) as client:
 
+
         ticker = await api_get(
+
             client,
+
             "/api/v3/ticker/24hr",
-            {"symbol": symbol},
+
+            {
+                "symbol":
+                    symbol
+            },
         )
 
+
         quote_volume = float(
+
             ticker.get(
                 "quoteVolume",
                 0,
             )
+
             or 0
         )
 
+
         result = await analyse_symbol(
+
             client,
+
             symbol,
+
             quote_volume,
         )
 
@@ -990,10 +1518,18 @@ async def symbol_detail(
     if result is None:
 
         return {
-            "ok": False,
-            "symbol": symbol,
+
+            "ok":
+                False,
+
+            "symbol":
+                symbol,
+
             "error":
-                "Insufficient data or unsupported symbol",
+                (
+                    "Insufficient data "
+                    "or unsupported symbol"
+                ),
         }
 
 
