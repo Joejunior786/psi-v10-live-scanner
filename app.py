@@ -72,14 +72,6 @@ BREAKOUT_NEAR_PCT = float(
     os.getenv("BREAKOUT_NEAR_PCT", "2.0")
 )
 
-BUY_MIN_CONFIRMATIONS = int(
-    os.getenv("BUY_MIN_CONFIRMATIONS", "5")
-)
-
-BUY_MIN_MICRO_CONFIRMATIONS = int(
-    os.getenv("BUY_MIN_MICRO_CONFIRMATIONS", "4")
-)
-
 PRE_MIN_CONFIRMATIONS = int(
     os.getenv("PRE_MIN_CONFIRMATIONS", "4")
 )
@@ -90,11 +82,15 @@ PRE_MIN_MICRO_CONFIRMATIONS = int(
 
 TOP_BOOK_LEVELS = 10
 
-TRADE_WINDOW_SECONDS = 60
+TRADE_WINDOW_SECONDS = 120
 
-OFI_WINDOW_SECONDS = 60
+OFI_WINDOW_SECONDS = 120
 
-USER_AGENT = "psi-v10-live-scanner/4.0"
+MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", "20"))
+MAX_SLIPPAGE_BPS = float(os.getenv("MAX_SLIPPAGE_BPS", "35"))
+SLIPPAGE_TEST_NOTIONAL = float(os.getenv("SLIPPAGE_TEST_NOTIONAL", "1000"))
+
+USER_AGENT = "psi-v10-live-scanner/5.0"
 
 
 # =============================================================================
@@ -942,1306 +938,298 @@ async def load_4h_structure(
 
 
 # =============================================================================
-# MICROSTRUCTURE STATE
+# MICROSTRUCTURE STATE / ORDER BOOK / LIVE FLOW
 # =============================================================================
 
-def ensure_micro_state(
-    symbol: str,
-) -> dict:
-
-    state = micro_state[
-        symbol
-    ]
-
+def ensure_micro_state(symbol: str) -> dict:
+    state = micro_state[symbol]
     if "trades" not in state:
-
-        # (timestamp, signed quote value, quote value)
-
-        state["trades"] = deque(
-            maxlen=20000
-        )
-
-        state["ofi"] = deque(
-            maxlen=5000
-        )
-
-        state["obi"] = deque(
-            maxlen=5000
-        )
-
-        state["ask_depletion"] = deque(
-            maxlen=5000
-        )
-
-        state["bid_depletion"] = deque(
-            maxlen=5000
-        )
-
+        # trade tuple: (timestamp_ms, signed_quote, quote_value, price, quantity)
+        state["trades"] = deque(maxlen=30000)
+        for key in ("ofi", "obi", "ask_depletion", "bid_depletion", "spread_bps", "slippage_bps"):
+            state[key] = deque(maxlen=10000)
         state["previous_bids"] = None
-
         state["previous_asks"] = None
-
         state["book_updates"] = 0
-
         state["last_trade_ms"] = 0
-
         state["last_book_ms"] = 0
-
+        state["last_agg_id"] = None
+        state["trade_sequence_ok"] = True
+        state["trade_sequence_samples"] = 0
+        state["last_book_update_id"] = None
+        state["book_sequence_ok"] = True
+        state["book_sequence_samples"] = 0
     return state
 
 
-# =============================================================================
-# ORDER BOOK MATH
-# =============================================================================
+def depth_notional(levels) -> float:
+    return sum(p * q for p, q in levels[:TOP_BOOK_LEVELS])
 
-def depth_notional(
-    levels: List[
-        Tuple[
-            float,
-            float,
-        ]
-    ],
-) -> float:
 
-    return sum(
+def level_map(levels) -> Dict[float, float]:
+    return {p: q for p, q in levels[:TOP_BOOK_LEVELS]}
 
-        price * quantity
 
-        for price, quantity
-        in levels[
-            :TOP_BOOK_LEVELS
-        ]
-    )
+def calculate_obi(bids, asks) -> float:
+    bv, av = depth_notional(bids), depth_notional(asks)
+    return safe_div(bv - av, bv + av)
 
 
-def level_map(
-    levels: List[
-        Tuple[
-            float,
-            float,
-        ]
-    ],
-) -> Dict[
-    float,
-    float,
-]:
+def calculate_ofi(previous_bids, previous_asks, bids, asks) -> float:
+    pb, pa, cb, ca = level_map(previous_bids), level_map(previous_asks), level_map(bids), level_map(asks)
+    bid_change = sum(p * (cb.get(p, 0.0) - pb.get(p, 0.0)) for p in set(pb) | set(cb))
+    ask_change = sum(p * (ca.get(p, 0.0) - pa.get(p, 0.0)) for p in set(pa) | set(ca))
+    return safe_div(bid_change - ask_change, abs(bid_change) + abs(ask_change))
 
-    return {
 
-        price: quantity
+def depletion(previous, current) -> float:
+    pv = depth_notional(previous)
+    return safe_div(pv - depth_notional(current), pv)
 
-        for price, quantity
-        in levels[
-            :TOP_BOOK_LEVELS
-        ]
-    }
 
-
-def calculate_obi(
-    bids,
-    asks,
-) -> float:
-
-    bid_value = depth_notional(
-        bids
-    )
-
-    ask_value = depth_notional(
-        asks
-    )
-
-    return safe_div(
-
-        bid_value
-        - ask_value,
-
-        bid_value
-        + ask_value,
-    )
-
-
-def calculate_ofi(
-    previous_bids,
-    previous_asks,
-    bids,
-    asks,
-) -> float:
-
-    pb = level_map(
-        previous_bids
-    )
-
-    pa = level_map(
-        previous_asks
-    )
-
-    cb = level_map(
-        bids
-    )
-
-    ca = level_map(
-        asks
-    )
-
-    bid_prices = (
-        set(pb)
-        | set(cb)
-    )
-
-    ask_prices = (
-        set(pa)
-        | set(ca)
-    )
-
-    bid_change = sum(
-
-        price
-        * (
-            cb.get(
-                price,
-                0.0,
-            )
-            -
-            pb.get(
-                price,
-                0.0,
-            )
-        )
-
-        for price
-        in bid_prices
-    )
-
-    ask_change = sum(
-
-        price
-        * (
-            ca.get(
-                price,
-                0.0,
-            )
-            -
-            pa.get(
-                price,
-                0.0,
-            )
-        )
-
-        for price
-        in ask_prices
-    )
-
-    return safe_div(
-
-        bid_change
-        - ask_change,
-
-        abs(
-            bid_change
-        )
-        +
-        abs(
-            ask_change
-        ),
-    )
-
-
-def depletion(
-    previous,
-    current,
-) -> float:
-
-    previous_value = depth_notional(
-        previous
-    )
-
-    current_value = depth_notional(
-        current
-    )
-
-    return safe_div(
-
-        previous_value
-        - current_value,
-
-        previous_value,
-    )
-
-
-# =============================================================================
-# AGGREGATE TRADE PROCESSING
-# =============================================================================
-
-def process_agg_trade(
-    symbol: str,
-    data: dict,
-) -> None:
-
-    state = ensure_micro_state(
-        symbol
-    )
-
-    timestamp = int(
-        data.get("T")
-        or data.get("E")
-        or now_ms()
-    )
-
-    price = safe_float(
-        data.get("p")
-    )
-
-    quantity = safe_float(
-        data.get("q")
-    )
-
-    quote_value = (
-        price
-        * quantity
-    )
-
-    # Binance aggTrade:
-    #
-    # m=True means buyer is maker.
-    # Therefore the aggressive side was SELL.
-    #
-    # m=False means buyer was taker/aggressor.
-    # Therefore aggressive BUY.
-
-    buyer_is_maker = bool(
-        data.get(
-            "m",
-            False,
-        )
-    )
-
-    signed_quote = (
-
-        -quote_value
-
-        if buyer_is_maker
-
-        else quote_value
-    )
-
-    state[
-        "trades"
-    ].append(
-        (
-            timestamp,
-            signed_quote,
-            quote_value,
-        )
-    )
-
-    state[
-        "last_trade_ms"
-    ] = timestamp
-
-    prune_deque(
-
-        state["trades"],
-
-        now_ms()
-        - 120_000,
-    )
-
-
-# =============================================================================
-# PARTIAL ORDER BOOK PROCESSING
-# =============================================================================
-
-def parse_levels(
-    raw,
-) -> List[
-    Tuple[
-        float,
-        float,
-    ]
-]:
-
-    levels = [
-
-        (
-            safe_float(
-                row[0]
-            ),
-            safe_float(
-                row[1]
-            ),
-        )
-
-        for row in raw
-
-        if len(row) >= 2
-    ]
-
-    return [
-
-        (
-            price,
-            quantity,
-        )
-
-        for price, quantity
-        in levels
-
-        if (
-            price > 0
-            and quantity > 0
-        )
-
-    ][:20]
-
-
-def process_partial_depth(
-    symbol: str,
-    data: dict,
-) -> None:
-
-    state = ensure_micro_state(
-        symbol
-    )
-
-    bids = parse_levels(
-        data.get(
-            "bids",
-            [],
-        )
-    )
-
-    asks = parse_levels(
-        data.get(
-            "asks",
-            [],
-        )
-    )
-
-    if (
-        not bids
-        or not asks
-    ):
-        return
-
-    timestamp = now_ms()
-
-    obi = calculate_obi(
-        bids,
-        asks,
-    )
-
-    state[
-        "obi"
-    ].append(
-        (
-            timestamp,
-            obi,
-        )
-    )
-
-    previous_bids = state.get(
-        "previous_bids"
-    )
-
-    previous_asks = state.get(
-        "previous_asks"
-    )
-
-    if (
-        previous_bids
-        and previous_asks
-    ):
-
-        ofi = calculate_ofi(
-            previous_bids,
-            previous_asks,
-            bids,
-            asks,
-        )
-
-        ask_depletion = depletion(
-            previous_asks,
-            asks,
-        )
-
-        bid_depletion = depletion(
-            previous_bids,
-            bids,
-        )
-
-        state[
-            "ofi"
-        ].append(
-            (
-                timestamp,
-                ofi,
-            )
-        )
-
-        state[
-            "ask_depletion"
-        ].append(
-            (
-                timestamp,
-                ask_depletion,
-            )
-        )
-
-        state[
-            "bid_depletion"
-        ].append(
-            (
-                timestamp,
-                bid_depletion,
-            )
-        )
-
-    state[
-        "previous_bids"
-    ] = bids
-
-    state[
-        "previous_asks"
-    ] = asks
-
-    state[
-        "book_updates"
-    ] += 1
-
-    state[
-        "last_book_ms"
-    ] = timestamp
-
-    cutoff = (
-        timestamp
-        - OFI_WINDOW_SECONDS
-        * 1000
-    )
-
-    for key in (
-        "ofi",
-        "obi",
-        "ask_depletion",
-        "bid_depletion",
-    ):
-
-        prune_deque(
-            state[key],
-            cutoff,
-        )
-
-
-# =============================================================================
-# MICROSTRUCTURE METRICS
-# =============================================================================
-
-def micro_metrics(
-    symbol: str,
-) -> dict:
-
-    state = ensure_micro_state(
-        symbol
-    )
-
-    current_time = now_ms()
-
-    trades = state[
-        "trades"
-    ]
-
-    prune_deque(
-
-        trades,
-
-        current_time
-        - 120_000,
-    )
-
-    recent = [
-
-        row
-
-        for row in trades
-
-        if row[0]
-        >= current_time
-        - 60_000
-    ]
-
-    first_30 = [
-
-        row
-
-        for row in recent
-
-        if row[0]
-        < current_time
-        - 30_000
-    ]
-
-    last_30 = [
-
-        row
-
-        for row in recent
-
-        if row[0]
-        >= current_time
-        - 30_000
-    ]
-
-
-    # =========================================================================
-    # CVD
-    # =========================================================================
-
-    cvd_quote_60s = sum(
-        row[1]
-        for row in recent
-    )
-
-    total_quote_60s = sum(
-        row[2]
-        for row in recent
-    )
-
-    aggressive_buy_quote = sum(
-
-        row[2]
-
-        for row in recent
-
-        if row[1] > 0
-    )
-
-    aggressive_buy_ratio = safe_div(
-
-        aggressive_buy_quote,
-
-        total_quote_60s,
-
-        0.5,
-    )
-
-
-    # =========================================================================
-    # TRADE ACCELERATION
-    # =========================================================================
-
-    trade_count_60s = len(
-        recent
-    )
-
-    first_count = len(
-        first_30
-    )
-
-    last_count = len(
-        last_30
-    )
-
-    trade_acceleration = safe_div(
-
-        last_count,
-
-        max(
-            first_count,
-            1,
-        ),
-
-        0.0,
-    )
-
-    average_trade_size = safe_div(
-
-        total_quote_60s,
-
-        trade_count_60s,
-    )
-
-
-    # =========================================================================
-    # ORDER FLOW
-    # =========================================================================
-
-    ofi_values = [
-
-        row[1]
-
-        for row
-        in state["ofi"]
-
-        if row[0]
-        >= current_time
-        - 60_000
-    ]
-
-    obi_values = [
-
-        row[1]
-
-        for row
-        in state["obi"]
-
-        if row[0]
-        >= current_time
-        - 60_000
-    ]
-
-    ask_depletion_values = [
-
-        row[1]
-
-        for row
-        in state[
-            "ask_depletion"
-        ]
-
-        if row[0]
-        >= current_time
-        - 60_000
-    ]
-
-    bid_depletion_values = [
-
-        row[1]
-
-        for row
-        in state[
-            "bid_depletion"
-        ]
-
-        if row[0]
-        >= current_time
-        - 60_000
-    ]
-
-    ofi = average(
-        ofi_values[-20:]
-    )
-
-    obi = average(
-        obi_values[-20:]
-    )
-
-    ask_depletion = average(
-        ask_depletion_values[-20:]
-    )
-
-    bid_depletion = average(
-        bid_depletion_values[-20:]
-    )
-
-    recent_ofi = (
-        ofi_values[-20:]
-    )
-
-    ofi_persistence = safe_div(
-
-        sum(
-            1
-            for value
-            in recent_ofi
-            if value > 0
-        ),
-
-        len(
-            recent_ofi
-        ),
-    )
-
-
-    # =========================================================================
-    # LIVE DATA VALIDATION
-    # =========================================================================
-    #
-    # BUY and PRE-IGNITION cannot use stale/missing WebSocket data.
-    # =========================================================================
-
-    trade_fresh = (
-        state[
-            "last_trade_ms"
-        ]
-        >= current_time
-        - 15_000
-    )
-
-    book_fresh = (
-        state[
-            "last_book_ms"
-        ]
-        >= current_time
-        - 5_000
-    )
-
-    micro_ready = (
-
-        trade_fresh
-
-        and book_fresh
-
-        and len(recent) >= 3
-
-        and len(
-            ofi_values
-        ) >= 3
-
-        and state[
-            "book_updates"
-        ] >= 4
-    )
-
-    return {
-
-        "micro_ready":
-            micro_ready,
-
-        "cvd_quote_60s":
-            cvd_quote_60s,
-
-        "aggressive_buy_ratio":
-            aggressive_buy_ratio,
-
-        "trade_count_60s":
-            trade_count_60s,
-
-        "trade_acceleration":
-            trade_acceleration,
-
-        "avg_trade_size_quote":
-            average_trade_size,
-
-        "ofi":
-            ofi,
-
-        "ofi_persistence":
-            ofi_persistence,
-
-        "obi":
-            obi,
-
-        "ask_depletion":
-            ask_depletion,
-
-        "bid_depletion":
-            bid_depletion,
-
-        "last_trade_ms":
-            state[
-                "last_trade_ms"
-            ],
-
-        "last_book_ms":
-            state[
-                "last_book_ms"
-            ],
-    }
-
-
-# =============================================================================
-# SIGNAL ENGINE
-# =============================================================================
-
-def evaluate_symbol(
-    symbol: str,
-) -> Optional[dict]:
-
-    structure_data = structure.get(
-        symbol
-    )
-
-    if not structure_data:
+def estimate_buy_slippage_bps(asks, notional: float) -> Optional[float]:
+    if not asks or notional <= 0:
         return None
-
-    micro = micro_metrics(
-        symbol
-    )
-
-    micro_confirmations = []
-
-    micro_tests = [
-
-        (
-            micro[
-                "cvd_quote_60s"
-            ] > 0,
-            "POSITIVE_CVD",
-        ),
-
-        (
-            micro[
-                "aggressive_buy_ratio"
-            ] >= 0.55,
-            "AGGRESSIVE_BUY_DOMINANCE",
-        ),
-
-        (
-            micro[
-                "ofi"
-            ] > 0.05,
-            "POSITIVE_OFI",
-        ),
-
-        (
-            micro[
-                "ofi_persistence"
-            ] >= 0.60,
-            "OFI_PERSISTENCE",
-        ),
-
-        (
-            micro[
-                "obi"
-            ] >= 0.10,
-            "BID_DEPTH_IMBALANCE",
-        ),
-
-        (
-            micro[
-                "ask_depletion"
-            ] > 0.03,
-            "ASK_LIQUIDITY_DEPLETION",
-        ),
-
-        (
-            micro[
-                "trade_acceleration"
-            ] >= 1.20,
-            "TRADE_COUNT_ACCELERATION",
-        ),
-    ]
-
-    micro_confirmations.extend(
-
-        name
-
-        for passed, name
-        in micro_tests
-
-        if passed
-    )
-
-    confirmations = (
-
-        list(
-            structure_data[
-                "structure_confirmations"
-            ]
-        )
-
-        + micro_confirmations
-    )
-
-    micro_count = len(
-        micro_confirmations
-    )
-
-    total_count = len(
-        confirmations
-    )
-
-    structure_ok = (
-
-        structure_data[
-            "structural_support"
-        ]
-
-        or structure_data[
-            "breakout_near"
-        ]
-
-        or structure_data[
-            "breakout"
-        ]
-    )
-
-    volume_ok = (
-        structure_data[
-            "volume_acceleration"
-        ]
-        >= 1.05
-    )
-
-    core_flow_ok = (
-
-        micro[
-            "cvd_quote_60s"
-        ] > 0
-
-        and micro[
-            "aggressive_buy_ratio"
-        ] >= 0.55
-
-        and micro[
-            "ofi"
-        ] > 0.05
-
-        and micro[
-            "ofi_persistence"
-        ] >= 0.60
-    )
-
-
-    # =========================================================================
-    # BUY GATE
-    # =========================================================================
-
-    # STRICT Ψ-V10 BUY MATRIX: every mandatory live layer must align.
-    # Confirmation counts are diagnostic/ranking only and can never override a failed gate.
-    mandatory_conditions = {
-        "LIVE_MICRO_DATA": micro["micro_ready"],
-        "EMA_BULLISH_STACK": structure_data["bullish_ema_stack"],
-        "EMA_STRUCTURAL_SUPPORT": structure_data["structural_support"],
-        "VOLUME_ACCELERATION": structure_data["volume_acceleration"] >= 1.20,
-        "RANGE_COMPRESSION": structure_data["compression"],
-        "BREAKOUT_POSITIONING": structure_data["breakout_near"] or structure_data["breakout"],
-        "POSITIVE_CVD": micro["cvd_quote_60s"] > 0,
-        "AGGRESSIVE_BUY_DOMINANCE": micro["aggressive_buy_ratio"] >= 0.55,
-        "POSITIVE_OFI": micro["ofi"] > 0.05,
-        "OFI_PERSISTENCE": micro["ofi_persistence"] >= 0.60,
-        "BID_DEPTH_IMBALANCE": micro["obi"] >= 0.10,
-        "ASK_LIQUIDITY_DEPLETION": micro["ask_depletion"] > 0.03,
-        "TRADE_COUNT_ACCELERATION": micro["trade_acceleration"] >= 1.20,
-        "ANTI_CHASE_CLEAR": not structure_data["anti_chase"],
-    }
-
-    mandatory_status = {
-        name: ("PASS" if passed else "FAIL")
-        for name, passed in mandatory_conditions.items()
-    }
-
-    failed_mandatory = [
-        name for name, passed in mandatory_conditions.items() if not passed
-    ]
-
-    buy_gate = all(mandatory_conditions.values())
-
-
-    # =========================================================================
-    # PRE-IGNITION GATE
-    # =========================================================================
-
-    pre_gate = (
-
-        not buy_gate
-
-        and not structure_data[
-            "anti_chase"
-        ]
-
-        and micro[
-            "micro_ready"
-        ]
-
-        and structure_ok
-
-        and micro_count
-        >= PRE_MIN_MICRO_CONFIRMATIONS
-
-        and total_count
-        >= PRE_MIN_CONFIRMATIONS
-    )
-
-
-    # =========================================================================
-    # CLASSIFICATION
-    # =========================================================================
-
-    if buy_gate:
-
-        signal_state = "BUY NOW"
-
-    elif pre_gate:
-
-        signal_state = (
-            "PRE-IGNITION"
-        )
-
-    elif (
-
-        structure_data[
-            "ema50_near"
-        ]
-
-        or structure_data[
-            "ema200_near"
-        ]
-
-        or structure_data[
-            "breakout_near"
-        ]
-    ):
-
-        signal_state = "WATCH"
-
-    else:
-
-        signal_state = (
-            "MONITOR"
-        )
-
-
-    # =========================================================================
-    # RANKING SCORE
-    # =========================================================================
-
-    score = 0.0
-
-    score += (
-        len(
-            structure_data[
-                "structure_confirmations"
-            ]
-        )
-        * 7.0
-    )
-
-    score += (
-        micro_count
-        * 9.0
-    )
-
-    proximity = min(
-
-        abs(
-            structure_data[
-                "distance_ema50_atr"
-            ]
-        ),
-
-        abs(
-            structure_data[
-                "distance_ema200_atr"
-            ]
-        ),
-    )
-
-    score += max(
-        0.0,
-        12.0
-        - proximity
-        * 4.0,
-    )
-
-    score += (
-
-        min(
-            max(
-                structure_data[
-                    "volume_acceleration"
-                ],
-                0.0,
-            ),
-            3.0,
-        )
-
-        * 4.0
-    )
-
-    score += (
-
-        max(
-            0.0,
-            micro["ofi"],
-        )
-
-        * 12.0
-    )
-
-    score += (
-
-        max(
-            0.0,
-            micro["obi"],
-        )
-
-        * 8.0
-    )
-
-    score += (
-
-        max(
-            0.0,
-            micro[
-                "ofi_persistence"
-            ],
-        )
-
-        * 6.0
-    )
-
-    if structure_data[
-        "anti_chase"
-    ]:
-
-        score -= 30.0
-
-    if not micro[
-        "micro_ready"
-    ]:
-
-        score -= 5.0
-
+    remaining, base_bought, spent = notional, 0.0, 0.0
+    best = asks[0][0]
+    for price, qty in asks[:TOP_BOOK_LEVELS]:
+        level_quote = price * qty
+        take = min(remaining, level_quote)
+        if take > 0:
+            spent += take
+            base_bought += take / price
+            remaining -= take
+        if remaining <= 1e-9:
+            break
+    if remaining > 1e-6 or base_bought <= 0 or best <= 0:
+        return None
+    avg_price = spent / base_bought
+    return (avg_price / best - 1.0) * 10000.0
+
+
+def process_agg_trade(symbol: str, data: dict) -> None:
+    state = ensure_micro_state(symbol)
+    timestamp = int(data.get("T") or data.get("E") or now_ms())
+    price, quantity = safe_float(data.get("p")), safe_float(data.get("q"))
+    if price <= 0 or quantity <= 0:
+        return
+    quote_value = price * quantity
+    signed_quote = -quote_value if bool(data.get("m", False)) else quote_value
+    agg_id = data.get("a")
+    if agg_id is not None:
+        try:
+            agg_id = int(agg_id)
+            last_id = state.get("last_agg_id")
+            if last_id is not None:
+                state["trade_sequence_samples"] += 1
+                if agg_id <= last_id:
+                    state["trade_sequence_ok"] = False
+            state["last_agg_id"] = agg_id
+        except (TypeError, ValueError):
+            state["trade_sequence_ok"] = False
+    state["trades"].append((timestamp, signed_quote, quote_value, price, quantity))
+    state["last_trade_ms"] = timestamp
+    prune_deque(state["trades"], now_ms() - 180_000)
+
+
+def parse_levels(raw):
+    return [(p, q) for p, q in ((safe_float(r[0]), safe_float(r[1])) for r in raw if len(r) >= 2) if p > 0 and q > 0][:20]
+
+
+def process_partial_depth(symbol: str, data: dict) -> None:
+    state = ensure_micro_state(symbol)
+    bids, asks = parse_levels(data.get("bids", [])), parse_levels(data.get("asks", []))
+    if not bids or not asks:
+        return
+    timestamp = now_ms()
+    update_id = data.get("lastUpdateId")
+    if update_id is not None:
+        try:
+            update_id = int(update_id)
+            last_update_id = state.get("last_book_update_id")
+            if last_update_id is not None:
+                state["book_sequence_samples"] += 1
+                if update_id <= last_update_id:
+                    state["book_sequence_ok"] = False
+            state["last_book_update_id"] = update_id
+        except (TypeError, ValueError):
+            state["book_sequence_ok"] = False
+    obi = calculate_obi(bids, asks)
+    best_bid, best_ask = bids[0][0], asks[0][0]
+    mid = (best_bid + best_ask) / 2.0
+    spread_bps = safe_div(best_ask - best_bid, mid) * 10000.0
+    slippage = estimate_buy_slippage_bps(asks, SLIPPAGE_TEST_NOTIONAL)
+    state["obi"].append((timestamp, obi))
+    state["spread_bps"].append((timestamp, spread_bps))
+    if slippage is not None:
+        state["slippage_bps"].append((timestamp, slippage))
+    pb, pa = state.get("previous_bids"), state.get("previous_asks")
+    if pb and pa:
+        state["ofi"].append((timestamp, calculate_ofi(pb, pa, bids, asks)))
+        state["ask_depletion"].append((timestamp, depletion(pa, asks)))
+        state["bid_depletion"].append((timestamp, depletion(pb, bids)))
+    state["previous_bids"], state["previous_asks"] = bids, asks
+    state["book_updates"] += 1
+    state["last_book_ms"] = timestamp
+    cutoff = timestamp - OFI_WINDOW_SECONDS * 1000
+    for key in ("ofi", "obi", "ask_depletion", "bid_depletion", "spread_bps", "slippage_bps"):
+        prune_deque(state[key], cutoff)
+
+
+def _window(rows, now, lo, hi=0):
+    lower, upper = now - lo * 1000, now - hi * 1000
+    return [r for r in rows if lower <= r[0] < upper]
+
+
+def micro_metrics(symbol: str) -> dict:
+    state, current_time = ensure_micro_state(symbol), now_ms()
+    trades = state["trades"]
+    prune_deque(trades, current_time - 180_000)
+    recent = _window(trades, current_time, 60)
+    first30, last30 = _window(trades, current_time, 60, 30), _window(trades, current_time, 30)
+    prev60 = _window(trades, current_time, 120, 60)
+    last10, prev10 = _window(trades, current_time, 10), _window(trades, current_time, 20, 10)
+
+    cvd60 = sum(r[1] for r in recent)
+    cvd_first, cvd_last = sum(r[1] for r in first30), sum(r[1] for r in last30)
+    cvd_acceleration = cvd_last - cvd_first
+    total60 = sum(r[2] for r in recent)
+    buy_ratio = safe_div(sum(r[2] for r in recent if r[1] > 0), total60, 0.5)
+    trade_acceleration = safe_div(len(last30), max(len(first30), 1))
+    avg_trade = safe_div(total60, len(recent))
+    avg_first = safe_div(sum(r[2] for r in first30), len(first30))
+    avg_last = safe_div(sum(r[2] for r in last30), len(last30))
+    trade_size_shift = safe_div(avg_last, max(avg_first, 1e-9))
+    qv10, qvprev10 = sum(r[2] for r in last10), sum(r[2] for r in prev10)
+    qv30, qvprev60 = sum(r[2] for r in last30), sum(r[2] for r in prev60)
+    rel_volume_10s = safe_div(qv10, max(qvprev10, 1e-9))
+    rel_volume_30s = safe_div(qv30, max(qvprev60 / 2.0, 1e-9))
+
+    vwap = safe_div(sum(r[3] * r[4] for r in recent), sum(r[4] for r in recent))
+    last_price = recent[-1][3] if recent else 0.0
+    prev_vwap = safe_div(sum(r[3] * r[4] for r in first30), sum(r[4] for r in first30))
+    vwap_reclaim = bool(vwap and last_price >= vwap and (not prev_vwap or (first30 and first30[-1][3] <= prev_vwap) or cvd_acceleration > 0))
+    vwap_deviation_bps = safe_div(last_price - vwap, vwap) * 10000.0 if vwap else 0.0
+
+    def vals(key, seconds=60):
+        return [r[1] for r in state[key] if r[0] >= current_time - seconds * 1000]
+    ofis, obis = vals("ofi"), vals("obi")
+    asks, bids = vals("ask_depletion"), vals("bid_depletion")
+    spreads, slips = vals("spread_bps"), vals("slippage_bps")
+    ofi = average(ofis[-20:]); obi = average(obis[-20:])
+    ask_dep = average(asks[-20:]); bid_dep = average(bids[-20:])
+    half = max(1, len(ofis) // 2)
+    ofi_acceleration = average(ofis[half:]) - average(ofis[:half]) if len(ofis) >= 6 else 0.0
+    ofi_persistence = safe_div(sum(1 for x in ofis[-20:] if x > 0), len(ofis[-20:]))
+    flow_persistence = safe_div(sum(1 for r in last30 if r[1] > 0), len(last30))
+    spread_bps = spreads[-1] if spreads else None
+    slippage_bps = slips[-1] if slips else None
+
+    trade_fresh = state["last_trade_ms"] >= current_time - 15_000
+    book_fresh = state["last_book_ms"] >= current_time - 5_000
+    sequence_verified = state["trade_sequence_ok"] and state["trade_sequence_samples"] >= 3
+    book_sequence_verified = state["book_sequence_ok"] and state["book_sequence_samples"] >= 3
+    micro_ready = trade_fresh and book_fresh and len(recent) >= 10 and len(ofis) >= 6 and state["book_updates"] >= 8
 
     return {
+        "micro_ready": micro_ready, "trade_fresh": trade_fresh, "book_fresh": book_fresh,
+        "sequence_verified": sequence_verified, "book_sequence_verified": book_sequence_verified, "cvd_quote_60s": cvd60,
+        "cvd_acceleration": cvd_acceleration, "aggressive_buy_ratio": buy_ratio,
+        "trade_count_60s": len(recent), "trade_acceleration": trade_acceleration,
+        "avg_trade_size_quote": avg_trade, "trade_size_shift": trade_size_shift,
+        "relative_volume_10s": rel_volume_10s, "relative_volume_30s": rel_volume_30s,
+        "vwap_60s": vwap, "vwap_reclaim": vwap_reclaim, "vwap_deviation_bps": vwap_deviation_bps,
+        "ofi": ofi, "ofi_acceleration": ofi_acceleration, "ofi_persistence": ofi_persistence,
+        "flow_persistence": flow_persistence, "obi": obi, "ask_depletion": ask_dep,
+        "bid_depletion": bid_dep, "spread_bps": spread_bps, "slippage_bps": slippage_bps,
+        "last_trade_ms": state["last_trade_ms"], "last_book_ms": state["last_book_ms"],
+    }
 
-        "symbol":
-            symbol,
 
-        "state":
-            signal_state,
+# =============================================================================
+# SIGNAL ENGINE — STRICT ALL-MANDATORY BUY
+# =============================================================================
 
-        "score":
-            round(
-                score,
-                2,
-            ),
+def evaluate_symbol(symbol: str) -> Optional[dict]:
+    sd = structure.get(symbol)
+    if not sd:
+        return None
+    m = micro_metrics(symbol)
 
-        "price":
-            structure_data[
-                "price"
-            ],
+    # A trigger is valid either while compressed immediately under resistance,
+    # or after the breakout has actually fired. This avoids requiring mutually
+    # exclusive pre-breakout and post-breakout states at the same instant.
+    trigger_state = (sd["compression"] and sd["breakout_near"]) or sd["breakout"]
+    ema_layer = sd["bullish_ema_stack"] and (sd["structural_support"] or sd["ema50_near"] or sd["ema200_near"])
 
-        "ema50_4h":
-            structure_data[
-                "ema50_4h"
-            ],
+    mandatory = {
+        "LIVE_MICRO_DATA": m["micro_ready"],
+        "TRADE_SEQUENCE_VALID": m["sequence_verified"],
+        "BOOK_UPDATE_SEQUENCE_VALID": m["book_sequence_verified"],
+        "EMA_LAYER_ALIGNED": ema_layer,
+        "STRUCTURE_TRIGGER": trigger_state,
+        "4H_VOLUME_ACCELERATION": sd["volume_acceleration"] >= 1.20,
+        "MULTI_WINDOW_RELATIVE_VOLUME": m["relative_volume_10s"] >= 1.05 and m["relative_volume_30s"] >= 1.05,
+        "POSITIVE_CVD": m["cvd_quote_60s"] > 0,
+        "CVD_ACCELERATION": m["cvd_acceleration"] > 0,
+        "AGGRESSIVE_BUY_DOMINANCE": m["aggressive_buy_ratio"] >= 0.55,
+        "POSITIVE_OFI": m["ofi"] > 0.05,
+        "OFI_ACCELERATION": m["ofi_acceleration"] > 0,
+        "OFI_PERSISTENCE": m["ofi_persistence"] >= 0.60,
+        "BID_DEPTH_IMBALANCE": m["obi"] >= 0.10,
+        "ASK_LIQUIDITY_DEPLETION": m["ask_depletion"] > 0.03,
+        "TRADE_COUNT_ACCELERATION": m["trade_acceleration"] >= 1.20,
+        "TRADE_SIZE_SHIFT": m["trade_size_shift"] >= 1.05,
+        "FLOW_PERSISTENCE": m["flow_persistence"] >= 0.55,
+        "VWAP_RECLAIM": m["vwap_reclaim"],
+        "SPREAD_FILTER": m["spread_bps"] is not None and m["spread_bps"] <= MAX_SPREAD_BPS,
+        "SLIPPAGE_FILTER": m["slippage_bps"] is not None and m["slippage_bps"] <= MAX_SLIPPAGE_BPS,
+        "ANTI_CHASE_CLEAR": not sd["anti_chase"],
+    }
+    status = {k: ("PASS" if v else "FAIL") for k, v in mandatory.items()}
+    failed = [k for k, v in mandatory.items() if not v]
+    buy = all(mandatory.values())
+    pass_count = sum(mandatory.values())
+    pass_ratio = safe_div(pass_count, len(mandatory))
 
-        "ema200_4h":
-            structure_data[
-                "ema200_4h"
-            ],
+    if buy:
+        state = "BUY NOW"
+    elif m["micro_ready"] and not sd["anti_chase"] and pass_ratio >= 0.70:
+        state = "PRE-IGNITION"
+    elif sd["ema50_near"] or sd["ema200_near"] or sd["breakout_near"]:
+        state = "WATCH"
+    else:
+        state = "REJECT"
 
-        "atr14_4h":
-            structure_data[
-                "atr14_4h"
-            ],
+    confirmations = list(sd["structure_confirmations"]) + [k for k, v in mandatory.items() if v]
+    score = pass_ratio * 100.0
+    score += min(max(sd["volume_acceleration"] - 1.0, 0.0) * 5.0, 10.0)
+    score -= 20.0 if sd["anti_chase"] else 0.0
 
-        "distance_ema50_atr":
-            structure_data[
-                "distance_ema50_atr"
-            ],
-
-        "distance_ema200_atr":
-            structure_data[
-                "distance_ema200_atr"
-            ],
-
-        "volume_acceleration":
-            structure_data[
-                "volume_acceleration"
-            ],
-
-        "compression_ratio":
-            structure_data[
-                "compression_ratio"
-            ],
-
-        "resistance":
-            structure_data[
-                "resistance"
-            ],
-
-        "breakout_distance_pct":
-            structure_data[
-                "breakout_distance_pct"
-            ],
-
-        "anti_chase":
-            structure_data[
-                "anti_chase"
-            ],
-
-        "micro_ready":
-            micro[
-                "micro_ready"
-            ],
-
-        "cvd_quote_60s":
-            micro[
-                "cvd_quote_60s"
-            ],
-
-        "aggressive_buy_ratio":
-            micro[
-                "aggressive_buy_ratio"
-            ],
-
-        "ofi":
-            micro[
-                "ofi"
-            ],
-
-        "ofi_persistence":
-            micro[
-                "ofi_persistence"
-            ],
-
-        "obi":
-            micro[
-                "obi"
-            ],
-
-        "ask_depletion":
-            micro[
-                "ask_depletion"
-            ],
-
-        "bid_depletion":
-            micro[
-                "bid_depletion"
-            ],
-
-        "trade_count_60s":
-            micro[
-                "trade_count_60s"
-            ],
-
-        "trade_acceleration":
-            micro[
-                "trade_acceleration"
-            ],
-
-        "avg_trade_size_quote":
-            micro[
-                "avg_trade_size_quote"
-            ],
-
-        "structure_confirmations":
-            structure_data[
-                "structure_confirmations"
-            ],
-
-        "micro_confirmations":
-            micro_confirmations,
-
-        "confirmations":
-            confirmations,
-
-        "confirmation_count":
-            total_count,
-
-        "micro_confirmation_count":
-            micro_count,
-
-        "mandatory_status":
-            mandatory_status,
-
-        "mandatory_all_aligned":
-            buy_gate,
-
-        "failed_mandatory":
-            failed_mandatory,
-
-        "quote_volume_24h":
-            structure_data[
-                "quote_volume_24h"
-            ],
-
-        "updated_ms":
-            structure_data[
-                "updated_ms"
-            ],
+    return {
+        "symbol": symbol, "state": state, "score": round(score, 2), "price": sd["price"],
+        "ema50_4h": sd["ema50_4h"], "ema200_4h": sd["ema200_4h"], "atr14_4h": sd["atr14_4h"],
+        "distance_ema50_atr": sd["distance_ema50_atr"], "distance_ema200_atr": sd["distance_ema200_atr"],
+        "volume_acceleration": sd["volume_acceleration"], "compression_ratio": sd["compression_ratio"],
+        "resistance": sd["resistance"], "breakout_distance_pct": sd["breakout_distance_pct"],
+        "anti_chase": sd["anti_chase"], "micro_ready": m["micro_ready"],
+        "cvd_quote_60s": m["cvd_quote_60s"], "cvd_acceleration": m["cvd_acceleration"],
+        "aggressive_buy_ratio": m["aggressive_buy_ratio"], "ofi": m["ofi"],
+        "ofi_acceleration": m["ofi_acceleration"], "ofi_persistence": m["ofi_persistence"],
+        "obi": m["obi"], "ask_depletion": m["ask_depletion"], "bid_depletion": m["bid_depletion"],
+        "trade_count_60s": m["trade_count_60s"], "trade_acceleration": m["trade_acceleration"],
+        "avg_trade_size_quote": m["avg_trade_size_quote"], "trade_size_shift": m["trade_size_shift"],
+        "relative_volume_10s": m["relative_volume_10s"], "relative_volume_30s": m["relative_volume_30s"],
+        "vwap_60s": m["vwap_60s"], "vwap_reclaim": m["vwap_reclaim"],
+        "vwap_deviation_bps": m["vwap_deviation_bps"], "spread_bps": m["spread_bps"],
+        "slippage_bps": m["slippage_bps"], "sequence_verified": m["sequence_verified"],
+        "book_sequence_verified": m["book_sequence_verified"],
+        "flow_persistence": m["flow_persistence"], "confirmations": confirmations,
+        "confirmation_count": len(confirmations), "micro_confirmation_count": pass_count,
+        "mandatory_status": status, "mandatory_pass_count": pass_count,
+        "mandatory_total": len(mandatory), "mandatory_pass_ratio": round(pass_ratio, 4),
+        "mandatory_all_aligned": buy, "failed_mandatory": failed,
+        "quote_volume_24h": sd["quote_volume_24h"], "updated_ms": sd["updated_ms"],
     }
 
 
@@ -2257,7 +1245,7 @@ STATE_PRIORITY = {
 
     "WATCH": 2,
 
-    "MONITOR": 1,
+    "REJECT": 1,
 }
 
 
@@ -2933,7 +1921,7 @@ async def health(
                 "psi-v10-live-scanner",
 
             "version":
-                "4.0",
+                "5.0",
 
             "scanner_ready":
                 scanner_ready,
@@ -3058,7 +2046,7 @@ async def scan_endpoint(
                 "Ψ-V10",
 
             "version":
-                "4.0",
+                "5.0",
 
             "source":
                 "Binance public Spot market data",
@@ -3093,6 +2081,14 @@ async def scan_endpoint(
                     "bid depletion",
                     "trade acceleration",
                     "OFI persistence",
+                    "multi-window relative volume",
+                    "CVD acceleration",
+                    "OFI acceleration",
+                    "trade-size shift",
+                    "VWAP reclaim",
+                    "spread filter",
+                    "top-10-book slippage estimate",
+                    "trade/update sequence validation",
                 ],
 
             "scanner_ready":
@@ -3344,4 +2340,3 @@ if __name__ == "__main__":
         print(
             "Ψ-V10 stopped.",
             flush=True,
-        )
