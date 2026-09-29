@@ -94,7 +94,7 @@ TRADE_WINDOW_SECONDS = 60
 
 OFI_WINDOW_SECONDS = 60
 
-USER_AGENT = "psi-v10-live-scanner/3.0"
+USER_AGENT = "psi-v10-live-scanner/4.0"
 
 
 # =============================================================================
@@ -484,7 +484,7 @@ async def load_4h_structure(
             {
                 "symbol": symbol,
                 "interval": "4h",
-                "limit": 250,
+                "limit": 1000,
             },
         )
 
@@ -497,7 +497,7 @@ async def load_4h_structure(
             rows,
             list,
         )
-        or len(rows) < 210
+        or len(rows) < 500
     ):
         return None
 
@@ -509,7 +509,7 @@ async def load_4h_structure(
 
     closed = rows[:-1]
 
-    if len(closed) < 205:
+    if len(closed) < 500:
         return None
 
     closes = [
@@ -1886,28 +1886,35 @@ def evaluate_symbol(
     # BUY GATE
     # =========================================================================
 
-    buy_gate = (
+    # STRICT Ψ-V10 BUY MATRIX: every mandatory live layer must align.
+    # Confirmation counts are diagnostic/ranking only and can never override a failed gate.
+    mandatory_conditions = {
+        "LIVE_MICRO_DATA": micro["micro_ready"],
+        "EMA_BULLISH_STACK": structure_data["bullish_ema_stack"],
+        "EMA_STRUCTURAL_SUPPORT": structure_data["structural_support"],
+        "VOLUME_ACCELERATION": structure_data["volume_acceleration"] >= 1.20,
+        "RANGE_COMPRESSION": structure_data["compression"],
+        "BREAKOUT_POSITIONING": structure_data["breakout_near"] or structure_data["breakout"],
+        "POSITIVE_CVD": micro["cvd_quote_60s"] > 0,
+        "AGGRESSIVE_BUY_DOMINANCE": micro["aggressive_buy_ratio"] >= 0.55,
+        "POSITIVE_OFI": micro["ofi"] > 0.05,
+        "OFI_PERSISTENCE": micro["ofi_persistence"] >= 0.60,
+        "BID_DEPTH_IMBALANCE": micro["obi"] >= 0.10,
+        "ASK_LIQUIDITY_DEPLETION": micro["ask_depletion"] > 0.03,
+        "TRADE_COUNT_ACCELERATION": micro["trade_acceleration"] >= 1.20,
+        "ANTI_CHASE_CLEAR": not structure_data["anti_chase"],
+    }
 
-        not structure_data[
-            "anti_chase"
-        ]
+    mandatory_status = {
+        name: ("PASS" if passed else "FAIL")
+        for name, passed in mandatory_conditions.items()
+    }
 
-        and micro[
-            "micro_ready"
-        ]
+    failed_mandatory = [
+        name for name, passed in mandatory_conditions.items() if not passed
+    ]
 
-        and structure_ok
-
-        and volume_ok
-
-        and core_flow_ok
-
-        and micro_count
-        >= BUY_MIN_MICRO_CONFIRMATIONS
-
-        and total_count
-        >= BUY_MIN_CONFIRMATIONS
-    )
+    buy_gate = all(mandatory_conditions.values())
 
 
     # =========================================================================
@@ -1916,7 +1923,9 @@ def evaluate_symbol(
 
     pre_gate = (
 
-        not structure_data[
+        not buy_gate
+
+        and not structure_data[
             "anti_chase"
         ]
 
@@ -1940,7 +1949,7 @@ def evaluate_symbol(
 
     if buy_gate:
 
-        signal_state = "BUY"
+        signal_state = "BUY NOW"
 
     elif pre_gate:
 
@@ -2215,6 +2224,15 @@ def evaluate_symbol(
         "micro_confirmation_count":
             micro_count,
 
+        "mandatory_status":
+            mandatory_status,
+
+        "mandatory_all_aligned":
+            buy_gate,
+
+        "failed_mandatory":
+            failed_mandatory,
+
         "quote_volume_24h":
             structure_data[
                 "quote_volume_24h"
@@ -2233,7 +2251,7 @@ def evaluate_symbol(
 
 STATE_PRIORITY = {
 
-    "BUY": 4,
+    "BUY NOW": 4,
 
     "PRE-IGNITION": 3,
 
@@ -2915,7 +2933,7 @@ async def health(
                 "psi-v10-live-scanner",
 
             "version":
-                "3.0",
+                "4.0",
 
             "scanner_ready":
                 scanner_ready,
@@ -3040,7 +3058,7 @@ async def scan_endpoint(
                 "Ψ-V10",
 
             "version":
-                "3.0",
+                "4.0",
 
             "source":
                 "Binance public Spot market data",
@@ -3053,6 +3071,12 @@ async def scan_endpoint(
 
             "timeframe":
                 "4h",
+
+            "buy_policy":
+                "STRICT_ALL_MANDATORY_LIVE_CONDITIONS",
+
+            "ema_history_candles":
+                999,
 
             "moving_averages":
                 [
