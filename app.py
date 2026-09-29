@@ -1,5 +1,5 @@
 # =============================================================================
-# Ψ-V10 BINANCE LIVE SCANNER
+# Î¨-V10 BINANCE LIVE SCANNER
 # =============================================================================
 # Read-only market scanner. Does not place trades.
 # Railway endpoints: GET /, GET /health, GET /scan
@@ -80,6 +80,11 @@ PRE_MIN_MICRO_CONFIRMATIONS = int(
     os.getenv("PRE_MIN_MICRO_CONFIRMATIONS", "3")
 )
 
+ANOMALY_REFRESH_SECONDS = int(os.getenv("ANOMALY_REFRESH_SECONDS", "30"))
+ANOMALY_CANDLE_LIMIT = int(os.getenv("ANOMALY_CANDLE_LIMIT", "32"))
+ANOMALY_PROMOTION_SLOTS = int(os.getenv("ANOMALY_PROMOTION_SLOTS", "40"))
+MISSED_MOVE_15M_PCT = float(os.getenv("MISSED_MOVE_15M_PCT", "10.0"))
+
 TOP_BOOK_LEVELS = 10
 
 TRADE_WINDOW_SECONDS = 120
@@ -90,7 +95,7 @@ MAX_SPREAD_BPS = float(os.getenv("MAX_SPREAD_BPS", "20"))
 MAX_SLIPPAGE_BPS = float(os.getenv("MAX_SLIPPAGE_BPS", "35"))
 SLIPPAGE_TEST_NOTIONAL = float(os.getenv("SLIPPAGE_TEST_NOTIONAL", "1000"))
 
-USER_AGENT = "psi-v10-live-scanner/5.0"
+USER_AGENT = "psi-v10-live-scanner/6.0"
 
 
 # =============================================================================
@@ -146,6 +151,10 @@ rest_connected = False
 websocket_connected = False
 
 websocket_symbols: List[str] = []
+
+anomaly_state: Dict[str, dict] = {}
+missed_moves: deque = deque(maxlen=500)
+last_anomaly_refresh = 0.0
 
 
 # =============================================================================
@@ -287,6 +296,13 @@ def ema(
         )
 
     return result
+
+
+
+def sma(values: List[float], period: int) -> Optional[float]:
+    if len(values) < period:
+        return None
+    return average(values[-period:])
 
 
 def true_ranges(
@@ -463,477 +479,139 @@ async def get_exchange_symbols(
     return universe
 
 
+
+async def load_klines(client: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[List[list]]:
+    try:
+        rows = await api_get(client, "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    except Exception:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def ma_snapshot(rows: List[list]) -> Optional[dict]:
+    if not rows or len(rows) < 205:
+        return None
+    closed = rows[:-1]
+    closes = [safe_float(r[4]) for r in closed]
+    lows = [safe_float(r[3]) for r in closed]
+    current = safe_float(rows[-1][4])
+    a = atr(closed, 14)
+    if current <= 0 or not a:
+        return None
+    e50, e200 = ema(closes, 50), ema(closes, 200)
+    s50, s200 = sma(closes, 50), sma(closes, 200)
+    if not all((e50, e200, s50, s200)):
+        return None
+    previous, last = closes[-2], closes[-1]
+    values = {"ema50": e50, "ema200": e200, "sma50": s50, "sma200": s200}
+    near = {k: abs(current-v)/a <= EMA_NEAR_ATR for k,v in values.items()}
+    touch = {k: abs(current-v)/a <= EMA_TOUCH_ATR for k,v in values.items()}
+    reclaim = {k: previous <= v and last > v for k,v in values.items()}
+    rejection = {k: lows[-1] <= v and last > v for k,v in values.items()}
+    bullish = current > e50 > e200 and current > s50 > s200
+    support = any(touch.values()) or any(reclaim.values()) or any(rejection.values())
+    return {
+        "price": current, "atr14": a, **values, "near": near, "touch": touch,
+        "reclaim": reclaim, "rejection": rejection, "bullish_stack": bullish,
+        "structural_support": support,
+    }
+
+
+async def load_fast_anomaly(client: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
+    rows = await load_klines(client, symbol, "1m", ANOMALY_CANDLE_LIMIT)
+    if not rows or len(rows) < 22:
+        return None
+    closed = rows[:-1]
+    closes = [safe_float(r[4]) for r in closed]
+    qvol = [safe_float(r[7]) for r in closed]
+    trades = [safe_float(r[8]) for r in closed]
+    p = closes[-1]
+    if p <= 0:
+        return None
+    def ret(n):
+        return (p / closes[-1-n] - 1.0) * 100.0 if len(closes) > n and closes[-1-n] > 0 else 0.0
+    r1, r3, r5, r15 = ret(1), ret(3), ret(5), ret(15)
+    rv = safe_div(qvol[-1], average(qvol[-21:-1]), 0.0)
+    ta = safe_div(trades[-1], average(trades[-21:-1]), 0.0)
+    highs = [safe_float(r[2]) for r in closed[-20:]]
+    lows = [safe_float(r[3]) for r in closed[-20:]]
+    compression_pct = safe_div(max(highs)-min(lows), p) * 100.0
+    score = max(0,r1)*3.0 + max(0,r3)*1.7 + max(0,r5) + max(0,r15)*0.35
+    score += min(rv,8.0)*4.0 + min(ta,8.0)*3.0 + (6.0 if compression_pct < 3.0 else 0.0)
+    return {
+        "symbol": symbol, "price": p, "return_1m_pct": r1, "return_3m_pct": r3,
+        "return_5m_pct": r5, "return_15m_pct": r15, "relative_volume_1m": rv,
+        "trade_count_acceleration_1m": ta, "compression_20m_pct": compression_pct,
+        "anomaly_score": score, "updated_ms": now_ms(),
+    }
+
+
 # =============================================================================
 # 4H STRUCTURE
 # =============================================================================
 
-async def load_4h_structure(
-    client: aiohttp.ClientSession,
-    symbol: str,
-) -> Optional[dict]:
-
-    try:
-
-        rows = await api_get(
-            client,
-            "/api/v3/klines",
-            {
-                "symbol": symbol,
-                "interval": "4h",
-                "limit": 1000,
-            },
-        )
-
-    except Exception:
-
+async def load_4h_structure(client: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
+    rows1, rows4 = await asyncio.gather(
+        load_klines(client, symbol, "1h", 260),
+        load_klines(client, symbol, "4h", 260),
+    )
+    m1, m4 = ma_snapshot(rows1 or []), ma_snapshot(rows4 or [])
+    if not m1 or not m4 or not rows4:
         return None
-
-    if (
-        not isinstance(
-            rows,
-            list,
-        )
-        or len(rows) < 500
-    ):
-        return None
-
-    # Closed candles drive EMA / ATR /
-    # reclaim logic.
-    #
-    # Current live candle close is used
-    # as the current market price.
-
-    closed = rows[:-1]
-
-    if len(closed) < 500:
-        return None
-
-    closes = [
-        safe_float(row[4])
-        for row in closed
-    ]
-
-    highs = [
-        safe_float(row[2])
-        for row in closed
-    ]
-
-    lows = [
-        safe_float(row[3])
-        for row in closed
-    ]
-
-    volumes = [
-        safe_float(row[5])
-        for row in closed
-    ]
-
-    current_price = safe_float(
-        rows[-1][4]
-    )
-
-    ema50 = ema(
-        closes,
-        50,
-    )
-
-    ema200 = ema(
-        closes,
-        200,
-    )
-
-    atr14 = atr(
-        closed,
-        14,
-    )
-
-    if (
-        not ema50
-        or not ema200
-        or not atr14
-        or current_price <= 0
-    ):
-        return None
-
-    last_close = closes[-1]
-
-    previous_close = closes[-2]
-
-    last_low = lows[-1]
-
-
-    # =========================================================================
-    # VOLUME ACCELERATION
-    # =========================================================================
-
-    avg20_volume = average(
-        volumes[-20:]
-    )
-
-    volume_acceleration = safe_div(
-        volumes[-1],
-        avg20_volume,
-    )
-
-
-    # =========================================================================
-    # RANGE COMPRESSION
-    # =========================================================================
-
-    recent_ranges = [
-
-        highs[i] - lows[i]
-
-        for i in range(
-            max(
-                0,
-                len(highs) - 6,
-            ),
-            len(highs),
-        )
-    ]
-
-    baseline_ranges = [
-
-        highs[i] - lows[i]
-
-        for i in range(
-            max(
-                0,
-                len(highs) - 26,
-            ),
-            max(
-                0,
-                len(highs) - 6,
-            ),
-        )
-    ]
-
-    compression_ratio = safe_div(
-
-        average(
-            recent_ranges
-        ),
-
-        average(
-            baseline_ranges
-        ),
-
-        1.0,
-    )
-
-    compression = (
-        compression_ratio
-        <= 0.80
-    )
-
-
-    # =========================================================================
-    # BREAKOUT STRUCTURE
-    # =========================================================================
-
-    resistance_window = (
-        highs[-21:-1]
-    )
-
-    resistance = (
-
-        max(
-            resistance_window
-        )
-
-        if resistance_window
-
-        else highs[-1]
-    )
-
-    breakout_distance_pct = (
-
-        (
-            resistance
-            - current_price
-        )
-        / current_price
-        * 100.0
-    )
-
-    breakout_near = (
-        -0.5
-        <= breakout_distance_pct
-        <= BREAKOUT_NEAR_PCT
-    )
-
-    breakout = (
-        current_price
-        > resistance
-    )
-
-
-    # =========================================================================
-    # EMA PROXIMITY
-    # =========================================================================
-
-    distance_ema50_atr = safe_div(
-        current_price - ema50,
-        atr14,
-    )
-
-    distance_ema200_atr = safe_div(
-        current_price - ema200,
-        atr14,
-    )
-
-    ema50_touch = (
-        abs(
-            distance_ema50_atr
-        )
-        <= EMA_TOUCH_ATR
-    )
-
-    ema200_touch = (
-        abs(
-            distance_ema200_atr
-        )
-        <= EMA_TOUCH_ATR
-    )
-
-    ema50_near = (
-        abs(
-            distance_ema50_atr
-        )
-        <= EMA_NEAR_ATR
-    )
-
-    ema200_near = (
-        abs(
-            distance_ema200_atr
-        )
-        <= EMA_NEAR_ATR
-    )
-
-
-    # =========================================================================
-    # EMA RECLAIM / REJECTION
-    # =========================================================================
-
-    ema50_reclaim = (
-        previous_close <= ema50
-        and last_close > ema50
-    )
-
-    ema200_reclaim = (
-        previous_close <= ema200
-        and last_close > ema200
-    )
-
-    ema50_rejection = (
-        last_low <= ema50
-        and last_close > ema50
-    )
-
-    ema200_rejection = (
-        last_low <= ema200
-        and last_close > ema200
-    )
-
-    bullish_ema_stack = (
-        current_price > ema50
-        and ema50 > ema200
-    )
-
-    structural_support = any(
-        (
-            ema50_touch,
-            ema200_touch,
-            ema50_reclaim,
-            ema200_reclaim,
-            ema50_rejection,
-            ema200_rejection,
-        )
-    )
-
-
-    # =========================================================================
-    # ANTI-CHASE
-    # =========================================================================
-
-    anti_chase = (
-        distance_ema50_atr
-        > ANTI_CHASE_ATR
-        and
-        distance_ema200_atr
-        > ANTI_CHASE_ATR
-    )
-
-
-    # =========================================================================
-    # STRUCTURAL CONFIRMATIONS
-    # =========================================================================
+    closed = rows4[:-1]
+    highs = [safe_float(r[2]) for r in closed]
+    lows = [safe_float(r[3]) for r in closed]
+    volumes = [safe_float(r[5]) for r in closed]
+    current_price = safe_float(rows4[-1][4])
+    avg20_volume = average(volumes[-20:])
+    volume_acceleration = safe_div(volumes[-1], avg20_volume)
+    recent_ranges = [highs[i]-lows[i] for i in range(max(0,len(highs)-6),len(highs))]
+    baseline_ranges = [highs[i]-lows[i] for i in range(max(0,len(highs)-26),max(0,len(highs)-6))]
+    compression_ratio = safe_div(average(recent_ranges), average(baseline_ranges), 1.0)
+    compression = compression_ratio <= 0.80
+    resistance_window = highs[-21:-1]
+    resistance = max(resistance_window) if resistance_window else highs[-1]
+    breakout_distance_pct = safe_div(resistance-current_price,current_price)*100.0
+    breakout_near = -0.5 <= breakout_distance_pct <= BREAKOUT_NEAR_PCT
+    breakout = current_price > resistance
+
+    # Full required MA harmony: 1H + 4H, EMA50/200 + SMA50/200.
+    ma_harmony = m1["bullish_stack"] and m4["bullish_stack"]
+    ma_support = m1["structural_support"] or m4["structural_support"]
+    near_any = any(m1["near"].values()) or any(m4["near"].values())
+    dist50 = safe_div(current_price-m4["ema50"],m4["atr14"])
+    dist200 = safe_div(current_price-m4["ema200"],m4["atr14"])
+    anti_chase = (dist50 > ANTI_CHASE_ATR and dist200 > ANTI_CHASE_ATR)
 
     confirmations = []
-
-    tests = [
-
-        (
-            ema50_touch,
-            "4H_EMA50_TOUCH",
-        ),
-
-        (
-            ema200_touch,
-            "4H_EMA200_TOUCH",
-        ),
-
-        (
-            ema50_reclaim,
-            "4H_EMA50_RECLAIM",
-        ),
-
-        (
-            ema200_reclaim,
-            "4H_EMA200_RECLAIM",
-        ),
-
-        (
-            ema50_rejection,
-            "4H_EMA50_REJECTION",
-        ),
-
-        (
-            ema200_rejection,
-            "4H_EMA200_REJECTION",
-        ),
-
-        (
-            bullish_ema_stack,
-            "BULLISH_EMA_STACK",
-        ),
-
-        (
-            volume_acceleration
-            >= 1.20,
-            "VOLUME_ACCELERATION",
-        ),
-
-        (
-            compression,
-            "RANGE_COMPRESSION",
-        ),
-
-        (
-            breakout_near,
-            "NEAR_RESISTANCE",
-        ),
-
-        (
-            breakout,
-            "BREAKOUT",
-        ),
-    ]
-
-    confirmations.extend(
-
-        name
-
-        for passed, name
-        in tests
-
-        if passed
-    )
+    for tf, snap in (("1H",m1),("4H",m4)):
+        for k,v in snap["touch"].items():
+            if v: confirmations.append(f"{tf}_{k.upper()}_TOUCH")
+        for k,v in snap["reclaim"].items():
+            if v: confirmations.append(f"{tf}_{k.upper()}_RECLAIM")
+        for k,v in snap["rejection"].items():
+            if v: confirmations.append(f"{tf}_{k.upper()}_REJECTION")
+        if snap["bullish_stack"]: confirmations.append(f"{tf}_EMA_SMA_STACK")
+    if volume_acceleration >= 1.20: confirmations.append("4H_VOLUME_ACCELERATION")
+    if compression: confirmations.append("RANGE_COMPRESSION")
+    if breakout_near: confirmations.append("NEAR_RESISTANCE")
+    if breakout: confirmations.append("BREAKOUT")
 
     return {
-
-        "symbol":
-            symbol,
-
-        "price":
-            current_price,
-
-        "ema50_4h":
-            ema50,
-
-        "ema200_4h":
-            ema200,
-
-        "atr14_4h":
-            atr14,
-
-        "distance_ema50_atr":
-            distance_ema50_atr,
-
-        "distance_ema200_atr":
-            distance_ema200_atr,
-
-        "ema50_touch":
-            ema50_touch,
-
-        "ema200_touch":
-            ema200_touch,
-
-        "ema50_near":
-            ema50_near,
-
-        "ema200_near":
-            ema200_near,
-
-        "ema50_reclaim":
-            ema50_reclaim,
-
-        "ema200_reclaim":
-            ema200_reclaim,
-
-        "ema50_rejection":
-            ema50_rejection,
-
-        "ema200_rejection":
-            ema200_rejection,
-
-        "bullish_ema_stack":
-            bullish_ema_stack,
-
-        "structural_support":
-            structural_support,
-
-        "volume_acceleration":
-            volume_acceleration,
-
-        "compression_ratio":
-            compression_ratio,
-
-        "compression":
-            compression,
-
-        "resistance":
-            resistance,
-
-        "breakout_distance_pct":
-            breakout_distance_pct,
-
-        "breakout_near":
-            breakout_near,
-
-        "breakout":
-            breakout,
-
-        "anti_chase":
-            anti_chase,
-
-        "structure_confirmations":
-            confirmations,
-
-        "quote_volume_24h":
-            symbol_meta
-            .get(
-                symbol,
-                {},
-            )
-            .get(
-                "quote_volume_24h",
-                0.0,
-            ),
-
-        "updated_ms":
-            now_ms(),
+        "symbol": symbol, "price": current_price,
+        "ema50_1h": m1["ema50"], "ema200_1h": m1["ema200"], "sma50_1h": m1["sma50"], "sma200_1h": m1["sma200"],
+        "ema50_4h": m4["ema50"], "ema200_4h": m4["ema200"], "sma50_4h": m4["sma50"], "sma200_4h": m4["sma200"],
+        "atr14_1h": m1["atr14"], "atr14_4h": m4["atr14"],
+        "distance_ema50_atr": dist50, "distance_ema200_atr": dist200,
+        "ema50_near": m4["near"]["ema50"], "ema200_near": m4["near"]["ema200"],
+        "ma_1h": m1, "ma_4h": m4, "ma_harmony": ma_harmony,
+        "structural_support": ma_support, "volume_acceleration": volume_acceleration,
+        "compression_ratio": compression_ratio, "compression": compression,
+        "resistance": resistance, "breakout_distance_pct": breakout_distance_pct,
+        "breakout_near": breakout_near, "breakout": breakout, "anti_chase": anti_chase,
+        "structure_confirmations": confirmations,
+        "quote_volume_24h": symbol_meta.get(symbol,{}).get("quote_volume_24h",0.0),
+        "updated_ms": now_ms(),
     }
 
 
@@ -1147,7 +825,7 @@ def micro_metrics(symbol: str) -> dict:
 
 
 # =============================================================================
-# SIGNAL ENGINE — STRICT ALL-MANDATORY BUY
+# SIGNAL ENGINE â€” STRICT ALL-MANDATORY BUY
 # =============================================================================
 
 def evaluate_symbol(symbol: str) -> Optional[dict]:
@@ -1160,13 +838,14 @@ def evaluate_symbol(symbol: str) -> Optional[dict]:
     # or after the breakout has actually fired. This avoids requiring mutually
     # exclusive pre-breakout and post-breakout states at the same instant.
     trigger_state = (sd["compression"] and sd["breakout_near"]) or sd["breakout"]
-    ema_layer = sd["bullish_ema_stack"] and (sd["structural_support"] or sd["ema50_near"] or sd["ema200_near"])
+    ema_layer = sd["ma_harmony"] and (sd["structural_support"] or sd["ema50_near"] or sd["ema200_near"])
 
     mandatory = {
         "LIVE_MICRO_DATA": m["micro_ready"],
         "TRADE_SEQUENCE_VALID": m["sequence_verified"],
         "BOOK_UPDATE_SEQUENCE_VALID": m["book_sequence_verified"],
-        "EMA_LAYER_ALIGNED": ema_layer,
+        "EMA_SMA_1H_4H_HARMONY": ema_layer,
+        "FAST_ANOMALY_DISCOVERY": anomaly_state.get(symbol, {}).get("fast_trigger", False),
         "STRUCTURE_TRIGGER": trigger_state,
         "4H_VOLUME_ACCELERATION": sd["volume_acceleration"] >= 1.20,
         "MULTI_WINDOW_RELATIVE_VOLUME": m["relative_volume_10s"] >= 1.05 and m["relative_volume_30s"] >= 1.05,
@@ -1208,7 +887,10 @@ def evaluate_symbol(symbol: str) -> Optional[dict]:
 
     return {
         "symbol": symbol, "state": state, "score": round(score, 2), "price": sd["price"],
-        "ema50_4h": sd["ema50_4h"], "ema200_4h": sd["ema200_4h"], "atr14_4h": sd["atr14_4h"],
+        "ema50_1h": sd["ema50_1h"], "ema200_1h": sd["ema200_1h"], "sma50_1h": sd["sma50_1h"], "sma200_1h": sd["sma200_1h"],
+        "ema50_4h": sd["ema50_4h"], "ema200_4h": sd["ema200_4h"], "sma50_4h": sd["sma50_4h"], "sma200_4h": sd["sma200_4h"],
+        "atr14_1h": sd["atr14_1h"], "atr14_4h": sd["atr14_4h"], "ma_harmony": sd["ma_harmony"],
+        "fast_anomaly": anomaly_state.get(symbol, {}),
         "distance_ema50_atr": sd["distance_ema50_atr"], "distance_ema200_atr": sd["distance_ema200_atr"],
         "volume_acceleration": sd["volume_acceleration"], "compression_ratio": sd["compression_ratio"],
         "resistance": sd["resistance"], "breakout_distance_pct": sd["breakout_distance_pct"],
@@ -1344,7 +1026,7 @@ async def refresh_structure() -> None:
         return
 
     print(
-        "Ψ-V10: loading Binance universe...",
+        "Î¨-V10: loading Binance universe...",
         flush=True,
     )
 
@@ -1365,7 +1047,7 @@ async def refresh_structure() -> None:
     ]
 
     print(
-        f"Ψ-V10: analysing "
+        f"Î¨-V10: analysing "
         f"{len(symbols)} "
         f"liquid Spot USDT markets...",
         flush=True,
@@ -1398,116 +1080,40 @@ async def refresh_structure() -> None:
 
     # =========================================================================
     # CHOOSE LIVE MICROSTRUCTURE UNIVERSE
+    # Blend slower MA/structure candidates with market-wide fast anomalies.
     # =========================================================================
-
     candidates = []
-
     for symbol in symbols:
-
-        row = structure.get(
-            symbol
-        )
-
+        row = structure.get(symbol)
         if not row:
             continue
+        proximity = min(abs(row["distance_ema50_atr"]), abs(row["distance_ema200_atr"]))
+        structural_score = len(row["structure_confirmations"]) * 10.0
+        structural_score += max(0.0, 20.0-proximity*5.0)
+        structural_score += min(row["volume_acceleration"]*5.0,15.0)
+        if row["compression"]: structural_score += 10.0
+        if row["breakout_near"]: structural_score += 10.0
+        if row["ma_harmony"]: structural_score += 12.0
+        if row["anti_chase"]: structural_score -= 25.0
+        candidates.append((structural_score,row["quote_volume_24h"],symbol))
+    candidates.sort(reverse=True)
 
-        proximity = min(
-
-            abs(
-                row[
-                    "distance_ema50_atr"
-                ]
-            ),
-
-            abs(
-                row[
-                    "distance_ema200_atr"
-                ]
-            ),
-        )
-
-        structural_score = (
-
-            len(
-                row[
-                    "structure_confirmations"
-                ]
-            )
-
-            * 10.0
-        )
-
-        structural_score += max(
-
-            0.0,
-
-            20.0
-            - proximity
-            * 5.0,
-        )
-
-        structural_score += min(
-
-            row[
-                "volume_acceleration"
-            ]
-
-            * 5.0,
-
-            15.0,
-        )
-
-        if row[
-            "compression"
-        ]:
-
-            structural_score += 10.0
-
-        if row[
-            "breakout_near"
-        ]:
-
-            structural_score += 10.0
-
-        if row[
-            "anti_chase"
-        ]:
-
-            structural_score -= 25.0
-
-        candidates.append(
-            (
-                structural_score,
-                row[
-                    "quote_volume_24h"
-                ],
-                symbol,
-            )
-        )
-
-    candidates.sort(
-        reverse=True
+    fast_ranked = sorted(
+        (x for x in anomaly_state.values() if x.get("symbol") in active),
+        key=lambda x: x.get("anomaly_score",0.0),
+        reverse=True,
     )
-
-    new_symbols = [
-
-        symbol
-
-        for _, _, symbol
-        in candidates[
-            :MICRO_UNIVERSE_SIZE
-        ]
-    ]
-
-    selected_micro_symbols = (
-        new_symbols
-    )
-
+    fast_slots = min(ANOMALY_PROMOTION_SLOTS, MICRO_UNIVERSE_SIZE)
+    structural_slots = max(0, MICRO_UNIVERSE_SIZE-fast_slots)
+    new_symbols = [x["symbol"] for x in fast_ranked[:fast_slots]]
+    for _,_,symbol in candidates:
+        if symbol not in new_symbols:
+            new_symbols.append(symbol)
+        if len(new_symbols) >= MICRO_UNIVERSE_SIZE:
+            break
+    selected_micro_symbols = new_symbols
     for symbol in new_symbols:
-
-        ensure_micro_state(
-            symbol
-        )
+        ensure_micro_state(symbol)
 
     last_structure_refresh = (
         time.time()
@@ -1516,7 +1122,7 @@ async def refresh_structure() -> None:
     scanner_ready = True
 
     print(
-        "Ψ-V10 STRUCTURE READY",
+        "Î¨-V10 STRUCTURE READY",
         flush=True,
     )
 
@@ -1527,6 +1133,57 @@ async def refresh_structure() -> None:
         ),
         flush=True,
     )
+
+
+async def refresh_anomalies() -> None:
+    global last_anomaly_refresh, selected_micro_symbols
+    if session is None:
+        return
+    universe = await get_exchange_symbols(session)
+    symbols = [symbol for symbol,_ in universe[:TOP_STRUCTURE_UNIVERSE]]
+    sem = asyncio.Semaphore(24)
+    async def worker(symbol):
+        async with sem:
+            return await load_fast_anomaly(session,symbol)
+    rows = await asyncio.gather(*(worker(s) for s in symbols), return_exceptions=True)
+    for row in rows:
+        if not isinstance(row,dict):
+            continue
+        row["fast_trigger"] = (
+            row["relative_volume_1m"] >= 2.0
+            or row["trade_count_acceleration_1m"] >= 2.0
+            or row["return_3m_pct"] >= 1.2
+            or row["return_5m_pct"] >= 2.0
+        )
+        anomaly_state[row["symbol"]] = row
+        if row["return_15m_pct"] >= MISSED_MOVE_15M_PCT and row["symbol"] not in selected_micro_symbols:
+            missed_moves.append({
+                "timestamp_ms": now_ms(), "symbol": row["symbol"],
+                "return_15m_pct": row["return_15m_pct"],
+                "reason": "NOT_IN_MICRO_POOL_BEFORE_MOVE",
+                "anomaly_score": row["anomaly_score"],
+            })
+    ranked = sorted(anomaly_state.values(),key=lambda x:x.get("anomaly_score",0.0),reverse=True)
+    fast = [x["symbol"] for x in ranked[:min(ANOMALY_PROMOTION_SLOTS,MICRO_UNIVERSE_SIZE)]]
+    # Immediate promotion: preserve the rest of the current pool.
+    merged = fast + [x for x in selected_micro_symbols if x not in fast]
+    selected_micro_symbols = merged[:MICRO_UNIVERSE_SIZE]
+    for symbol in selected_micro_symbols:
+        ensure_micro_state(symbol)
+    last_anomaly_refresh = time.time()
+
+
+async def anomaly_refresh_loop() -> None:
+    global last_error
+    while True:
+        try:
+            await refresh_anomalies()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_error = f"ANOMALY: {type(exc).__name__}: {exc}"
+            print(last_error,flush=True)
+        await asyncio.sleep(ANOMALY_REFRESH_SECONDS)
 
 
 async def structure_refresh_loop() -> None:
@@ -1630,7 +1287,7 @@ async def websocket_loop() -> None:
             )
 
             print(
-                f"Ψ-V10 WebSocket connecting "
+                f"Î¨-V10 WebSocket connecting "
                 f"for {len(symbols)} symbols...",
                 flush=True,
             )
@@ -1660,7 +1317,7 @@ async def websocket_loop() -> None:
                 last_error = None
 
                 print(
-                    "Ψ-V10 WebSocket connected.",
+                    "Î¨-V10 WebSocket connected.",
                     flush=True,
                 )
 
@@ -1683,7 +1340,7 @@ async def websocket_loop() -> None:
                     ):
 
                         print(
-                            "Ψ-V10 micro universe changed; "
+                            "Î¨-V10 micro universe changed; "
                             "reconnecting WebSocket.",
                             flush=True,
                         )
@@ -1847,7 +1504,7 @@ async def print_loop() -> None:
             )
 
             print(
-                "Ψ-V10 LIVE TOP 10",
+                "Î¨-V10 LIVE TOP 10",
                 flush=True,
             )
 
@@ -1921,7 +1578,7 @@ async def health(
                 "psi-v10-live-scanner",
 
             "version":
-                "5.0",
+                "6.0",
 
             "scanner_ready":
                 scanner_ready,
@@ -1947,6 +1604,9 @@ async def health(
                 len(
                     selected_micro_symbols
                 ),
+
+            "anomaly_symbols":
+                len(anomaly_state),
 
             "websocket_symbols":
                 len(
@@ -2043,10 +1703,10 @@ async def scan_endpoint(
                 True,
 
             "scanner":
-                "Ψ-V10",
+                "Î¨-V10",
 
             "version":
-                "5.0",
+                "6.0",
 
             "source":
                 "Binance public Spot market data",
@@ -2058,7 +1718,7 @@ async def scan_endpoint(
                 WS_BASE,
 
             "timeframe":
-                "4h",
+                "1m anomaly + 1h/4h structure",
 
             "buy_policy":
                 "STRICT_ALL_MANDATORY_LIVE_CONDITIONS",
@@ -2068,8 +1728,8 @@ async def scan_endpoint(
 
             "moving_averages":
                 [
-                    "EMA50",
-                    "EMA200",
+                    "1H EMA50", "1H EMA200", "1H SMA50", "1H SMA200",
+                    "4H EMA50", "4H EMA200", "4H SMA50", "4H SMA200",
                 ],
 
             "microstructure":
@@ -2122,6 +1782,11 @@ async def scan_endpoint(
                     results
                 ),
 
+            "anomaly_universe_size": len(anomaly_state),
+            "last_anomaly_refresh_age_seconds": (
+                int(time.time()-last_anomaly_refresh) if last_anomaly_refresh else None
+            ),
+            "missed_moves": list(missed_moves)[-50:],
             "results":
                 results,
 
@@ -2169,7 +1834,7 @@ async def start_http_server():
     await site.start()
 
     print(
-        f"Ψ-V10 HTTP listening "
+        f"Î¨-V10 HTTP listening "
         f"on port {PORT}",
         flush=True,
     )
@@ -2184,7 +1849,7 @@ async def start_http_server():
 async def initialise() -> None:
 
     print(
-        "Ψ-V10 INITIALISING...",
+        "Î¨-V10 INITIALISING...",
         flush=True,
     )
 
@@ -2198,10 +1863,11 @@ async def initialise() -> None:
         flush=True,
     )
 
+    await refresh_anomalies()
     await refresh_structure()
 
     print(
-        "Ψ-V10 INITIALISED.",
+        "Î¨-V10 INITIALISED.",
         flush=True,
     )
 
@@ -2277,7 +1943,7 @@ async def main() -> None:
             )
 
             print(
-                "Ψ-V10 will retry structure "
+                "Î¨-V10 will retry structure "
                 "loading in background.",
                 flush=True,
             )
@@ -2287,6 +1953,10 @@ async def main() -> None:
 
             asyncio.create_task(
                 structure_refresh_loop()
+            ),
+
+            asyncio.create_task(
+                anomaly_refresh_loop()
             ),
 
             asyncio.create_task(
@@ -2338,5 +2008,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print(
-            "Ψ-V10 stopped.",
+            "Î¨-V10 stopped.",
             flush=True,)
