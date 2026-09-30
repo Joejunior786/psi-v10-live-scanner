@@ -17,8 +17,9 @@ COPY ignition109_app.py .
 COPY ignition1091_app.py .
 COPY ignition1092_app.py .
 COPY ignition1093_app.py .
+COPY ignition110_app.py .
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=10.9
+ENV PSI_SCANNER_VERSION=10.10
 
-CMD ["python", "ignition1093_app.py"]
+CMD ["python", "ignition110_app.py"]
