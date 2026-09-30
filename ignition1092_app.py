@@ -147,6 +147,11 @@ async def ticker_loop():
                         if not isinstance(payload, list):
                             continue
                         ts = time.time()
+                        # V10.10 runs this ticker loop, not v81.ticker_loop. Keep
+                        # the extension guard's feed heartbeat in sync here so
+                        # extension telemetry is judged by the feed actually in use.
+                        v81.extension_ticker_last_message_ts = ts
+                        v81.extension_ticker_last_count = len(payload)
                         for x in payload:
                             if not isinstance(x, dict):
                                 continue
