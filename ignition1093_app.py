@@ -13,6 +13,7 @@ import ignition1091_app as core
 import ignition1092_app as v92
 
 VERSION = "10.9-latent-cluster-extension-guard"
+EXTENSION_TICKER_MAX_AGE_SECONDS = 30.0
 _original_metric = v92.metric
 
 core.VERSION = VERSION
@@ -124,9 +125,56 @@ def metric(symbol):
     return r
 
 
+def extension_evaluate(symbol):
+    row = v81._original_evaluate(symbol)
+    if not row:
+        return None
+
+    ext = v81._extension_context(symbol, row)
+    row["extension_guard"] = ext
+    row["change_24h_pct"] = ext["change_24h_pct"]
+    row["extension_tier"] = ext["extension_tier"]
+    row["late_runner"] = ext["extension_tier"] == "LATE_RUNNER"
+    row["new_base_reset"] = ext["reset_reentry"]
+
+    current_state = row.get("state", "REJECT")
+    qualifies = current_state in q.QUALIFIER_STATES
+    guard = bool(ext["extension_guard_pass"])
+
+    ticker_age = ext.get("ticker_age_seconds")
+    telemetry_live = ticker_age is not None and ticker_age <= EXTENSION_TICKER_MAX_AGE_SECONDS
+    ext["ticker_freshness_limit_seconds"] = EXTENSION_TICKER_MAX_AGE_SECONDS
+    if not telemetry_live:
+        guard = False
+        ext["extension_guard_pass"] = False
+        ext["extension_guard_reason"] = "24H_EXTENSION_TELEMETRY_NOT_LIVE"
+
+    row.setdefault("hard_safety_status", {})["CUMULATIVE_EXTENSION_GUARD"] = "PASS" if guard else "FAIL"
+    if not guard:
+        if "CUMULATIVE_EXTENSION_GUARD" not in row.setdefault("failed_hard", []):
+            row["failed_hard"].append("CUMULATIVE_EXTENSION_GUARD")
+        row["hard_safety_all_aligned"] = False
+        row["mandatory_all_aligned"] = False
+
+        if qualifies or ext["extension_tier"] == "LATE_RUNNER":
+            row["state"] = "LATE RUNNER"
+            row["active_setup"] = "LATE_RUNNER_BLOCKED"
+            if ext["extension_tier"] == "CONTROLLED_RUNNER":
+                row["score"] = round(min(float(row.get("score") or 0.0), v81.MAX_CONTROLLED_BLOCK_SCORE), 2)
+            elif ext["extension_tier"] == "EXCEPTIONAL_RUNNER":
+                row["score"] = round(min(float(row.get("score") or 0.0), v81.MAX_EXCEPTIONAL_BLOCK_SCORE), 2)
+            else:
+                row["score"] = round(min(float(row.get("score") or 0.0), v81.MAX_LATE_RUNNER_SCORE), 2)
+    elif ext["reset_reentry"] and qualifies:
+        row["active_setup"] = "RESET_REENTRY"
+
+    return row
+
+
 v9.metric = metric
 base.metric = metric
 v7.ignition_metric = metric
+v81.evaluate = extension_evaluate
 
 app.evaluate_symbol = core.evaluate
 app.health = core.health
@@ -142,7 +190,7 @@ if __name__ == "__main__":
     try:
         print(
             "Ψ-V10.9 ACTIVE — latent ignition + burst clustering + rolling pressure + "
-            "verified aggTrade acceleration + persistent rapid subscriptions + extension guard",
+            "verified aggTrade acceleration + persistent rapid subscriptions + extension guard(30s freshness)",
             flush=True,
         )
         asyncio.run(v7.main())
