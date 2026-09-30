@@ -22,8 +22,9 @@ COPY orderbook_patch.py .
 COPY warmup_patch.py .
 COPY ignition110_entry.py .
 COPY ignition114_entry.py .
+COPY ignition115_entry.py .
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=10.14
+ENV PSI_SCANNER_VERSION=10.15
 
-CMD ["python", "ignition114_entry.py"]
+CMD ["python", "ignition115_entry.py"]
