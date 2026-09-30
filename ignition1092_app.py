@@ -15,6 +15,7 @@ import ignition1091_app as core
 
 VERSION = "10.9-latent-cluster-extension-guard"
 _original_metric = v9.metric
+extension_diag_last_ts = 0.0
 
 core.VERSION = VERSION
 v9.VERSION = VERSION
@@ -131,6 +132,7 @@ def metric(symbol):
 
 
 async def ticker_loop():
+    global extension_diag_last_ts
     url = f"{app.WS_BASE}/ws/!ticker@arr"
     while True:
         try:
@@ -174,6 +176,20 @@ async def ticker_loop():
                                 app.safe_float(x.get("a")),
                                 "ticker",
                             )
+
+                        if ts - extension_diag_last_ts >= 30.0:
+                            refs = []
+                            for sym in ("BTCUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT"):
+                                d = v81.market_24h.get(sym) or {}
+                                refs.append(
+                                    f"{sym}:P={d.get('change_pct')} age="
+                                    f"{round(ts-float(d.get('ts') or ts),1) if d else 'NA'}"
+                                )
+                            print(
+                                f"Ψ-V10.10 EXTENSION_FEED count={len(payload)} " + " ".join(refs),
+                                flush=True,
+                            )
+                            extension_diag_last_ts = ts
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
         except asyncio.CancelledError:
