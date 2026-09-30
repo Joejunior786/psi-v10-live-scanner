@@ -163,6 +163,10 @@ def pb_plan(p,c5,a,zone,tm,ri):
     res=sorted({f(ri.get(k)) for k in ("resistance1","resistance2","resistance3") if f(ri.get(k))>entry})
     t2=(next((x*.999 for x in res if x>=entry+1.45*risk),None) or entry+2*risk)
     t3=(next((x*.999 for x in res if x>=max(t2+.25*risk,entry+2.35*risk)),None) or entry+3*risk)
+    # Enforce strictly increasing take-profit ladders after structural snapping.
+    t1=max(t1,entry+.70*risk)
+    t2=max(t2,t1+.25*risk,entry+1.45*risk)
+    t3=max(t3,t2+.25*risk,entry+2.35*risk)
     return entry,stop,t1,t2,t3,rp,"CONDITIONAL_RECLAIM"
 
 def pb_eval(sym,tm,c5,c15):
