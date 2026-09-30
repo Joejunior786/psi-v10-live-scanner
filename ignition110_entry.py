@@ -172,6 +172,29 @@ def _install_warmup():
                 elif int(meta.get("streak", 0)) < READY_STREAK_REQUIRED:
                     _append_once(blockers, "WAITING_READY_STREAK")
                 d["blockers"] = blockers
+
+            # Diagnostics must distinguish execution/safety gates from signal layers.
+            # An empty failed_hard list means every execution gate passed; it does
+            # NOT mean Flow/Book/VWAP/MA signal layers passed.
+            hard_failures = list(d.get("failed_hard", []) or [])
+            layer_failures = list(d.get("failed_layers", d.get("failed_setup", [])) or [])
+            extra_blockers = list(d.get("blockers", []) or [])
+
+            d["failed_execution_gates"] = hard_failures
+            d["execution_gate_status"] = "PASS_ALL" if not hard_failures else "BLOCKED"
+            d["missing_signal_layers"] = layer_failures
+
+            combined = []
+            for blocker in hard_failures + layer_failures + extra_blockers:
+                _append_once(combined, blocker)
+            d["combined_blockers"] = combined
+
+            # Human-readable legacy field used by the current print loop.
+            # Keep the real machine-readable failures above while avoiding hard=[]
+            # being mistaken for 'everything passed'.
+            if not hard_failures:
+                d["failed_hard"] = "PASS_ALL"
+
             out.append(d)
         return out
 
@@ -182,7 +205,7 @@ def _install_warmup():
 
     print(
         "Ψ-V10.11 MICRO WARMUP ACTIVE — 90s warm-up + 3 ready samples + "
-        "WATCH/early candidate locking + 900s minimum pool hold",
+        "WATCH/early candidate locking + 900s minimum pool hold + separated execution/layer diagnostics",
         flush=True,
     )
 
@@ -204,7 +227,7 @@ scanner.s.print_loop = _combined_print_loop
 if __name__ == "__main__":
     try:
         print(
-            "Ψ-V10.11 ACTIVE — hardened book sequencing + micro warmup + candidate locking",
+            "Ψ-V10.11 ACTIVE — hardened book sequencing + micro warmup + candidate locking + clear blocker diagnostics",
             flush=True,
         )
         asyncio.run(scanner.v7.main())
