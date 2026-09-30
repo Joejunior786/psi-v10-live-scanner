@@ -19,9 +19,10 @@ COPY ignition1092_app.py .
 COPY ignition1093_app.py .
 COPY ignition110_app.py .
 COPY orderbook_patch.py .
+COPY warmup_patch.py .
 COPY ignition110_entry.py .
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=10.10
+ENV PSI_SCANNER_VERSION=10.11
 
 CMD ["python", "ignition110_entry.py"]
