@@ -11,7 +11,8 @@ COPY target10_app.py .
 COPY stable10_app.py .
 COPY ignition10_app.py .
 COPY ignition1071_app.py .
+COPY ignition108_app.py .
 
 ENV PORT=8080
 
-CMD ["python", "ignition1071_app.py"]
+CMD ["python", "ignition108_app.py"]
