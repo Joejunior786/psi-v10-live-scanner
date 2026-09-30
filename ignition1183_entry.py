@@ -36,6 +36,7 @@ _old_opp=b17.opp_score
 _old_breakout_strict=b16._breakout_strict
 _old_pre_strict=b16._pre_strict
 _old_buy_strict=b16._buy_strict
+_old_lane_pick=b16._lane_pick
 _old_pump_signature=b18.pump_signature
 _old_main=scanner.v7.main
 
@@ -322,6 +323,19 @@ def buy_strict_1183(row):
     return ph not in ("FAILED_BREAKOUT","REJECT_FALLING","NO_CHASE")
 
 
+def lane_pick_1183(candidates, used, slots, strict_fn, sorter, lane):
+    picked=_old_lane_pick(candidates,used,slots,strict_fn,sorter,lane)
+    for row in picked:
+        if row.get("board_quality")!="QUALIFIED":
+            if lane=="READY-BREAKOUT":
+                row["board_lane"]="BREAKOUT-BACKFILL"
+            elif lane=="EARLY-IGNITION":
+                row["board_lane"]="EARLY-BACKFILL"
+            elif lane=="CLOSEST-BUY":
+                row["board_lane"]="CLOSEST-BACKFILL"
+    return picked
+
+
 def pump_signature_1183(sym):
     ps=dict(_old_pump_signature(sym))
     ph=str(life(sym).get("phase") or "UNKNOWN")
@@ -396,6 +410,7 @@ b17.opp_score=opp1183
 b16._breakout_strict=breakout_strict_1183
 b16._pre_strict=pre_strict_1183
 b16._buy_strict=buy_strict_1183
+b16._lane_pick=lane_pick_1183
 b18.pump_signature=pump_signature_1183
 
 async def main1183():
@@ -406,7 +421,7 @@ scanner.VERSION=VERSION
 
 print(
     "Ψ-V10.18.3 LIFECYCLE UPGRADE ACTIVE — real 1m/5m Binance candle state, used-level memory, "
-    "APPROACH→BREAK→HOLD/RETEST→CONTINUATION/FAILURE, failed/no-chase suppression; formal PRE/BUY unchanged",
+    "APPROACH→BREAK→HOLD/RETEST→CONTINUATION/FAILURE, failed/no-chase suppression, truthful backfill lane labels; formal PRE/BUY unchanged",
     flush=True
 )
 
