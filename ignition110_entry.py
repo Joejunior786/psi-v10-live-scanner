@@ -15,7 +15,7 @@ import ignition110_app as scanner
 orderbook_patch.install_diagnostics(scanner)
 
 
-VERSION = "10.12-capacity-lock-entry"
+VERSION = "10.12.1-capacity-lock-entry-safe"
 WARMUP_SECONDS = 90
 READY_STREAK_REQUIRED = 3
 CANDIDATE_LOCK_SECONDS = 1200
@@ -28,6 +28,7 @@ PROTECT_BIG_MOVE_SCORE = 55.0
 PROTECT_STATES = {"WATCH", "EARLY OPPORTUNITY", "PRE-IGNITION", "BUY NOW"}
 ENTRY_MIN_BUFFER_BPS = 5.0
 ENTRY_MAX_BUFFER_BPS = 20.0
+ENTRY_NEAR_BREAKOUT_PCT = 3.0
 
 warm_started = {}
 ready_streak = defaultdict(int)
@@ -60,6 +61,13 @@ def _promising(row):
     state = str(row.get("pre_warmup_state") or row.get("state") or "REJECT")
     score = float(row.get("score") or 0.0)
     big = float(row.get("big_move_potential_score") or 0.0)
+    failed = set(row.get("failed_hard", []) or [])
+
+    # Do not waste a protected slot on an already-chasing/late runner unless it
+    # has independently reached a genuine promoted state.
+    if "ANTI_CHASE_OR_RUNNER" in failed and state not in PROTECT_STATES:
+        return False
+
     return (
         state in PROTECT_STATES
         or score >= PROTECT_SCORE
@@ -92,13 +100,53 @@ def _entry_telemetry(app, q, symbol, row=None):
     spread_bps = _as_float(source.get("spread_bps"), None)
 
     buffer_bps = None
-    trigger = None
-    if resistance > 0 and spread_bps is not None and spread_bps >= 0:
-        buffer_bps = max(
-            ENTRY_MIN_BUFFER_BPS,
-            min(ENTRY_MAX_BUFFER_BPS, spread_bps * 1.5),
+    reference_trigger = None
+    entry_trigger = None
+    entry_status = "NO_RESISTANCE"
+    entry_armed = False
+
+    if resistance > 0:
+        entry_status = "WAIT_SPREAD"
+        if spread_bps is not None and spread_bps >= 0:
+            buffer_bps = max(
+                ENTRY_MIN_BUFFER_BPS,
+                min(ENTRY_MAX_BUFFER_BPS, spread_bps * 1.5),
+            )
+            reference_trigger = resistance * (1.0 + buffer_bps / 10000.0)
+
+            if distance_pct is None:
+                entry_status = "WAIT_BREAKOUT_DISTANCE"
+            elif price > 0 and price >= reference_trigger:
+                # Never print a buy-stop behind the current market. Once the
+                # buffered breakout has already traded, require retest/reclaim
+                # or a new base instead of encouraging a chase.
+                entry_status = "RETEST_REQUIRED_ALREADY_ABOVE_TRIGGER"
+            elif distance_pct > ENTRY_NEAR_BREAKOUT_PCT:
+                entry_status = "WAIT_APPROACH"
+            elif distance_pct >= 0:
+                entry_trigger = reference_trigger
+                entry_status = "BREAKOUT_TRIGGER_ARMED"
+                entry_armed = True
+            else:
+                # Resistance has been marginally crossed but the buffered
+                # confirmation trigger has not. Keep the future confirmation
+                # price valid, while clearly labelling the state.
+                entry_trigger = reference_trigger
+                entry_status = "CONFIRM_BREAKOUT_BUFFER"
+                entry_armed = True
+
+    strict_now = str(source.get("pre_warmup_state") or source.get("state") or "") == "BUY NOW"
+    exec_all = all(
+        (source.get("hard_safety_status") or {}).get(k) == "PASS"
+        for k in (
+            "LIVE_MICRO_DATA",
+            "TRADE_SEQUENCE_VALID",
+            "BOOK_SEQUENCE_VALID",
+            "SPREAD_FILTER",
+            "SLIPPAGE_FILTER",
+            "CUMULATIVE_EXTENSION_GUARD",
         )
-        trigger = resistance * (1.0 + buffer_bps / 10000.0)
+    )
 
     return {
         "price": price if price > 0 else None,
@@ -106,9 +154,31 @@ def _entry_telemetry(app, q, symbol, row=None):
         "breakout_distance_pct": distance_pct,
         "distance_to_resistance_bps": None if distance_pct is None else round(distance_pct * 100.0, 2),
         "entry_buffer_bps": None if buffer_bps is None else round(buffer_bps, 2),
-        "breakout_entry_trigger": trigger,
-        "entry_trigger_verified": trigger is not None,
+        "breakout_trigger_reference": reference_trigger,
+        "breakout_entry_trigger": entry_trigger,
+        "entry_trigger_verified": reference_trigger is not None,
+        "entry_trigger_armed": entry_armed,
+        "entry_status": entry_status,
+        "entry_actionable_now": bool(strict_now and exec_all and entry_armed),
     }
+
+
+def _breakout_rank(row):
+    status = str(row.get("entry_status") or "")
+    distance = _as_float(row.get("breakout_distance_pct"), None)
+    if status in ("BREAKOUT_TRIGGER_ARMED", "CONFIRM_BREAKOUT_BUFFER"):
+        return 5
+    if status == "WAIT_APPROACH" and distance is not None:
+        if distance <= 5.0:
+            return 4
+        if distance <= 8.0:
+            return 3
+        return 2
+    if status == "WAIT_SPREAD":
+        return 1
+    if status == "RETEST_REQUIRED_ALREADY_ABOVE_TRIGGER":
+        return 0
+    return 1
 
 
 def _install_upgrade():
@@ -177,8 +247,7 @@ def _install_upgrade():
         else:
             row["telemetry_status"] = "READY"
 
-        entry = _entry_telemetry(app, q, symbol, row)
-        row.update(entry)
+        row.update(_entry_telemetry(app, q, symbol, row))
 
         telemetry_meta[symbol] = {
             "raw_ready": raw_micro_ready,
@@ -189,12 +258,11 @@ def _install_upgrade():
 
     def tick_with_candidate_lock():
         # IMPORTANT: install this on s.tick, q.tick and v7.tick. The live hunt loop
-        # resolves v7.tick dynamically, which is why the previous wrapper never
+        # resolves v7.tick dynamically, which is why the old V10.11 wrapper never
         # affected the active runtime and locked stayed at zero.
         original_tick()
         now_t = time.time()
         selected = set(app.selected_micro_symbols)
-        candidates = []
 
         for symbol in selected:
             row = q.latest.get(symbol)
@@ -208,17 +276,8 @@ def _install_upgrade():
                     float(q.locked_until.get(symbol, 0.0) or 0.0),
                     now_t + CANDIDATE_LOCK_SECONDS,
                 )
-                candidates.append((
-                    _state_rank(row.get("pre_warmup_state") or row.get("state")),
-                    min(candidate_persistence[symbol], 99),
-                    float(row.get("big_move_potential_score") or 0.0),
-                    float(row.get("score") or 0.0),
-                    symbol,
-                ))
             else:
                 candidate_persistence[symbol] = 0
-
-        candidates.sort(reverse=True)
 
         for symbol in list(candidate_last_seen):
             if now_t - candidate_last_seen[symbol] > CANDIDATE_LOCK_SECONDS:
@@ -234,9 +293,9 @@ def _install_upgrade():
                     telemetry_meta.pop(symbol, None)
 
     def near_diag_with_collection_state(limit=10):
-        # Pull a wider source set, then persistence-rank it down to the requested
-        # limit so a one-cycle score spike cannot automatically outrank a setup
-        # that has remained strong across consecutive evaluations.
+        # Pull a wider source set, then rank by promoted state, verified micro,
+        # layer completion, breakout proximity, persistence and score. This makes
+        # 'closest to BUY/breakout' different from merely 'highest raw score'.
         rows = original_near_diag(max(limit, 30))
         now_t = time.time()
         out = []
@@ -292,8 +351,9 @@ def _install_upgrade():
             key=lambda d: (
                 _state_rank(d.get("pre_warmup_state") or d.get("state")),
                 bool((q.latest.get(d.get("symbol")) or {}).get("micro_ready")),
-                min(int(d.get("candidate_persistence_samples") or 0), 6),
                 int(d.get("passed_major_layers") or 0),
+                _breakout_rank(d),
+                min(int(d.get("candidate_persistence_samples") or 0), 6),
                 float(d.get("score") or 0.0),
             ),
             reverse=True,
@@ -308,9 +368,9 @@ def _install_upgrade():
     scanner.VERSION = VERSION
 
     print(
-        "Ψ-V10.12 CAPACITY UPGRADE ACTIVE — 80 live-micro slots (24 priority + 56 hunter), "
+        "Ψ-V10.12.1 CAPACITY UPGRADE ACTIVE — 80 live-micro slots (24 priority + 56 hunter), "
         "90s warm-up + 3 ready samples, 20m candidate locks, 15m pool hold, "
-        "persistence ranking, strict BUY unchanged, breakout-entry telemetry enabled",
+        "persistence + breakout-proximity ranking, strict BUY unchanged, chase-safe entry telemetry",
         flush=True,
     )
 
@@ -327,7 +387,7 @@ async def _candidate_telemetry_loop():
         try:
             locks = q.locks()
             print(
-                f"Ψ-V10.12 CAPACITY micro={len(app.selected_micro_symbols)}/{q.MICRO_SLOTS} "
+                f"Ψ-V10.12.1 CAPACITY micro={len(app.selected_micro_symbols)}/{q.MICRO_SLOTS} "
                 f"priority_locked={len(locks)}/{q.LOCK_SLOTS} "
                 f"hold={q.MICRO_HOLD}s lock_grace={q.LOCK_GRACE}s",
                 flush=True,
@@ -336,8 +396,9 @@ async def _candidate_telemetry_loop():
                 resistance = d.get("resistance")
                 trigger = d.get("breakout_entry_trigger")
                 distance = d.get("breakout_distance_pct")
+                status = str(d.get("entry_status") or "-")
                 rtxt = "-" if resistance is None else f"{float(resistance):.10g}"
-                ttxt = "WAIT_SPREAD" if trigger is None else f"{float(trigger):.10g}"
+                ttxt = status if trigger is None else f"{float(trigger):.10g}"
                 dtxt = "-" if distance is None else f"{float(distance):+.3f}%"
                 print(
                     f"E{i:02d}. {str(d.get('symbol')):12s} "
@@ -345,11 +406,11 @@ async def _candidate_telemetry_loop():
                     f"persist={int(d.get('candidate_persistence_samples') or 0)} "
                     f"exec={d.get('execution_gate_status','BLOCKED')} "
                     f"layers_missing={d.get('missing_signal_layers',[])} "
-                    f"res={rtxt} dist={dtxt} entry={ttxt}",
+                    f"res={rtxt} dist={dtxt} entry={ttxt} entry_status={status}",
                     flush=True,
                 )
         except Exception as exc:
-            print(f"Ψ-V10.12 ENTRY_DIAG_ERROR {type(exc).__name__}: {exc}", flush=True)
+            print(f"Ψ-V10.12.1 ENTRY_DIAG_ERROR {type(exc).__name__}: {exc}", flush=True)
 
 
 async def _combined_print_loop():
@@ -367,10 +428,10 @@ scanner.s.print_loop = _combined_print_loop
 if __name__ == "__main__":
     try:
         print(
-            "Ψ-V10.12 ACTIVE — expanded verified coverage + working priority locks + "
-            "persistence-ranked breakout telemetry; strict BUY gates unchanged",
+            "Ψ-V10.12.1 ACTIVE — expanded verified coverage + working priority locks + "
+            "persistence/proximity-ranked chase-safe breakout telemetry; strict BUY gates unchanged",
             flush=True,
         )
         asyncio.run(scanner.v7.main())
     except KeyboardInterrupt:
-        print("Ψ-V10.12 stopped", flush=True)
+        print("Ψ-V10.12.1 stopped", flush=True)
