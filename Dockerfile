@@ -23,6 +23,6 @@ COPY warmup_patch.py .
 COPY ignition110_entry.py .
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=10.11
+ENV PSI_SCANNER_VERSION=10.13
 
 CMD ["python", "ignition110_entry.py"]
