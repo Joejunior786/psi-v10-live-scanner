@@ -26,8 +26,9 @@ COPY ignition115_entry.py .
 COPY ignition1151_entry.py .
 COPY ignition116_entry.py .
 COPY ignition117_entry.py .
+COPY ignition118_entry.py .
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=10.17.0
+ENV PSI_SCANNER_VERSION=10.18.0
 
-CMD ["python", "ignition117_entry.py"]
+CMD ["python", "ignition118_entry.py"]
