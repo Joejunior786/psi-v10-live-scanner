@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 
 import ignition121_entry as core
@@ -8,17 +9,20 @@ scanner, q, app = core.scanner, core.q, core.app
 VERSION = "10.21.1-coverage-recovery"
 
 # V10.21.1 keeps the V10.21 early-warning states, but prevents the auxiliary
-# freshness worker from starving the main 456-market discovery/structure pass.
-# The base scanner must build broad structural coverage first; after that, only
-# the actually actionable priority set is refreshed at a low background rate.
+# freshness worker from starving the main discovery/structure pass.
+# COVERAGE_MIN remains an absolute ceiling for backwards compatibility, while
+# COVERAGE_RATIO makes the release threshold universe-aware. This matters when
+# non-crypto markets are removed: a 403-symbol crypto universe must not wait
+# forever for the old 420/456 threshold.
 COVERAGE_MIN = int(os.environ.get("PSI_1211_COVERAGE_MIN", "420"))
+COVERAGE_RATIO = float(os.environ.get("PSI_1211_COVERAGE_RATIO", "0.92"))
 REFRESH_EVERY = float(os.environ.get("PSI_1211_REFRESH_EVERY", "20"))
 REFRESH_MAX = int(os.environ.get("PSI_1211_REFRESH_MAX", "4"))
 REFRESH_CONCURRENCY = int(os.environ.get("PSI_1211_REFRESH_CONCURRENCY", "2"))
 PRIORITY_LIMIT = int(os.environ.get("PSI_1211_PRIORITY_LIMIT", "16"))
 
 # Five-minute structural freshness is strict enough for execution while allowing
-# the main scanner to finish a complete universe rotation. Live microstructure
+# the main scanner to finish a broad universe rotation. Live microstructure
 # gates remain mandatory for BUY NOW.
 core.STRUCTURE_REFRESH_AGE = float(os.environ.get("PSI_STRUCTURE_REFRESH_AGE", "180"))
 core.STRUCTURE_MAX_AGE = float(os.environ.get("PSI_STRUCTURE_MAX_AGE", "300"))
@@ -77,6 +81,19 @@ def structure_coverage():
         return 0
 
 
+def coverage_target():
+    """Return a reachable broad-coverage target for the current live universe."""
+    try:
+        total = len(q.universe or [])
+    except Exception:
+        total = 0
+    if total <= 0:
+        return max(1, COVERAGE_MIN)
+    ratio = max(0.50, min(1.0, float(COVERAGE_RATIO)))
+    ratio_target = max(1, int(math.ceil(total * ratio)))
+    return min(max(1, COVERAGE_MIN), ratio_target, total)
+
+
 async def freshness_loop_1211():
     sem = asyncio.Semaphore(max(1, REFRESH_CONCURRENCY))
 
@@ -84,15 +101,27 @@ async def freshness_loop_1211():
         async with sem:
             await refresh_structure_light(sym)
 
+    last_target = None
     while True:
         await asyncio.sleep(max(5.0, REFRESH_EVERY))
         try:
             coverage = structure_coverage()
+            target = coverage_target()
             core.refresh_stats["coverage"] = coverage
+            core.refresh_stats["coverage_target"] = target
 
-            # Critical recovery rule: do not compete with the main structure
-            # rotation until most of the 456-market universe has been seen.
-            if coverage < COVERAGE_MIN:
+            if target != last_target:
+                print(
+                    f"Ψ-V10.21.1 COVERAGE_TARGET target={target} "
+                    f"universe={len(q.universe or [])} ratio={COVERAGE_RATIO:.3f} "
+                    f"absoluteCap={COVERAGE_MIN}",
+                    flush=True,
+                )
+                last_target = target
+
+            # Do not compete with the main structure rotation until broad live
+            # coverage has been built. The target is dynamically reachable.
+            if coverage < target:
                 core.refresh_stats["coverage_pauses"] = core.refresh_stats.get("coverage_pauses", 0) + 1
                 core.refresh_stats["cycles"] += 1
                 continue
@@ -126,9 +155,9 @@ app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
 async def main():
     print(
         "[v10.21.1] coverage recovery active: V10.21 early states retained; "
-        f"freshness paused below {COVERAGE_MIN} structures; priority={PRIORITY_LIMIT}; "
-        f"refresh max={REFRESH_MAX}/{REFRESH_EVERY:.0f}s concurrency={REFRESH_CONCURRENCY}; "
-        f"structure fresh<= {core.STRUCTURE_MAX_AGE:.0f}s",
+        f"freshness waits for min({COVERAGE_MIN}, {COVERAGE_RATIO:.0%} of live universe); "
+        f"priority={PRIORITY_LIMIT}; refresh max={REFRESH_MAX}/{REFRESH_EVERY:.0f}s "
+        f"concurrency={REFRESH_CONCURRENCY}; structure fresh<= {core.STRUCTURE_MAX_AGE:.0f}s",
         flush=True,
     )
     await core.main()
