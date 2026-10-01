@@ -49,10 +49,11 @@ COPY psi_v11_2_2_entry.py .
 COPY psi_v11_3_entry.py .
 COPY psi_v11_3_1_entry.py .
 COPY psi_v11_3_2_entry.py .
+COPY psi_v11_3_3_entry.py .
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=11.0.3.4
+ENV PSI_SCANNER_VERSION=11.0.3.5
 ENV PSI_V11_SHADOW_ONLY=1
 ENV PSI_BYBIT_ENABLED=0
 
-CMD ["python", "psi_v11_3_2_entry.py"]
+CMD ["python", "psi_v11_3_3_entry.py"]
