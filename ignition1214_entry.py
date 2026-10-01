@@ -1,17 +1,15 @@
 import asyncio
-import json
 import os
 import time
 
-import aiohttp
-
+import ignition1071_app as radar_feed
 import ignition1213_entry as base
 import ignition117_entry as v17
 import ignition119_entry as v19
 
 scanner, q, app = base.scanner, base.q, base.app
 
-VERSION = "10.21.4-integrity-repair"
+VERSION = "10.21.4.1-integrity-repair"
 
 # Binance bStocks / tokenized securities known on Spot through 2026-09-30.
 # These are not ordinary crypto assets and must never enter the crypto scanner.
@@ -75,93 +73,61 @@ app.get_exchange_symbols = exchange_crypto_only_1214
 # ---------------------------------------------------------------------------
 # Qualifier discovery repair.
 #
-# V10.4's disc deque was staying at 0/456 even though its websocket reported
-# connected. This independent tolerant sampler consumes the all-market ticker
-# stream and fills the SAME q.disc deques expected by q.dmetric / V10.15.1.
-# It accepts both raw-list and combined-stream payload shapes.
+# V10.4's q.disc history remained empty even while its !ticker websocket was
+# connected. V10.7.1's radar_hist is already a proven all-market live feed and
+# stores the exact same tuple schema: (ts, price, quoteVol, trades, bid, ask).
+# Bridge that verified stream into q.disc rather than opening another redundant
+# websocket. V10.15.1 then naturally prefers QUALIFIER_DISCOVERY once >=4
+# samples exist, while its radar fallback remains available during warmup.
 # ---------------------------------------------------------------------------
+_bridge_stats = {"samples": 0, "symbols": set(), "cycles": 0}
+
+
 async def qualifier_discovery_repair_loop():
-    while app.session is None:
-        await asyncio.sleep(0.25)
-
-    url = f"{str(app.WS_BASE).rstrip('/')}/ws/!ticker@arr"
     while True:
+        await asyncio.sleep(1.0)
         try:
-            q.disc_ws = False
-            async with app.session.ws_connect(
-                url,
-                heartbeat=30,
-                receive_timeout=90,
-                max_msg_size=0,
-            ) as ws:
-                q.disc_ws = True
-                print("Ψ-V10.21.4 QUALIFIER_REPAIR connected !ticker@arr", flush=True)
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        try:
-                            payload = json.loads(msg.data)
-                        except json.JSONDecodeError:
-                            continue
-
-                        if isinstance(payload, dict) and "data" in payload:
-                            payload = payload.get("data")
-                        if isinstance(payload, dict):
-                            payload = [payload]
-                        if not isinstance(payload, list):
-                            continue
-
-                        now = time.time()
-                        added = 0
-                        for item in payload:
-                            if not isinstance(item, dict):
-                                continue
-                            sym = str(item.get("s") or "").upper()
-                            if not sym or sym not in q.universe_set:
-                                continue
-                            if _base_asset(sym) in NONCRYPTO_BASES:
-                                continue
-
-                            last = float(q.disc_sample_ts.get(sym, 0.0) or 0.0)
-                            if now - last < float(getattr(q, "SAMPLE_SECONDS", 2.0)):
-                                continue
-
-                            try:
-                                price = float(item.get("c") or 0.0)
-                                quote_volume = float(item.get("q") or 0.0)
-                                trades = int(item.get("n") or 0)
-                                bid = float(item.get("b") or 0.0)
-                                ask = float(item.get("a") or 0.0)
-                            except (TypeError, ValueError):
-                                continue
-
-                            if price <= 0:
-                                continue
-                            q.disc[sym].append(
-                                (now, price, quote_volume, trades, bid, ask)
-                            )
-                            q.disc_sample_ts[sym] = now
-                            added += 1
-
-                        if added:
-                            q.disc_event_ms = int(now * 1000)
-
-                    elif msg.type in (
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    ):
-                        break
+            if not q.universe:
+                continue
+            added = 0
+            now = time.time()
+            for sym in list(q.universe):
+                if _base_asset(sym) in NONCRYPTO_BASES:
+                    continue
+                hist = radar_feed.radar_hist.get(sym)
+                if not hist:
+                    continue
+                sample = hist[-1]
+                if not sample or len(sample) < 6:
+                    continue
+                sample_ts = float(sample[0] or 0.0)
+                if sample_ts <= 0:
+                    continue
+                last = float(q.disc_sample_ts.get(sym, 0.0) or 0.0)
+                if sample_ts - last < float(getattr(q, "SAMPLE_SECONDS", 2.0)):
+                    continue
+                q.disc[sym].append(tuple(sample[:6]))
+                q.disc_sample_ts[sym] = sample_ts
+                q.disc_event_ms = int(now * 1000)
+                _bridge_stats["samples"] += 1
+                _bridge_stats["symbols"].add(sym)
+                added += 1
+            _bridge_stats["cycles"] += 1
+            if added and _bridge_stats["cycles"] % 10 == 0:
+                print(
+                    f"Ψ-V10.21.4 QUALIFIER_BRIDGE added={added} "
+                    f"totalSamples={_bridge_stats['samples']} "
+                    f"symbols={len(_bridge_stats['symbols'])}",
+                    flush=True,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            q.disc_ws = False
             print(
-                f"Ψ-V10.21.4 QUALIFIER_REPAIR_ERROR "
+                f"Ψ-V10.21.4 QUALIFIER_BRIDGE_ERROR "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
-            await asyncio.sleep(3.0)
-        finally:
-            q.disc_ws = False
 
 # ---------------------------------------------------------------------------
 # Shadow-learning repair.
@@ -255,9 +221,15 @@ def open_shadow_1214(sym, ps):
 
 v19.open_shadow = open_shadow_1214
 
-# Existing V10.19 history was produced with the invalid immediate-market-entry
-# semantics above. Start a clean walk-forward sample unless explicitly disabled.
-if os.environ.get("PSI_RESET_INVALID_SHADOW_HISTORY", "1") == "1":
+# The old V10.19 history used invalid immediate-market-entry semantics. Reset it
+# exactly once, then persist a marker on Railway's volume so future restarts do
+# not erase newly valid learning data.
+_RESET_MARKER = os.environ.get(
+    "PSI_SHADOW_RESET_MARKER",
+    "/data/psi_v1019_trigger_accurate_reset_v1.marker",
+)
+_reset_enabled = os.environ.get("PSI_RESET_INVALID_SHADOW_HISTORY", "1") == "1"
+if _reset_enabled and not os.path.exists(_RESET_MARKER):
     try:
         old_resolved = len(v19.shadow_resolved)
         old_pending = len(v19.shadow_pending)
@@ -278,6 +250,15 @@ if os.environ.get("PSI_RESET_INVALID_SHADOW_HISTORY", "1") == "1":
                 "updated": time.time(),
             }
         )
+        try:
+            os.makedirs(os.path.dirname(_RESET_MARKER) or ".", exist_ok=True)
+            with open(_RESET_MARKER, "w", encoding="utf-8") as fh:
+                fh.write(f"reset_at={time.time()} old_resolved={old_resolved} old_pending={old_pending}\n")
+        except Exception as marker_exc:
+            print(
+                f"Ψ-V10.21.4 SHADOW_MARKER_ERROR {type(marker_exc).__name__}: {marker_exc}",
+                flush=True,
+            )
         print(
             f"Ψ-V10.21.4 SHADOW_RESET invalid_history "
             f"resolved={old_resolved} pending={old_pending}",
@@ -288,6 +269,11 @@ if os.environ.get("PSI_RESET_INVALID_SHADOW_HISTORY", "1") == "1":
             f"Ψ-V10.21.4 SHADOW_RESET_ERROR {type(exc).__name__}: {exc}",
             flush=True,
         )
+else:
+    print(
+        f"Ψ-V10.21.4 SHADOW_RESET skipped marker={'YES' if os.path.exists(_RESET_MARKER) else 'NO'}",
+        flush=True,
+    )
 
 
 async def integrity_audit_loop():
@@ -297,6 +283,9 @@ async def integrity_audit_loop():
             total = len(q.universe)
             qualifier_ready = sum(
                 len(q.disc.get(sym, ())) >= 4 for sym in q.universe
+            )
+            radar_ready = sum(
+                len(radar_feed.radar_hist.get(sym, ())) >= 4 for sym in q.universe
             )
             leaks = [
                 sym for sym in q.universe
@@ -312,6 +301,8 @@ async def integrity_audit_loop():
             print(
                 f"Ψ-V10.21.4 INTEGRITY universe={total} "
                 f"qualifier_ready={qualifier_ready}/{total} "
+                f"radar_ready={radar_ready}/{total} "
+                f"bridgeSymbols={len(_bridge_stats['symbols'])} "
                 f"discWS={'UP' if getattr(q, 'disc_ws', False) else 'DOWN'} "
                 f"noncrypto_leaks={len(leaks)} ukScope={uk_scope} "
                 f"learning={cal.get('status', 'UNKNOWN')} "
@@ -341,8 +332,8 @@ app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
 
 async def main():
     print(
-        "[v10.21.4] integrity repair active: crypto-only bStocks denylist, "
-        "qualifier discovery repair, trigger-accurate shadow learning; "
+        "[v10.21.4.1] integrity repair active: crypto-only bStocks denylist, "
+        "radar-backed qualifier discovery, trigger-accurate shadow learning; "
         "formal PRE/BUY/PUMP thresholds unchanged",
         flush=True,
     )
@@ -367,4 +358,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Psi-V10.21.4 stopped", flush=True)
+        print("Psi-V10.21.4.1 stopped", flush=True)
