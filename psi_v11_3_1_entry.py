@@ -11,7 +11,7 @@ app = base.app
 q = base.q
 scanner = base.scanner
 
-VERSION = "11.0.3.1-shard-continuity-guard"
+VERSION = "11.0.3.2-strict-buy-invariant"
 
 managed_micro_pool = []
 managed_entered = {}
@@ -21,6 +21,88 @@ guard_reconnect_baseline = None
 
 _old_assign_shards = v16._assign_shards
 _old_rebalance_continuity = base.rebalance_continuity
+_old_strict_evaluate = app.evaluate_symbol
+
+MANDATORY_LAYER_KEYS = (
+    "ACTIVITY_LAYER",
+    "FLOW_LAYER",
+    "ORDER_BOOK_LAYER",
+    "VWAP_LAYER",
+    "MA_STRUCTURE_LAYER",
+    "ANTI_CHASE_OR_RUNNER_LAYER",
+)
+
+
+def _gate_passed(value):
+    if value is True:
+        return True
+    return str(value or "").upper() == "PASS"
+
+
+def evaluate_strict_buy_invariant(symbol):
+    """Final fail-closed BUY guard.
+
+    No upstream setup, overlay, cached state, or transient classifier may emit
+    formal BUY NOW unless all six global V10 layers and every current hard gate
+    are simultaneously aligned. PRE/WATCH logic remains unchanged except when
+    an invalid upstream BUY must be demoted.
+    """
+    row = _old_strict_evaluate(symbol)
+    if not isinstance(row, dict) or not row:
+        return row
+
+    layers = row.get("layer_results") or {}
+    layer_status = {key: bool(layers.get(key)) for key in MANDATORY_LAYER_KEYS}
+    missing_layers = [key for key, ok in layer_status.items() if not ok]
+    all_layers = bool(layer_status) and all(layer_status.values())
+
+    hard_checks = row.get("multi_regime_hard_checks") or {}
+    hard_status = {str(key): _gate_passed(value) for key, value in hard_checks.items()}
+    missing_hard = [key for key, ok in hard_status.items() if not ok]
+    all_hard = bool(hard_status) and all(hard_status.values())
+
+    formal = str(row.get("formal_state") or row.get("state") or "")
+    strict_ok = bool(all_layers and all_hard)
+
+    row["strict_buy_guard_version"] = VERSION
+    row["strict_buy_layer_status"] = layer_status
+    row["strict_buy_all_6_layers"] = all_layers
+    row["strict_buy_hard_status"] = hard_status
+    row["strict_buy_all_hard_gates"] = all_hard
+    row["strict_buy_gate_passed"] = strict_ok
+    row["strict_buy_missing_layers"] = missing_layers
+    row["strict_buy_missing_hard_gates"] = missing_hard
+
+    if formal == "BUY NOW" and not strict_ok:
+        fallback = "PRE-IGNITION" if all_hard and sum(layer_status.values()) >= 5 else "WATCH"
+        row["strict_buy_demoted_from"] = "BUY NOW"
+        row["state"] = fallback
+        row["pre_warmup_state"] = fallback
+        row["formal_state"] = fallback
+        row["multi_regime_buy"] = False
+        row["mandatory_all_aligned"] = False
+        row["hard_safety_all_aligned"] = all_hard
+
+        blockers = list(row.get("combined_blockers") or [])
+        for blocker in missing_layers + missing_hard:
+            if blocker not in blockers:
+                blockers.append(blocker)
+        row["combined_blockers"] = blockers
+        row["strict_buy_blockers"] = list(dict.fromkeys(missing_layers + missing_hard))
+
+        guard_stats["invalid_buy_demotions"] += 1
+        print(
+            "Ψ-V10 STRICT_BUY_GUARD "
+            f"symbol={symbol} demoted=BUY_NOW->{fallback} "
+            f"layers={sum(layer_status.values())}/6 "
+            f"missingLayers={missing_layers} missingHard={missing_hard}",
+            flush=True,
+        )
+
+    return row
+
+
+app.evaluate_symbol = evaluate_strict_buy_invariant
 
 
 def _dedup_valid(symbols):
@@ -243,7 +325,8 @@ async def guard_health_loop():
                 f"approved={guard_stats['approved_rebalances']} "
                 f"rejectedMulti={guard_stats['multi_shard_rebalances_rejected']} "
                 f"unexpectedMulti={guard_stats['unexpected_multi_shard_changes']} "
-                f"reconnects={reconnects} reconnectDelta={delta}",
+                f"reconnects={reconnects} reconnectDelta={delta} "
+                f"invalidBuyDemotions={guard_stats['invalid_buy_demotions']}",
                 flush=True,
             )
         except asyncio.CancelledError:
@@ -277,10 +360,8 @@ app.USER_AGENT = f"psi-v11/{VERSION}"
 
 async def main():
     print(
-        "[v11.0.3.1] shard continuity guard active: legacy V10.6 pool overwrites are "
-        "rejected, canonical micro membership is preserved, only V11-approved "
-        "single-shard migrations are accepted, and micro entry ages are restored; "
-        "formal PRE/BUY gates unchanged.",
+        "[v11.0.3.2] strict BUY invariant active: formal BUY NOW requires all six "
+        "global V10 layers plus all current hard gates; shard continuity guard remains active.",
         flush=True,
     )
     await asyncio.gather(
