@@ -540,32 +540,12 @@ async def structure_recovery_loop():
 
 
 async def _watchdog_refresh_extension():
-    if app.session is None or app.session.closed:
-        raise RuntimeError("shared REST session unavailable")
-    payload=await app.api_get(app.session,"/api/v3/ticker/24hr")
-    if not isinstance(payload,list):
-        raise RuntimeError("ticker snapshot not list")
-    ts=time.time();new={}
-    for item in payload:
-        if not isinstance(item,dict): continue
-        sym=str(item.get("symbol") or "")
-        if not sym: continue
-        new[sym]={
-            "change_pct":f(item.get("priceChangePercent")),
-            "open":f(item.get("openPrice")),
-            "high":f(item.get("highPrice")),
-            "low":f(item.get("lowPrice")),
-            "last":f(item.get("lastPrice")),
-            "ts":ts,
-        }
-    if not new:
-        raise RuntimeError("empty ticker snapshot")
-    extrest.ext_cache.clear();extrest.ext_cache.update(new)
-    extrest.ext_last_refresh=ts
-    extrest.ext_last_error=None
-    extrest.ext_refresh_ok+=1
+    n=extrest.sync_extension_from_ws()
+    if n<=0:
+        raise RuntimeError("Binance ticker WebSocket is not live")
     watchdog_stats["ext_refresh"]+=1
-    return len(new)
+    return n
+
 
 def _watchdog_pinpoint_count():
     n=0
@@ -613,7 +593,6 @@ async def watchdog_loop():
             # Emergency extension refresh only when the canonical loop has gone stale.
             if startup_age>WATCHDOG_STARTUP_GRACE_S and ext_age>WATCHDOG_EXT_STALE_S:
                 try:
-                    _rest_good_host.pop("ticker24",None)
                     n=await asyncio.wait_for(_watchdog_refresh_extension(),timeout=12.0)
                     watchdog_stats["actions"]+=1
                     actions.append(f"EXT_REFRESH:{n}")
