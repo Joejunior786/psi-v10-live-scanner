@@ -457,7 +457,6 @@ def _sync_ws_status():
 
 async def _shard_loop(shard_id):
     while True:
-        bootstrap_tasks = []
         generation = shard_generation[shard_id]
         symbols = list(shard_current_symbols[shard_id])
         try:
@@ -470,12 +469,12 @@ async def _shard_loop(shard_id):
             streams = []
             for symbol in symbols:
                 lower = symbol.lower()
-                streams.extend([f"{lower}@aggTrade", f"{lower}@depth@100ms"])
+                streams.extend([f"{lower}@aggTrade", f"{lower}@depth20@100ms"])
             url = f"{app.WS_BASE}/stream?streams={'/'.join(streams)}"
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16 SHARD{shard_id+1} connecting symbols={len(symbols)} gen={generation}",
+                f"Ψ-V10.16 SHARD{shard_id+1} connecting symbols={len(symbols)} gen={generation} book=DEPTH20_WS",
                 flush=True,
             )
             async with app.session.ws_connect(
@@ -490,11 +489,11 @@ async def _shard_loop(shard_id):
                     st["book_snapshot_ready"] = False
                     st["book_sequence_ok"] = True
                     st["book_sequence_samples"] = 0
-                    st["book_resyncing"] = True
-                    bootstrap_tasks.append(asyncio.create_task(app.bootstrap_book(symbol)))
+                    st["book_resyncing"] = False
+                    st["last_book_update_id"] = None
 
                 print(
-                    f"Ψ-V10.16 SHARD{shard_id+1} connected symbols={len(symbols)}",
+                    f"Ψ-V10.16 SHARD{shard_id+1} connected symbols={len(symbols)} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
 
@@ -519,8 +518,8 @@ async def _shard_loop(shard_id):
                         symbol = stream_name.split("@")[0].upper()
                         if "@aggTrade" in stream_name:
                             app.process_agg_trade(symbol, data)
-                        elif "@depth" in stream_name:
-                            app.process_diff_depth(symbol, data)
+                        elif "@depth20" in stream_name:
+                            app.process_partial_depth_snapshot(symbol, data)
                     elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         shard_reconnects[shard_id] += 1
                         break
@@ -534,11 +533,6 @@ async def _shard_loop(shard_id):
         finally:
             shard_connected[shard_id] = False
             _sync_ws_status()
-            for task in bootstrap_tasks:
-                if not task.done():
-                    task.cancel()
-            if bootstrap_tasks:
-                await asyncio.gather(*bootstrap_tasks, return_exceptions=True)
 
         await asyncio.sleep(1.0)
 
