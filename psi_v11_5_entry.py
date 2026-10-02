@@ -254,20 +254,34 @@ async def _hydrate_one(sym):
     last_exc=None
     for attempt in range(2):
         try:
-            timeout=aiohttp.ClientTimeout(total=30)
-            connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=60,force_close=True)
-            async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
-                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
+            if attempt==0 and app.session is not None and not app.session.closed:
+                client=app.session
+                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=14.0)
                 if not isinstance(sd,dict):
                     raise RuntimeError("structure payload incomplete")
                 app.structure[sym]=sd
                 q.structure_ms[sym]=q.ms()
                 if not isinstance(app.anomaly_state.get(sym),dict):
                     try:
-                        an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=10.0)
+                        an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=8.0)
                         if isinstance(an,dict): app.anomaly_state[sym]=an
                     except Exception:
                         pass
+            else:
+                timeout=aiohttp.ClientTimeout(total=30)
+                connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=60,force_close=True)
+                async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
+                    sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
+                    if not isinstance(sd,dict):
+                        raise RuntimeError("structure payload incomplete")
+                    app.structure[sym]=sd
+                    q.structure_ms[sym]=q.ms()
+                    if not isinstance(app.anomaly_state.get(sym),dict):
+                        try:
+                            an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=10.0)
+                            if isinstance(an,dict): app.anomaly_state[sym]=an
+                        except Exception:
+                            pass
             row=app.evaluate_symbol(sym)
             if isinstance(row,dict) and row: q.latest[sym]=row
             recovery_stats["ok"]+=1
@@ -277,7 +291,7 @@ async def _hydrate_one(sym):
         except Exception as exc:
             last_exc=exc
             if attempt==0:
-                await asyncio.sleep(.35)
+                await asyncio.sleep(.25)
                 continue
     recovery_stats["fail"]+=1
     if recovery_stats["fail"]<=20:
