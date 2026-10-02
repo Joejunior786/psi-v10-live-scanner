@@ -31,7 +31,7 @@ async def resilient_api_get(client, path, params=None):
             async with client.get(
                 f"{host}{path}",
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=6),
+                timeout=aiohttp.ClientTimeout(total=3.5),
                 headers={"Connection":"close"},
             ) as response:
                 body=await response.text()
@@ -221,7 +221,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 6
+RECOVERY_BATCH = 3
 RECOVERY_PRIORITY = 96
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
@@ -251,33 +251,38 @@ def _recovery_symbols():
     return out
 
 async def _hydrate_one(sym):
-    try:
-        timeout=aiohttp.ClientTimeout(total=12)
-        connector=aiohttp.TCPConnector(limit=6,ttl_dns_cache=60,force_close=True)
-        async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=12.0)
-            if not isinstance(sd,dict):
-                recovery_stats["fail"]+=1
-                return False
-            app.structure[sym]=sd
-            q.structure_ms[sym]=q.ms()
-            if not isinstance(app.anomaly_state.get(sym),dict):
-                try:
-                    an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=8.0)
-                    if isinstance(an,dict): app.anomaly_state[sym]=an
-                except Exception:
-                    pass
-        row=app.evaluate_symbol(sym)
-        if isinstance(row,dict) and row: q.latest[sym]=row
-        recovery_stats["ok"]+=1
-        return True
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        recovery_stats["fail"]+=1
-        if recovery_stats["fail"]<=20:
-            print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
-        return False
+    last_exc=None
+    for attempt in range(2):
+        try:
+            timeout=aiohttp.ClientTimeout(total=30)
+            connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=60,force_close=True)
+            async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
+                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
+                if not isinstance(sd,dict):
+                    raise RuntimeError("structure payload incomplete")
+                app.structure[sym]=sd
+                q.structure_ms[sym]=q.ms()
+                if not isinstance(app.anomaly_state.get(sym),dict):
+                    try:
+                        an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=10.0)
+                        if isinstance(an,dict): app.anomaly_state[sym]=an
+                    except Exception:
+                        pass
+            row=app.evaluate_symbol(sym)
+            if isinstance(row,dict) and row: q.latest[sym]=row
+            recovery_stats["ok"]+=1
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc=exc
+            if attempt==0:
+                await asyncio.sleep(.35)
+                continue
+    recovery_stats["fail"]+=1
+    if recovery_stats["fail"]<=20:
+        print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(last_exc).__name__}: {last_exc}",flush=True)
+    return False
 
 async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
