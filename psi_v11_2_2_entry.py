@@ -17,6 +17,7 @@ ext_last_refresh = 0.0
 ext_last_error = None
 ext_refresh_ok = 0
 ext_refresh_errors = 0
+ext_failure_streak = 0
 
 
 def f(value, default=0.0):
@@ -137,7 +138,7 @@ app.USER_AGENT = f"psi-v11/{VERSION}"
 
 
 async def extension_rest_loop():
-    global ext_last_refresh, ext_last_error, ext_refresh_ok, ext_refresh_errors
+    global ext_last_refresh, ext_last_error, ext_refresh_ok, ext_refresh_errors, ext_failure_streak
 
     # Wait for the scanner to create its shared aiohttp session.
     while app.session is None:
@@ -175,6 +176,7 @@ async def extension_rest_loop():
             ext_last_refresh = ts
             ext_last_error = None
             ext_refresh_ok += 1
+            ext_failure_streak = 0
 
             refs = []
             for symbol in ("BTCUSDT", "SOLUSDT", "XRPUSDT"):
@@ -189,14 +191,19 @@ async def extension_rest_loop():
             raise
         except Exception as exc:
             ext_refresh_errors += 1
+            ext_failure_streak += 1
             ext_last_error = f"{type(exc).__name__}: {exc}"
             print(
-                f"Ψ-V11.0.2.2 EXTENSION_REST_ERROR {ext_last_error}",
+                f"Ψ-V11.0.2.2 EXTENSION_REST_ERROR {ext_last_error} streak={ext_failure_streak}",
                 flush=True,
             )
 
         elapsed = time.time() - cycle_start
-        await asyncio.sleep(max(1.0, REST_REFRESH_SECONDS - elapsed))
+        if ext_failure_streak:
+            retry_delay=min(10.0,2.0*ext_failure_streak)
+            await asyncio.sleep(max(1.0,retry_delay))
+        else:
+            await asyncio.sleep(max(1.0, REST_REFRESH_SECONDS - elapsed))
 
 
 async def telemetry_health_loop():
