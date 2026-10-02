@@ -1,4 +1,4 @@
-import asyncio, math, statistics, time
+import asyncio, json, math, statistics, time
 import aiohttp
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
@@ -8,6 +8,56 @@ base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
 VERSION="11.0.5.0-breakout-structural-intelligence"
+
+REST_BASES = (
+    "https://data-api.binance.vision",
+    "https://api.binance.com",
+    "https://api-gcp.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+)
+_rest_preferred = 0
+_rest_failover_printed = None
+
+async def resilient_api_get(client, path, params=None):
+    global _rest_preferred, _rest_failover_printed
+    order=[_rest_preferred]+[i for i in range(len(REST_BASES)) if i!=_rest_preferred]
+    errs=[]
+    for idx in order:
+        host=REST_BASES[idx]
+        try:
+            async with client.get(
+                f"{host}{path}",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=6),
+                headers={"Connection":"close"},
+            ) as response:
+                body=await response.text()
+                if response.status!=200:
+                    raise RuntimeError(f"HTTP {response.status}: {body[:160]}")
+                payload=json.loads(body)
+                app.rest_connected=True
+                app.last_error=None
+                if idx!=_rest_preferred or _rest_failover_printed is None:
+                    _rest_preferred=idx
+                    if _rest_failover_printed!=host:
+                        print(f"Ψ-REST FAILOVER active={host}",flush=True)
+                        _rest_failover_printed=host
+                return payload
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errs.append(f"{host}:{type(exc).__name__}:{exc}")
+            continue
+    app.rest_connected=False
+    app.last_error="REST_FAILOVER_ALL: "+" | ".join(errs[-3:])
+    raise RuntimeError(app.last_error)
+
+# Replace the shared module-level REST function before any scanner loop starts.
+app.api_get = resilient_api_get
+
 BOARD_ROWS=30
 
 _old_deep=base.deep
@@ -186,6 +236,8 @@ def _recovery_symbols():
         s=str(s or "")
         if s and s not in seen and s in set(getattr(q,"universe_set",set()) or set()):
             seen.add(s);out.append(s)
+    for s in ("BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT","SUIUSDT","LTCUSDT","AVAXUSDT","DOTUSDT","AAVEUSDT","TAOUSDT","FETUSDT","NEARUSDT","ICPUSDT","ONDOUSDT","PEPEUSDT","SHIBUSDT"):
+        add(s)
     try:
         for r in list(base.latest.get("_board") or []): add(r.get("symbol"))
     except Exception:
