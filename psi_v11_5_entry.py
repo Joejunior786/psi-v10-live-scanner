@@ -1,5 +1,8 @@
 import asyncio, math, statistics, time
+import aiohttp
 import psi_v11_4_entry as rescue
+import psi_v11_2_2_entry as extrest
+import psi_v11_3_1_entry as continuity_guard
 
 base=rescue.base
 tape=rescue.tape
@@ -167,8 +170,128 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     try:mod.VERSION=VERSION
     except Exception:pass
 
+
+RECOVERY_BATCH = 6
+RECOVERY_PRIORITY = 96
+RECOVERY_STALE_S = 240.0
+recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
+
+def _structure_age_recovery(sym):
+    ts = int(q.structure_ms.get(sym,0) or 0)
+    return 999999.0 if ts <= 0 else max(0.0,(q.ms()-ts)/1000.0)
+
+def _recovery_symbols():
+    out=[];seen=set()
+    def add(s):
+        s=str(s or "")
+        if s and s not in seen and s in set(getattr(q,"universe_set",set()) or set()):
+            seen.add(s);out.append(s)
+    try:
+        for r in list(base.latest.get("_board") or []): add(r.get("symbol"))
+    except Exception:
+        pass
+    try:
+        for _,s in q.hot(RECOVERY_PRIORITY): add(s)
+    except Exception:
+        pass
+    for s in list(getattr(app,"selected_micro_symbols",[]) or []): add(s)
+    for s in list(getattr(q,"universe",[]) or []): add(s)
+    return out
+
+async def _hydrate_one(client,sym):
+    try:
+        sd=await app.load_structure(client,sym)
+        if not isinstance(sd,dict):
+            recovery_stats["fail"]+=1
+            return False
+        app.structure[sym]=sd
+        q.structure_ms[sym]=q.ms()
+        if not isinstance(app.anomaly_state.get(sym),dict):
+            an=await app.load_fast_anomaly(client,sym)
+            if isinstance(an,dict): app.anomaly_state[sym]=an
+        row=app.evaluate_symbol(sym)
+        if isinstance(row,dict) and row: q.latest[sym]=row
+        recovery_stats["ok"]+=1
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        recovery_stats["fail"]+=1
+        if recovery_stats["fail"]<=12:
+            print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
+        return False
+
+async def structure_recovery_loop():
+    while app.session is None or not getattr(q,"universe",None):
+        await asyncio.sleep(.5)
+    timeout=aiohttp.ClientTimeout(total=15)
+    connector=aiohttp.TCPConnector(limit=24,ttl_dns_cache=120)
+    async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
+        while True:
+            syms=_recovery_symbols()
+            total=len(syms)
+            coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
+            cold=coverage < max(1,int(total*.92))
+            if cold:
+                targets=[s for s in syms if _structure_age_recovery(s)>=999000]
+            else:
+                targets=[s for s in syms[:RECOVERY_PRIORITY] if _structure_age_recovery(s)>RECOVERY_STALE_S]
+            if targets:
+                for i in range(0,len(targets),RECOVERY_BATCH):
+                    batch=targets[i:i+RECOVERY_BATCH]
+                    await asyncio.gather(*[_hydrate_one(client,s) for s in batch])
+                    if len(app.selected_micro_symbols or [])==0 and recovery_stats["ok"]>=16:
+                        try:
+                            await continuity_guard.rebalance_continuity_guarded(force=True)
+                            recovery_stats["pool_kicks"]+=1
+                        except Exception as exc:
+                            print(f"Ψ-RECOVERY POOL_ERROR {type(exc).__name__}: {exc}",flush=True)
+                    await asyncio.sleep(.15)
+            recovery_stats["passes"]+=1
+            coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
+            print(f"Ψ-RECOVERY STRUCTURE coverage={coverage}/{total} pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']}",flush=True)
+            try:
+                if len(app.selected_micro_symbols or [])==0 and coverage>=16:
+                    await continuity_guard.rebalance_continuity_guarded(force=True)
+                    recovery_stats["pool_kicks"]+=1
+            except Exception as exc:
+                print(f"Ψ-RECOVERY POOL_ERROR {type(exc).__name__}: {exc}",flush=True)
+            await asyncio.sleep(20.0 if coverage < max(1,int(total*.92)) else 45.0)
+
+async def extension_recovery_loop():
+    while app.session is None:
+        await asyncio.sleep(.5)
+    timeout=aiohttp.ClientTimeout(total=12)
+    connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=120)
+    async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
+        while True:
+            try:
+                payload=await app.api_get(client,"/api/v3/ticker/24hr")
+                if not isinstance(payload,list): raise RuntimeError("ticker snapshot not list")
+                ts=time.time();new={}
+                for item in payload:
+                    if not isinstance(item,dict): continue
+                    sym=str(item.get("symbol") or "")
+                    if not sym: continue
+                    new[sym]={"change_pct":f(item.get("priceChangePercent")),"open":f(item.get("openPrice")),"high":f(item.get("highPrice")),"low":f(item.get("lowPrice")),"last":f(item.get("lastPrice")),"ts":ts}
+                if not new: raise RuntimeError("empty ticker snapshot")
+                extrest.ext_cache.clear();extrest.ext_cache.update(new)
+                extrest.ext_last_refresh=ts
+                extrest.ext_last_error=None
+                extrest.ext_refresh_ok+=1
+                recovery_stats["ext_ok"]+=1
+                print(f"Ψ-RECOVERY EXTENSION status=LIVE symbols={len(new)} ok={recovery_stats['ext_ok']} err={recovery_stats['ext_err']}",flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                recovery_stats["ext_err"]+=1
+                extrest.ext_refresh_errors+=1
+                extrest.ext_last_error=f"{type(exc).__name__}: {exc}"
+                print(f"Ψ-RECOVERY EXTENSION_ERROR {extrest.ext_last_error}",flush=True)
+            await asyncio.sleep(25.0)
+
 async def main():
     print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows.",flush=True)
-    await rescue.main()
+    await asyncio.gather(rescue.main(), structure_recovery_loop(), extension_recovery_loop())
 
 if __name__=="__main__":asyncio.run(main())
