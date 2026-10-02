@@ -276,7 +276,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 2
+RECOVERY_BATCH = 4
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
@@ -320,7 +320,7 @@ async def _hydrate_one(sym):
                 q.structure_ms[sym]=q.ms()
                 if not isinstance(app.anomaly_state.get(sym),dict):
                     try:
-                        an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=8.0)
+                        an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=3.0)
                         if isinstance(an,dict): app.anomaly_state[sym]=an
                     except Exception:
                         pass
@@ -335,7 +335,7 @@ async def _hydrate_one(sym):
                     q.structure_ms[sym]=q.ms()
                     if not isinstance(app.anomaly_state.get(sym),dict):
                         try:
-                            an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=10.0)
+                            an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=4.0)
                             if isinstance(an,dict): app.anomaly_state[sym]=an
                         except Exception:
                             pass
