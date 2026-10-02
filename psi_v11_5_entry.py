@@ -283,6 +283,26 @@ recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err"
 _recovery_retry_after = {}
 RECOVERY_FAIL_COOLDOWN_S = 45.0
 
+# Production watchdog: detects data-pipeline starvation and performs bounded,
+# fail-closed recovery actions. It never changes signal thresholds or BUY authority.
+WATCHDOG_INTERVAL_S = 15.0
+WATCHDOG_STARTUP_GRACE_S = 45.0
+WATCHDOG_STRUCTURE_STALL_S = 75.0
+WATCHDOG_POOL_STALL_S = 75.0
+WATCHDOG_SHARD_STALL_S = 45.0
+WATCHDOG_EXT_STALE_S = 50.0
+watchdog_stats = {
+    "cycles":0,"healthy":0,"degraded":0,"actions":0,"errors":0,
+    "ext_refresh":0,"structure_kicks":0,"pool_kicks":0,"shard_kicks":0,
+}
+_watchdog_started = time.time()
+_watchdog_last_ever_cov = 0
+_watchdog_last_cov_progress = time.time()
+_watchdog_last_pool = 0
+_watchdog_last_pool_progress = time.time()
+_watchdog_last_shards = 0
+_watchdog_last_shard_progress = time.time()
+
 def _structure_age_recovery(sym):
     ts = int(q.structure_ms.get(sym,0) or 0)
     return 999999.0 if ts <= 0 else max(0.0,(q.ms()-ts)/1000.0)
@@ -380,8 +400,175 @@ async def structure_recovery_loop():
         await asyncio.sleep(8.0 if coverage < max(1,int(total*.92)) else 45.0)
 
 
+async def _watchdog_refresh_extension():
+    if app.session is None or app.session.closed:
+        raise RuntimeError("shared REST session unavailable")
+    payload=await app.api_get(app.session,"/api/v3/ticker/24hr")
+    if not isinstance(payload,list):
+        raise RuntimeError("ticker snapshot not list")
+    ts=time.time();new={}
+    for item in payload:
+        if not isinstance(item,dict): continue
+        sym=str(item.get("symbol") or "")
+        if not sym: continue
+        new[sym]={
+            "change_pct":f(item.get("priceChangePercent")),
+            "open":f(item.get("openPrice")),
+            "high":f(item.get("highPrice")),
+            "low":f(item.get("lowPrice")),
+            "last":f(item.get("lastPrice")),
+            "ts":ts,
+        }
+    if not new:
+        raise RuntimeError("empty ticker snapshot")
+    extrest.ext_cache.clear();extrest.ext_cache.update(new)
+    extrest.ext_last_refresh=ts
+    extrest.ext_last_error=None
+    extrest.ext_refresh_ok+=1
+    watchdog_stats["ext_refresh"]+=1
+    return len(new)
+
+def _watchdog_pinpoint_count():
+    n=0
+    for sym,row in list(getattr(q,"latest",{}).items()):
+        if sym not in getattr(q,"universe_set",set()) or not isinstance(row,dict):
+            continue
+        if any(k.startswith("pinpoint_") for k in row.keys()):
+            n+=1
+    return n
+
+async def watchdog_loop():
+    global _watchdog_last_ever_cov,_watchdog_last_cov_progress
+    global _watchdog_last_pool,_watchdog_last_pool_progress
+    global _watchdog_last_shards,_watchdog_last_shard_progress
+
+    while app.session is None or not getattr(q,"universe",None):
+        await asyncio.sleep(.5)
+
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL_S)
+        watchdog_stats["cycles"]+=1
+        actions=[]
+        try:
+            now=time.time()
+            universe=list(getattr(q,"universe",[]) or [])
+            total=len(universe)
+            ever_cov=sum(1 for s in universe if _structure_age_recovery(s)<999000)
+            fresh_cov=sum(1 for s in universe if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+            pool=len(getattr(app,"selected_micro_symbols",[]) or [])
+            pin=_watchdog_pinpoint_count()
+            shards=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS))
+            ext_age=(now-f(extrest.ext_last_refresh,0.0)) if f(extrest.ext_last_refresh,0.0)>0 else 999999.0
+            startup_age=now-_watchdog_started
+
+            if ever_cov>_watchdog_last_ever_cov:
+                _watchdog_last_ever_cov=ever_cov
+                _watchdog_last_cov_progress=now
+            if pool>_watchdog_last_pool:
+                _watchdog_last_pool=pool
+                _watchdog_last_pool_progress=now
+            if shards>_watchdog_last_shards:
+                _watchdog_last_shards=shards
+                _watchdog_last_shard_progress=now
+
+            # Emergency extension refresh only when the canonical loop has gone stale.
+            if startup_age>WATCHDOG_STARTUP_GRACE_S and ext_age>WATCHDOG_EXT_STALE_S:
+                try:
+                    _rest_good_host.pop("ticker24",None)
+                    n=await asyncio.wait_for(_watchdog_refresh_extension(),timeout=12.0)
+                    watchdog_stats["actions"]+=1
+                    actions.append(f"EXT_REFRESH:{n}")
+                    print(f"Ψ-WATCHDOG ACTION EXT_REFRESH symbols={n} priorAge={ext_age:.1f}s",flush=True)
+                    ext_age=0.0
+                except Exception as exc:
+                    watchdog_stats["errors"]+=1
+                    actions.append("EXT_REFRESH_FAIL")
+                    print(f"Ψ-WATCHDOG ERROR EXT_REFRESH {type(exc).__name__}: {exc}",flush=True)
+
+            # If structure coverage stops advancing, rotate the preferred kline route
+            # and release only expired recovery cooldowns. The normal recovery loop
+            # remains the sole hydrator, preventing duplicate request storms.
+            if (
+                startup_age>WATCHDOG_STARTUP_GRACE_S
+                and ever_cov<max(16,int(total*.92))
+                and now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
+            ):
+                _rest_good_host.pop("klines",None)
+                released=0
+                for sym,until in list(_recovery_retry_after.items()):
+                    if until<=now or sym in set(_recovery_symbols()[:RECOVERY_PRIORITY]):
+                        _recovery_retry_after.pop(sym,None);released+=1
+                _watchdog_last_cov_progress=now
+                watchdog_stats["structure_kicks"]+=1
+                watchdog_stats["actions"]+=1
+                actions.append(f"STRUCTURE_ROUTE_RESET:{released}")
+                print(f"Ψ-WATCHDOG ACTION STRUCTURE_ROUTE_RESET coverage={ever_cov}/{total} released={released}",flush=True)
+
+            # Continuity should populate as soon as enough verified structure exists.
+            if (
+                startup_age>WATCHDOG_STARTUP_GRACE_S
+                and pool==0 and ever_cov>=16
+                and now-_watchdog_last_pool_progress>WATCHDOG_POOL_STALL_S
+            ):
+                try:
+                    await continuity_guard.rebalance_continuity_guarded(force=True)
+                    new_pool=len(getattr(app,"selected_micro_symbols",[]) or [])
+                    watchdog_stats["pool_kicks"]+=1
+                    watchdog_stats["actions"]+=1
+                    actions.append(f"POOL_REBALANCE:{new_pool}")
+                    print(f"Ψ-WATCHDOG ACTION POOL_REBALANCE before=0 after={new_pool} structure={ever_cov}/{total}",flush=True)
+                    if new_pool>0:
+                        _watchdog_last_pool=new_pool
+                        _watchdog_last_pool_progress=now
+                except Exception as exc:
+                    watchdog_stats["errors"]+=1
+                    actions.append("POOL_REBALANCE_FAIL")
+                    print(f"Ψ-WATCHDOG ERROR POOL_REBALANCE {type(exc).__name__}: {exc}",flush=True)
+
+            # If the continuity pool exists but shard assignments remain absent,
+            # ask the existing guarded shard allocator to repair the mapping.
+            if (
+                startup_age>WATCHDOG_STARTUP_GRACE_S
+                and pool>0 and shards<tape.SHARDS
+                and now-_watchdog_last_shard_progress>WATCHDOG_SHARD_STALL_S
+            ):
+                try:
+                    changed=continuity_guard.assign_shards_guarded()
+                    watchdog_stats["shard_kicks"]+=1
+                    watchdog_stats["actions"]+=1
+                    actions.append(f"SHARD_ASSIGN:{len(changed or [])}")
+                    print(f"Ψ-WATCHDOG ACTION SHARD_ASSIGN pool={pool} shards={shards}/{tape.SHARDS} changed={sorted(list(changed or []))}",flush=True)
+                    _watchdog_last_shard_progress=now
+                except Exception as exc:
+                    watchdog_stats["errors"]+=1
+                    actions.append("SHARD_ASSIGN_FAIL")
+                    print(f"Ψ-WATCHDOG ERROR SHARD_ASSIGN {type(exc).__name__}: {exc}",flush=True)
+
+            ext_live=ext_age<=WATCHDOG_EXT_STALE_S
+            structure_progressing=(ever_cov>=16 or now-_watchdog_last_cov_progress<=WATCHDOG_STRUCTURE_STALL_S)
+            continuity_ok=(pool>0 or ever_cov<16)
+            shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
+            healthy=ext_live and structure_progressing and continuity_ok and shard_ok
+            if healthy: watchdog_stats["healthy"]+=1
+            else: watchdog_stats["degraded"]+=1
+            status="HEALTHY" if healthy else "RECOVERING"
+            print(
+                f"Ψ-WATCHDOG status={status} cycle={watchdog_stats['cycles']} "
+                f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
+                f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
+                f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} "
+                f"actions={actions or ['NONE']} totals={watchdog_stats}",
+                flush=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            watchdog_stats["errors"]+=1
+            print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
+
 async def main():
-    print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows.",flush=True)
-    await asyncio.gather(rescue.main(), structure_recovery_loop())
+    print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
+    await asyncio.gather(rescue.main(), structure_recovery_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
