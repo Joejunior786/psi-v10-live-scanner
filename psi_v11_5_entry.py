@@ -9,20 +9,29 @@ tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
 VERSION="11.0.5.0-breakout-structural-intelligence"
 
-REST_PUBLIC = "https://data-api.binance.vision"
+REST_BASES = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+    "https://data-api.binance.vision",
+]
 _rest_route_printed = False
 _rest_global_gate = None
 _rest_kline_gate = None
 _rest_depth_gate = None
+_rest_good_host = {}
+_rest_stats = {"ok":0,"fail":0,"failover":0,"host_ok":{},"host_fail":{}}
 
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
-        _rest_global_gate = asyncio.Semaphore(3)
+        _rest_global_gate = asyncio.Semaphore(6)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(1)
+        _rest_kline_gate = asyncio.Semaphore(3)
     if _rest_depth_gate is None:
-        _rest_depth_gate = asyncio.Semaphore(1)
+        _rest_depth_gate = asyncio.Semaphore(2)
     p=str(path)
     if "/klines" in p:
         return _rest_global_gate, _rest_kline_gate
@@ -30,54 +39,70 @@ def _rest_gates(path):
         return _rest_global_gate, _rest_depth_gate
     return _rest_global_gate, None
 
+def _rest_lane(path):
+    p=str(path)
+    if "/klines" in p: return "klines"
+    if "/depth" in p: return "depth"
+    if "/ticker/24hr" in p: return "ticker24"
+    if "/exchangeInfo" in p: return "exchange"
+    return "other"
+
 async def resilient_api_get(client, path, params=None):
     global _rest_route_printed
     p=str(path)
-    if "/klines" in p:
-        timeout_s, attempts = 10.0, 2
-    elif "/depth" in p:
-        timeout_s, attempts = 8.0, 2
+    lane=_rest_lane(p)
+    if lane=="klines":
+        timeout_s, max_hosts = 5.5, 3
+    elif lane=="depth":
+        timeout_s, max_hosts = 4.5, 3
     else:
-        timeout_s, attempts = 18.0, 3
+        timeout_s, max_hosts = 6.5, 4
 
     global_gate, lane_gate = _rest_gates(p)
     last_exc=None
+    preferred=_rest_good_host.get(lane)
+    hosts=([preferred] if preferred else [])+[h for h in REST_BASES if h!=preferred]
+    hosts=hosts[:max_hosts]
 
-    async def _request_once():
+    async def _request_once(host):
         async with global_gate:
             async with client.get(
-                f"{REST_PUBLIC}{p}",
+                f"{host}{p}",
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=timeout_s),
-                headers={"Connection":"close"},
+                timeout=aiohttp.ClientTimeout(total=timeout_s, connect=min(2.5,timeout_s)),
             ) as response:
                 body=await response.text()
                 if response.status!=200:
-                    raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
+                    raise RuntimeError(f"{host} HTTP {response.status}: {body[:180]}")
                 return json.loads(body)
 
-    for attempt in range(attempts):
+    for idx,host in enumerate(hosts):
         try:
             if lane_gate is None:
-                payload=await _request_once()
+                payload=await _request_once(host)
             else:
                 async with lane_gate:
-                    payload=await _request_once()
+                    payload=await _request_once(host)
+            _rest_good_host[lane]=host
+            _rest_stats["ok"]+=1
+            _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
+            if idx>0: _rest_stats["failover"]+=1
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={REST_PUBLIC} global=3 klines=1 depth=1",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=6 klines=3 depth=2 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             last_exc=exc
-            if attempt+1<attempts:
-                await asyncio.sleep(0.5*(attempt+1))
+            _rest_stats["fail"]+=1
+            _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
+            await asyncio.sleep(.12)
 
     app.rest_connected=False
-    app.last_error=f"REST_PUBLIC_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
+    app.last_error=f"REST_FAILOVER_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
     raise RuntimeError(app.last_error)
 
 # Replace the shared module-level REST function before any scanner loop starts.
@@ -246,8 +271,8 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 1
-RECOVERY_PRIORITY = 96
+RECOVERY_BATCH = 2
+RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
 
@@ -281,7 +306,7 @@ async def _hydrate_one(sym):
         try:
             if attempt==0 and app.session is not None and not app.session.closed:
                 client=app.session
-                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=7.0)
+                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
                 if not isinstance(sd,dict):
                     raise RuntimeError("structure payload incomplete")
                 app.structure[sym]=sd
@@ -293,10 +318,10 @@ async def _hydrate_one(sym):
                     except Exception:
                         pass
             else:
-                timeout=aiohttp.ClientTimeout(total=16)
-                connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=60,force_close=True)
+                timeout=aiohttp.ClientTimeout(total=24,connect=3)
+                connector=aiohttp.TCPConnector(limit=12,ttl_dns_cache=300,keepalive_timeout=30)
                 async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
-                    sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=14.0)
+                    sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
                     if not isinstance(sd,dict):
                         raise RuntimeError("structure payload incomplete")
                     app.structure[sym]=sd
@@ -332,7 +357,7 @@ async def structure_recovery_loop():
         coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
         cold=coverage < max(1,int(total*.92))
         if cold:
-            targets=[s for s in syms if _structure_age_recovery(s)>=999000]
+            targets=[s for s in syms if _structure_age_recovery(s)>=999000][:RECOVERY_PRIORITY]
         else:
             targets=[s for s in syms[:RECOVERY_PRIORITY] if _structure_age_recovery(s)>RECOVERY_STALE_S]
         if targets:
@@ -350,7 +375,7 @@ async def structure_recovery_loop():
                 await asyncio.sleep(.15)
         recovery_stats["passes"]+=1
         coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
-        print(f"Ψ-RECOVERY STRUCTURE coverage={coverage}/{total} pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']}",flush=True)
+        print(f"Ψ-RECOVERY STRUCTURE coverage={coverage}/{total} pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} failover={_rest_stats['failover']} hosts={_rest_stats['host_ok']}",flush=True)
         try:
             if len(app.selected_micro_symbols or [])==0 and coverage>=16:
                 await continuity_guard.rebalance_continuity_guarded(force=True)
@@ -364,10 +389,10 @@ async def extension_recovery_loop():
         await asyncio.sleep(.5)
     while True:
         try:
-            timeout=aiohttp.ClientTimeout(total=10)
-            connector=aiohttp.TCPConnector(limit=2,ttl_dns_cache=30,force_close=True)
-            async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery"),"Connection":"close"}) as client:
-                payload=await asyncio.wait_for(app.api_get(client,"/api/v3/ticker/24hr"),timeout=10.0)
+            if app.session is None or app.session.closed:
+                await asyncio.sleep(1.0)
+                continue
+            payload=await app.api_get(app.session,"/api/v3/ticker/24hr")
             if not isinstance(payload,list): raise RuntimeError("ticker snapshot not list")
             ts=time.time();new={}
             for item in payload:
