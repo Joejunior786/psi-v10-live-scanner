@@ -336,112 +336,76 @@ def evaluate(symbol):
 
 async def persistent_rapid_websocket_loop():
     global stream_reconnects, stream_subscription_changes, stream_bootstraps
-    request_id = 1000
     while True:
-        bootstrap_tasks = set()
-        subscribed = set()
         try:
-            if app.session is None:
+            symbols=sorted({
+                x for x in v7.rapid_symbols
+                if x not in set(app.selected_micro_symbols)
+            })
+            if not symbols:
+                v7.rapid_ws_connected=False
+                v7.rapid_ws_symbols=[]
                 await asyncio.sleep(1)
                 continue
 
-            url = f"{app.WS_BASE}/ws"
-            print("Ψ-V10.9 RAPID WS persistent connection starting...", flush=True)
-            async with app.session.ws_connect(url, heartbeat=30, receive_timeout=95, max_msg_size=0) as ws:
-                v7.rapid_ws_connected = True
-                print("Ψ-V10.9 RAPID WS connected (dynamic SUBSCRIBE/UNSUBSCRIBE).", flush=True)
+            streams=[]
+            for symbol in symbols:
+                lower=symbol.lower()
+                streams.extend([f"{lower}@aggTrade",f"{lower}@depth20@100ms"])
+            url=f"{app.WS_BASE}/stream?streams={'/'.join(streams)}"
+            assert app.session is not None
+            print(f"Ψ-V10.9 RAPID WS connecting symbols={len(symbols)} book=DEPTH20_WS",flush=True)
+            async with app.session.ws_connect(url,heartbeat=None,receive_timeout=90,max_msg_size=0) as ws:
+                v7.rapid_ws_connected=True
+                v7.rapid_ws_symbols=list(symbols)
+                for symbol in symbols:
+                    st=app.ensure_micro_state(symbol)
+                    st["book_buffer"].clear()
+                    st["book_snapshot_ready"]=False
+                    st["book_sequence_ok"]=True
+                    st["book_sequence_samples"]=0
+                    st["book_resyncing"]=False
+                    st["last_book_update_id"]=None
+                print(f"Ψ-V10.9 RAPID WS connected symbols={len(symbols)} book=REST_FREE_DEPTH20",flush=True)
 
-                while True:
-                    desired = {
+                async for message in ws:
+                    desired=sorted({
                         x for x in v7.rapid_symbols
                         if x not in set(app.selected_micro_symbols)
-                    }
-                    add = desired - subscribed
-                    remove = subscribed - desired
+                    })
+                    if set(desired)!=set(symbols):
+                        stream_subscription_changes+=len(set(desired)^set(symbols))
+                        stream_reconnects+=1
+                        print("Ψ-V10.9 RAPID membership changed; reconnecting combined stream",flush=True)
+                        break
 
-                    if add:
-                        params = []
-                        for symbol in sorted(add):
-                            lower = symbol.lower()
-                            params.extend([f"{lower}@aggTrade", f"{lower}@depth@100ms"])
-                            st = app.ensure_micro_state(symbol)
-                            st["book_buffer"].clear()
-                            st["book_snapshot_ready"] = False
-                            st["book_sequence_ok"] = True
-                            st["book_sequence_samples"] = 0
-                            st["book_resyncing"] = True
-                            task = asyncio.create_task(app.bootstrap_book(symbol))
-                            bootstrap_tasks.add(task)
-                            task.add_done_callback(bootstrap_tasks.discard)
-                            stream_bootstraps += 1
-                        request_id += 1
-                        await ws.send_str(json.dumps({"method": "SUBSCRIBE", "params": params, "id": request_id}))
-                        subscribed |= add
-                        stream_subscription_changes += len(add)
-
-                    if remove:
-                        params = []
-                        for symbol in sorted(remove):
-                            lower = symbol.lower()
-                            params.extend([f"{lower}@aggTrade", f"{lower}@depth@100ms"])
-                        request_id += 1
-                        await ws.send_str(json.dumps({"method": "UNSUBSCRIBE", "params": params, "id": request_id}))
-                        subscribed -= remove
-                        stream_subscription_changes += len(remove)
-
-                    v7.rapid_ws_symbols = sorted(subscribed)
-
-                    try:
-                        message = await asyncio.wait_for(ws.receive(), timeout=SUBSCRIPTION_SYNC_SECONDS)
-                    except asyncio.TimeoutError:
-                        continue
-
-                    if message.type == aiohttp.WSMsgType.TEXT:
+                    if message.type==aiohttp.WSMsgType.TEXT:
                         try:
-                            payload = json.loads(message.data)
+                            payload=json.loads(message.data)
                         except json.JSONDecodeError:
                             continue
-                        if not isinstance(payload, dict) or "result" in payload:
+                        stream_name=payload.get("stream","")
+                        data=payload.get("data",{})
+                        if not stream_name or not isinstance(data,dict):
                             continue
-                        event = payload.get("e")
-                        symbol = str(payload.get("s") or "").upper()
-                        if not symbol:
-                            continue
-                        if event == "aggTrade":
-                            app.process_agg_trade(symbol, payload)
-                        elif event == "depthUpdate":
-                            app.process_diff_depth(symbol, payload)
-                    elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        symbol=stream_name.split("@")[0].upper()
+                        if "@aggTrade" in stream_name:
+                            app.process_agg_trade(symbol,data)
+                        elif "@depth20" in stream_name:
+                            app.process_partial_depth_snapshot(symbol,data)
+                    elif message.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
+                        stream_reconnects+=1
                         break
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            stream_reconnects += 1
-            app.last_error = f"V10.9_RAPID_WS: {type(exc).__name__}: {exc}"
-            print(app.last_error, flush=True)
+            stream_reconnects+=1
+            app.last_error=f"V10.9_RAPID_WS: {type(exc).__name__}: {exc}"
+            print(app.last_error,flush=True)
         finally:
-            v7.rapid_ws_connected = False
-            v7.rapid_ws_symbols = []
-            for task in list(bootstrap_tasks):
-                if not task.done():
-                    task.cancel()
-            if bootstrap_tasks:
-                await asyncio.gather(*bootstrap_tasks, return_exceptions=True)
-        await asyncio.sleep(2)
-
-
-def _radar_rows(limit=10):
-    rows = base.rank(limit=None, triggered_only=False)
-    rows.sort(
-        key=lambda x: (
-            bool(x.get("latent_ignition")),
-            bool(x.get("clustered_ignition")),
-            bool(x.get("trigger")),
-            float(x.get("score", 0)),
-        ),
-        reverse=True,
-    )
-    return rows[:limit]
+            v7.rapid_ws_connected=False
+            v7.rapid_ws_symbols=[]
+        await asyncio.sleep(1)
 
 
 async def health(req):

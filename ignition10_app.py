@@ -448,7 +448,6 @@ async def rapid_radar_loop():
 async def rapid_websocket_loop():
     global rapid_ws_connected, rapid_ws_symbols
     while True:
-        bootstrap_tasks = []
         try:
             symbols = [x for x in rapid_symbols if x not in set(app.selected_micro_symbols)]
             if not symbols:
@@ -459,19 +458,22 @@ async def rapid_websocket_loop():
             streams = []
             for symbol in symbols:
                 lower = symbol.lower()
-                streams.extend([f"{lower}@aggTrade", f"{lower}@depth@100ms"])
+                streams.extend([f"{lower}@aggTrade", f"{lower}@depth20@100ms"])
             url = f"{app.WS_BASE}/stream?streams={'/'.join(streams)}"
             assert app.session is not None
-            print(f"Ψ-V10.7 RAPID WS connecting for {len(symbols)} symbols...", flush=True)
+            print(f"Ψ-V10.7 RAPID WS connecting for {len(symbols)} symbols book=DEPTH20_WS...", flush=True)
             async with app.session.ws_connect(url, heartbeat=None, receive_timeout=90, max_msg_size=0) as ws:
                 rapid_ws_connected = True
                 rapid_ws_symbols = list(symbols)
                 for symbol in symbols:
                     st = app.ensure_micro_state(symbol)
-                    st["book_buffer"].clear(); st["book_snapshot_ready"] = False
-                    st["book_sequence_ok"] = True; st["book_sequence_samples"] = 0; st["book_resyncing"] = True
-                    bootstrap_tasks.append(asyncio.create_task(app.bootstrap_book(symbol)))
-                print("Ψ-V10.7 RAPID WS connected.", flush=True)
+                    st["book_buffer"].clear()
+                    st["book_snapshot_ready"] = False
+                    st["book_sequence_ok"] = True
+                    st["book_sequence_samples"] = 0
+                    st["book_resyncing"] = False
+                    st["last_book_update_id"] = None
+                print("Ψ-V10.7 RAPID WS connected book=REST_FREE_DEPTH20.", flush=True)
                 async for message in ws:
                     current = [x for x in rapid_symbols if x not in set(app.selected_micro_symbols)]
                     if set(current) != set(symbols):
@@ -488,8 +490,8 @@ async def rapid_websocket_loop():
                         symbol = stream_name.split("@")[0].upper()
                         if "@aggTrade" in stream_name:
                             app.process_agg_trade(symbol, data)
-                        elif "@depth" in stream_name:
-                            app.process_diff_depth(symbol, data)
+                        elif "@depth20" in stream_name:
+                            app.process_partial_depth_snapshot(symbol, data)
                     elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
         except asyncio.CancelledError:
@@ -499,10 +501,7 @@ async def rapid_websocket_loop():
             print(app.last_error, flush=True)
         finally:
             rapid_ws_connected = False
-            for task in bootstrap_tasks:
-                if not task.done(): task.cancel()
-            if bootstrap_tasks:
-                await asyncio.gather(*bootstrap_tasks, return_exceptions=True)
+            rapid_ws_symbols = []
         await asyncio.sleep(1)
 
 
