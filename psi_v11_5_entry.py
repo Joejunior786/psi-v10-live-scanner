@@ -225,7 +225,7 @@ async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
         await asyncio.sleep(.5)
     timeout=aiohttp.ClientTimeout(total=15)
-    connector=aiohttp.TCPConnector(limit=24,ttl_dns_cache=120)
+    connector=aiohttp.TCPConnector(limit=24,ttl_dns_cache=120,force_close=True)
     async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
         while True:
             syms=_recovery_symbols()
@@ -240,6 +240,8 @@ async def structure_recovery_loop():
                 for i in range(0,len(targets),RECOVERY_BATCH):
                     batch=targets[i:i+RECOVERY_BATCH]
                     await asyncio.gather(*[_hydrate_one(client,s) for s in batch])
+                    cov_now=sum(1 for s in syms if _structure_age_recovery(s)<999000)
+                    print(f"Ψ-RECOVERY BATCH coverage={cov_now}/{total} batch={i//RECOVERY_BATCH+1} ok={recovery_stats['ok']} fail={recovery_stats['fail']}",flush=True)
                     if len(app.selected_micro_symbols or [])==0 and recovery_stats["ok"]>=16:
                         try:
                             await continuity_guard.rebalance_continuity_guarded(force=True)
@@ -262,7 +264,7 @@ async def extension_recovery_loop():
     while app.session is None:
         await asyncio.sleep(.5)
     timeout=aiohttp.ClientTimeout(total=12)
-    connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=120)
+    connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=120,force_close=True)
     async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
         while True:
             try:
