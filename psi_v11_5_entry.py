@@ -1,4 +1,4 @@
-import asyncio, json, math, statistics, time, os
+import asyncio, json, math, statistics, time, os, contextvars
 import aiohttp
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
@@ -21,16 +21,21 @@ REST_BASES = [
 _rest_route_printed = False
 _rest_global_gate = None
 _rest_kline_gate = None
+_rest_bg_kline_gate = None
 _rest_depth_gate = None
+_structure_request_ctx = contextvars.ContextVar("psi_structure_request", default=False)
+_structure_active = 0
 _rest_good_host = {}
 _rest_stats = {"ok":0,"fail":0,"failover":0,"host_ok":{},"host_fail":{}}
 
 def _rest_gates(path):
-    global _rest_global_gate, _rest_kline_gate, _rest_depth_gate
+    global _rest_global_gate, _rest_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
         _rest_kline_gate = asyncio.Semaphore(3)
+    if _rest_bg_kline_gate is None:
+        _rest_bg_kline_gate = asyncio.Semaphore(1)
     if _rest_depth_gate is None:
         _rest_depth_gate = asyncio.Semaphore(1)
     p=str(path)
@@ -53,7 +58,10 @@ async def resilient_api_get(client, path, params=None):
     p=str(path)
     lane=_rest_lane(p)
     if lane=="klines":
-        timeout_s, max_hosts = 3.5, 3
+        if _structure_request_ctx.get():
+            timeout_s, max_hosts = 4.5, 4
+        else:
+            timeout_s, max_hosts = 3.0, 2
     elif lane=="depth":
         timeout_s, max_hosts = 3.5, 2
     elif lane=="ticker24":
@@ -94,6 +102,14 @@ async def resilient_api_get(client, path, params=None):
         try:
             if lane_gate is None:
                 payload=await _request_once(host)
+            elif lane=="klines" and not _structure_request_ctx.get():
+                # Background historical polling may use only one kline slot and
+                # yields while structural hydration is active.
+                while _structure_active > 0:
+                    await asyncio.sleep(0.05)
+                async with _rest_bg_kline_gate:
+                    async with lane_gate:
+                        payload=await _request_once(host)
             else:
                 async with lane_gate:
                     payload=await _request_once(host)
@@ -126,6 +142,20 @@ async def resilient_api_get(client, path, params=None):
 
 # Replace the shared module-level REST function before any scanner loop starts.
 app.api_get = resilient_api_get
+_original_load_structure = app.load_structure
+
+async def _priority_load_structure(client, symbol):
+    global _structure_active
+    token = _structure_request_ctx.set(True)
+    _structure_active += 1
+    try:
+        return await _original_load_structure(client, symbol)
+    finally:
+        _structure_active = max(0, _structure_active - 1)
+        _structure_request_ctx.reset(token)
+
+app.load_structure = _priority_load_structure
+
 # L1-L10 execution logic only needs a compact bootstrap snapshot. Keeping 20
 # levels cuts REST payload and resync pressure while preserving the required book.
 app.DEPTH_SNAPSHOT_LIMIT = min(20, int(getattr(app, "DEPTH_SNAPSHOT_LIMIT", 20) or 20))
@@ -688,7 +718,7 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def main():
-    print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
+    print("[v11.0.5.1] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
     await asyncio.gather(rescue.main(), structure_recovery_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
