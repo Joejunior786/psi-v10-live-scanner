@@ -293,6 +293,8 @@ def _recovery_symbols():
         s=str(s or "")
         if s and s not in seen and s in set(getattr(q,"universe_set",set()) or set()):
             seen.add(s);out.append(s)
+    # Once continuity is populated, protect the actual execution pool first.
+    for s in list(getattr(app,"selected_micro_symbols",[]) or []): add(s)
     for s in ("BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT","SUIUSDT","LTCUSDT","AVAXUSDT","DOTUSDT","AAVEUSDT","TAOUSDT","FETUSDT","NEARUSDT","ICPUSDT","ONDOUSDT","PEPEUSDT","SHIBUSDT"):
         add(s)
     try:
@@ -303,7 +305,6 @@ def _recovery_symbols():
         for _,s in q.hot(RECOVERY_PRIORITY): add(s)
     except Exception:
         pass
-    for s in list(getattr(app,"selected_micro_symbols",[]) or []): add(s)
     for s in list(getattr(q,"universe",[]) or []): add(s)
     return out
 
