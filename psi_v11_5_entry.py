@@ -20,6 +20,13 @@ REST_BASES = (
 )
 _rest_preferred = 0
 _rest_failover_printed = None
+_rest_gate = None
+
+def _rest_semaphore():
+    global _rest_gate
+    if _rest_gate is None:
+        _rest_gate = asyncio.Semaphore(8)
+    return _rest_gate
 
 async def resilient_api_get(client, path, params=None):
     global _rest_preferred, _rest_failover_printed
