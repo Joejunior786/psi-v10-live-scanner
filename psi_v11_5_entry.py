@@ -20,13 +20,23 @@ REST_BASES = (
 )
 _rest_preferred = 0
 _rest_failover_printed = None
-_rest_gate = None
+_rest_global_gate = None
+_rest_kline_gate = None
+_rest_depth_gate = None
 
-def _rest_semaphore():
-    global _rest_gate
-    if _rest_gate is None:
-        _rest_gate = asyncio.Semaphore(8)
-    return _rest_gate
+def _rest_gates(path):
+    global _rest_global_gate, _rest_kline_gate, _rest_depth_gate
+    if _rest_global_gate is None:
+        _rest_global_gate = asyncio.Semaphore(3)
+    if _rest_kline_gate is None:
+        _rest_kline_gate = asyncio.Semaphore(1)
+    if _rest_depth_gate is None:
+        _rest_depth_gate = asyncio.Semaphore(1)
+    if "/klines" in str(path):
+        return _rest_global_gate, _rest_kline_gate
+    if "/depth" in str(path):
+        return _rest_global_gate, _rest_depth_gate
+    return _rest_global_gate, None
 
 async def resilient_api_get(client, path, params=None):
     global _rest_preferred, _rest_failover_printed
@@ -35,24 +45,31 @@ async def resilient_api_get(client, path, params=None):
     for idx in order:
         host=REST_BASES[idx]
         try:
-            async with client.get(
-                f"{host}{path}",
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=3.5),
-                headers={"Connection":"close"},
-            ) as response:
-                body=await response.text()
-                if response.status!=200:
-                    raise RuntimeError(f"HTTP {response.status}: {body[:160]}")
-                payload=json.loads(body)
-                app.rest_connected=True
-                app.last_error=None
-                if idx!=_rest_preferred or _rest_failover_printed is None:
-                    _rest_preferred=idx
-                    if _rest_failover_printed!=host:
-                        print(f"Ψ-REST FAILOVER active={host}",flush=True)
-                        _rest_failover_printed=host
-                return payload
+            global_gate, lane_gate = _rest_gates(path)
+            async def _request_once():
+                async with global_gate:
+                    async with client.get(
+                        f"{host}{path}",
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=4.0),
+                        headers={"Connection":"close"},
+                    ) as response:
+                        body=await response.text()
+                        if response.status!=200:
+                            raise RuntimeError(f"HTTP {response.status}: {body[:160]}")
+                        payload=json.loads(body)
+                        app.rest_connected=True
+                        app.last_error=None
+                        if idx!=_rest_preferred or _rest_failover_printed is None:
+                            _rest_preferred=idx
+                            if _rest_failover_printed!=host:
+                                print(f"Ψ-REST FAILOVER active={host}",flush=True)
+                                _rest_failover_printed=host
+                        return payload
+            if lane_gate is None:
+                return await _request_once()
+            async with lane_gate:
+                return await _request_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -228,7 +245,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 3
+RECOVERY_BATCH = 1
 RECOVERY_PRIORITY = 96
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
