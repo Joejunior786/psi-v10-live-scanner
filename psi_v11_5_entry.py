@@ -309,54 +309,34 @@ def _recovery_symbols():
     return out
 
 async def _hydrate_one(sym):
-    last_exc=None
-    for attempt in range(2):
-        try:
-            if attempt==0 and app.session is not None and not app.session.closed:
-                client=app.session
-                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=20.0)
-                if not isinstance(sd,dict):
-                    raise RuntimeError("structure payload incomplete")
-                app.structure[sym]=sd
-                q.structure_ms[sym]=q.ms()
-                if not isinstance(app.anomaly_state.get(sym),dict):
-                    try:
-                        an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=3.0)
-                        if isinstance(an,dict): app.anomaly_state[sym]=an
-                    except Exception:
-                        pass
-            else:
-                timeout=aiohttp.ClientTimeout(total=22,connect=2.5)
-                connector=aiohttp.TCPConnector(limit=12,ttl_dns_cache=300,keepalive_timeout=30)
-                async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
-                    sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
-                    if not isinstance(sd,dict):
-                        raise RuntimeError("structure payload incomplete")
-                    app.structure[sym]=sd
-                    q.structure_ms[sym]=q.ms()
-                    if not isinstance(app.anomaly_state.get(sym),dict):
-                        try:
-                            an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=4.0)
-                            if isinstance(an,dict): app.anomaly_state[sym]=an
-                        except Exception:
-                            pass
-            row=app.evaluate_symbol(sym)
-            if isinstance(row,dict) and row: q.latest[sym]=row
-            _recovery_retry_after.pop(sym,None)
-            recovery_stats["ok"]+=1
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            last_exc=exc
-            if attempt==0:
-                await asyncio.sleep(.25)
-                continue
-    _recovery_retry_after[sym]=time.time()+RECOVERY_FAIL_COOLDOWN_S
-    recovery_stats["fail"]+=1
-    if recovery_stats["fail"]<=20:
-        print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(last_exc).__name__}: {last_exc}",flush=True)
-    return False
+    try:
+        if app.session is None or app.session.closed:
+            raise RuntimeError("shared REST session unavailable")
+        client=app.session
+        sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=20.0)
+        if not isinstance(sd,dict):
+            raise RuntimeError("structure payload incomplete")
+        app.structure[sym]=sd
+        q.structure_ms[sym]=q.ms()
+        if not isinstance(app.anomaly_state.get(sym),dict):
+            try:
+                an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=3.0)
+                if isinstance(an,dict): app.anomaly_state[sym]=an
+            except Exception:
+                pass
+        row=app.evaluate_symbol(sym)
+        if isinstance(row,dict) and row: q.latest[sym]=row
+        _recovery_retry_after.pop(sym,None)
+        recovery_stats["ok"]+=1
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _recovery_retry_after[sym]=time.time()+RECOVERY_FAIL_COOLDOWN_S
+        recovery_stats["fail"]+=1
+        if recovery_stats["fail"]<=30:
+            print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
+        return False
 
 async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
