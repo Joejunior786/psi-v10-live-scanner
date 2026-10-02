@@ -366,10 +366,14 @@ async def structure_recovery_loop():
         coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
         cold=coverage < max(1,int(total*.92))
         now=time.time()
+        priority=list(syms[:RECOVERY_PRIORITY])
         if cold:
-            targets=[s for s in syms if _structure_age_recovery(s)>=999000 and _recovery_retry_after.get(s,0)<=now][:RECOVERY_PRIORITY]
+            urgent=[s for s in priority if _structure_age_recovery(s)>RECOVERY_STALE_S and _recovery_retry_after.get(s,0)<=now]
+            urgent_set=set(urgent)
+            newcomers=[s for s in syms if _structure_age_recovery(s)>=999000 and s not in urgent_set and _recovery_retry_after.get(s,0)<=now]
+            targets=(urgent+newcomers)[:RECOVERY_PRIORITY]
         else:
-            targets=[s for s in syms[:RECOVERY_PRIORITY] if _structure_age_recovery(s)>RECOVERY_STALE_S and _recovery_retry_after.get(s,0)<=now]
+            targets=[s for s in priority if _structure_age_recovery(s)>RECOVERY_STALE_S and _recovery_retry_after.get(s,0)<=now]
         if targets:
             for i in range(0,len(targets),RECOVERY_BATCH):
                 batch=targets[i:i+RECOVERY_BATCH]
