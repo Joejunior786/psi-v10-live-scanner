@@ -90,12 +90,6 @@ def coverage_target():
     return min(max(1,PRIORITY_LIMIT),max(1,total))
 
 async def freshness_loop_1211():
-    sem = asyncio.Semaphore(max(1, REFRESH_CONCURRENCY))
-
-    async def one(sym):
-        async with sem:
-            await refresh_structure_light(sym)
-
     last_target = None
     while True:
         await asyncio.sleep(max(5.0, REFRESH_EVERY))
@@ -104,27 +98,28 @@ async def freshness_loop_1211():
             target = coverage_target()
             core.refresh_stats["coverage"] = coverage
             core.refresh_stats["coverage_target"] = target
+            priority = priority_symbols_1211(PRIORITY_LIMIT)
+            fresh = sum(1 for s in priority if core.structure_age(s) <= core.STRUCTURE_MAX_AGE)
+            stale = sum(1 for s in priority if core.structure_age(s) > core.STRUCTURE_REFRESH_AGE)
+            core.refresh_stats["cycles"] += 1
 
             if target != last_target:
                 print(
                     f"Ψ-V10.21.1 PRIORITY_FRESHNESS target={target} "
                     f"universe={len(q.universe or [])} broadCoverage={coverage} "
-                    f"priority={PRIORITY_LIMIT}",
+                    f"priority={PRIORITY_LIMIT} owner=V11_RECOVERY",
                     flush=True,
                 )
                 last_target = target
 
-            # Priority symbols refresh immediately. Broad 403-symbol historical
-            # structure coverage is diagnostic only and never blocks this worker.
-            stale = [
-                s
-                for s in priority_symbols_1211(PRIORITY_LIMIT)
-                if core.structure_age(s) > core.STRUCTURE_REFRESH_AGE
-            ]
-            targets = stale[: max(1, REFRESH_MAX)]
-            if targets:
-                await asyncio.gather(*(one(s) for s in targets))
-            core.refresh_stats["cycles"] += 1
+            # Observer-only by design. v11.0.5 is the sole owner of historical
+            # structure REST, preventing duplicate kline jobs and semaphore stalls.
+            if core.refresh_stats["cycles"] % 3 == 0:
+                print(
+                    f"Ψ-V10.21.1 PRIORITY_STATUS fresh={fresh}/{len(priority)} "
+                    f"stale={stale} owner=V11_RECOVERY",
+                    flush=True,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

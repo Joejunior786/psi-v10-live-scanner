@@ -290,6 +290,22 @@ _structure_cache_dirty = False
 def _recovery_scope():
     return _recovery_symbols()[:RECOVERY_PRIORITY]
 
+def _execution_structure_batch_symbols():
+    scope=_recovery_scope()
+    now=time.time()
+    stale=[
+        s for s in scope
+        if _structure_age_recovery(s)>RECOVERY_STALE_S
+        and _recovery_retry_after.get(s,0)<=now
+    ]
+    return stale[:RECOVERY_BATCH]
+
+# Neutralize the legacy 60-symbol historical-structure sweeps. The WebSocket
+# discovery stack still scans all 403 markets; REST historical structure is
+# execution-tier only and owned by the v11 recovery scheduler.
+q.STRUCTURE_BATCH=RECOVERY_BATCH
+q.structure_batch_symbols=_execution_structure_batch_symbols
+
 def _load_structure_cache():
     global _structure_cache_dirty
     try:

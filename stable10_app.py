@@ -100,12 +100,20 @@ async def refresh_structure():
         return
 
     hunt_attempted.update(batch)
+    started_ms = q.ms()
+    before_updated = {
+        symbol: int((app.structure.get(symbol) or {}).get("updated_ms") or 0)
+        for symbol in batch
+    }
     await app.structure_batch(batch)
-    stamp = q.ms()
     valid = 0
     for symbol in batch:
-        if symbol in app.structure:
-            q.structure_ms[symbol] = stamp
+        sd = app.structure.get(symbol) or {}
+        updated = int(sd.get("updated_ms") or 0)
+        # Only stamp freshness when this exact refresh produced a newer
+        # structure snapshot. A failed refresh must never make cached data fresh.
+        if updated > max(before_updated.get(symbol, 0), started_ms - 5000):
+            q.structure_ms[symbol] = updated
             q.structure_seen.add(symbol)
             hunt_structurally_valid.add(symbol)
             valid += 1
