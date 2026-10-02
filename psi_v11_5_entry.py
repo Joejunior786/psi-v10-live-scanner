@@ -30,7 +30,7 @@ def _rest_gates(path):
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(4)
+        _rest_kline_gate = asyncio.Semaphore(3)
     if _rest_depth_gate is None:
         _rest_depth_gate = asyncio.Semaphore(1)
     p=str(path)
@@ -53,16 +53,29 @@ async def resilient_api_get(client, path, params=None):
     p=str(path)
     lane=_rest_lane(p)
     if lane=="klines":
-        timeout_s, max_hosts = 4.0, 4
+        timeout_s, max_hosts = 3.5, 3
     elif lane=="depth":
-        timeout_s, max_hosts = 4.5, 3
+        timeout_s, max_hosts = 3.5, 2
+    elif lane=="ticker24":
+        timeout_s, max_hosts = 8.0, 3
     else:
-        timeout_s, max_hosts = 6.5, 4
+        timeout_s, max_hosts = 5.0, 3
 
     global_gate, lane_gate = _rest_gates(p)
     last_exc=None
     preferred=_rest_good_host.get(lane)
-    hosts=([preferred] if preferred else [])+[h for h in REST_BASES if h!=preferred]
+    if lane in {"klines","depth","ticker24"}:
+        base_hosts=[
+            "https://data-api.binance.vision",
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+            "https://api3.binance.com",
+            "https://api4.binance.com",
+        ]
+    else:
+        base_hosts=list(REST_BASES)
+    hosts=([preferred] if preferred else [])+[h for h in base_hosts if h!=preferred]
     hosts=hosts[:max_hosts]
 
     async def _request_once(host):
@@ -91,7 +104,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=4 depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=3 depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
         except asyncio.CancelledError:
@@ -277,7 +290,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 2
+RECOVERY_BATCH = 1
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
@@ -314,6 +327,25 @@ async def _legacy_structure_noop():
 
 stable_core.refresh_structure=_legacy_structure_noop
 q.refresh_structure=_legacy_structure_noop
+
+async def _execution_anomaly_refresh():
+    # Full-universe discovery is WebSocket-native. Avoid the old 20-symbol
+    # REST anomaly burst until the continuity execution pool exists.
+    if app.session is None or not getattr(app,"selected_micro_symbols",None):
+        return
+    selected=list(dict.fromkeys(app.selected_micro_symbols))[:4]
+    sem=asyncio.Semaphore(2)
+    async def one(sym):
+        async with sem:
+            try:
+                row=await asyncio.wait_for(app.load_fast_anomaly(app.session,sym),timeout=8.0)
+                if isinstance(row,dict):
+                    app.anomaly_state[sym]=row
+            except Exception:
+                return
+    await asyncio.gather(*(one(sym) for sym in selected))
+
+q.refresh_anomaly=_execution_anomaly_refresh
 
 def _load_structure_cache():
     global _structure_cache_dirty
@@ -425,7 +457,7 @@ async def _hydrate_one(sym):
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
         client=app.session
-        sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=20.0)
+        sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
         if not isinstance(sd,dict):
             raise RuntimeError("structure payload incomplete")
         app.structure[sym]=sd
