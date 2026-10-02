@@ -3,6 +3,7 @@ import aiohttp
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
 import psi_v11_3_1_entry as continuity_guard
+import stable10_app as stable_core
 
 base=rescue.base
 tape=rescue.tape
@@ -305,6 +306,14 @@ def _execution_structure_batch_symbols():
 # execution-tier only and owned by the v11 recovery scheduler.
 q.STRUCTURE_BATCH=RECOVERY_BATCH
 q.structure_batch_symbols=_execution_structure_batch_symbols
+
+async def _legacy_structure_noop():
+    # V11 recovery is the sole owner of historical structure REST.
+    # Discovery and live microstructure continue through their WebSocket loops.
+    return None
+
+stable_core.refresh_structure=_legacy_structure_noop
+q.refresh_structure=_legacy_structure_noop
 
 def _load_structure_cache():
     global _structure_cache_dirty

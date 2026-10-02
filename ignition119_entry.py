@@ -35,7 +35,7 @@ except Exception:
 # Sampling / guardrails
 # -----------------------------------------------------------------------------
 MTF_SAMPLE_SECONDS = 40.0
-MTF_MAX_SYMBOLS = 14
+MTF_MAX_SYMBOLS = 4
 DEPTH_SAMPLE_SECONDS = 20.0
 DEPTH_MAX_SYMBOLS = 4
 FLOW_SAMPLE_SECONDS = 5.0
@@ -299,8 +299,18 @@ async def fetch_mtf(sym):
 async def mtf_loop():
     while True:
         await asyncio.sleep(MTF_SAMPLE_SECONDS)
-        syms = candidate_symbols(MTF_MAX_SYMBOLS)
         try:
+            # MTF REST is execution-tier enrichment only. Full-universe early
+            # discovery is already supplied by the WebSocket radar/tape stack.
+            selected=set(getattr(app,"selected_micro_symbols",[]) or [])
+            if not selected:
+                continue
+            syms=[
+                s for s in candidate_symbols(max(20,MTF_MAX_SYMBOLS*5))
+                if s in selected
+            ][:MTF_MAX_SYMBOLS]
+            if not syms:
+                continue
             await asyncio.gather(*(fetch_mtf(sym) for sym in syms))
             stats["mtf_samples"] += 1
         except asyncio.CancelledError:
