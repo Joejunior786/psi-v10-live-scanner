@@ -27,9 +27,9 @@ _rest_stats = {"ok":0,"fail":0,"failover":0,"host_ok":{},"host_fail":{}}
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
-        _rest_global_gate = asyncio.Semaphore(6)
+        _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(3)
+        _rest_kline_gate = asyncio.Semaphore(6)
     if _rest_depth_gate is None:
         _rest_depth_gate = asyncio.Semaphore(2)
     p=str(path)
@@ -52,7 +52,7 @@ async def resilient_api_get(client, path, params=None):
     p=str(path)
     lane=_rest_lane(p)
     if lane=="klines":
-        timeout_s, max_hosts = 5.5, 3
+        timeout_s, max_hosts = 4.0, 4
     elif lane=="depth":
         timeout_s, max_hosts = 4.5, 3
     else:
@@ -69,7 +69,7 @@ async def resilient_api_get(client, path, params=None):
             async with client.get(
                 f"{host}{p}",
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=timeout_s, connect=min(2.5,timeout_s)),
+                timeout=aiohttp.ClientTimeout(total=timeout_s, connect=min(1.8,timeout_s)),
             ) as response:
                 body=await response.text()
                 if response.status!=200:
@@ -90,7 +90,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=6 klines=3 depth=2 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=6 depth=2 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
         except asyncio.CancelledError:
@@ -103,6 +103,11 @@ async def resilient_api_get(client, path, params=None):
 
     app.rest_connected=False
     app.last_error=f"REST_FAILOVER_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
+    try:
+        safe_params={k:params.get(k) for k in ("symbol","interval","limit") if isinstance(params,dict) and k in params}
+        print(f"Ψ-REST FAIL lane={lane} path={p} params={safe_params} hosts={hosts} err={type(last_exc).__name__}:{last_exc}",flush=True)
+    except Exception:
+        pass
     raise RuntimeError(app.last_error)
 
 # Replace the shared module-level REST function before any scanner loop starts.
@@ -308,7 +313,7 @@ async def _hydrate_one(sym):
         try:
             if attempt==0 and app.session is not None and not app.session.closed:
                 client=app.session
-                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
+                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=20.0)
                 if not isinstance(sd,dict):
                     raise RuntimeError("structure payload incomplete")
                 app.structure[sym]=sd
@@ -320,7 +325,7 @@ async def _hydrate_one(sym):
                     except Exception:
                         pass
             else:
-                timeout=aiohttp.ClientTimeout(total=24,connect=3)
+                timeout=aiohttp.ClientTimeout(total=22,connect=2.5)
                 connector=aiohttp.TCPConnector(limit=12,ttl_dns_cache=300,keepalive_timeout=30)
                 async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
                     sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
