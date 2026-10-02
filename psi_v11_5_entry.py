@@ -10,7 +10,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.2-breakout-structural-intelligence"
+VERSION="11.0.5.3-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -60,21 +60,28 @@ async def resilient_api_get(client, path, params=None):
     global _rest_route_printed
     p=str(path)
     lane=_rest_lane(p)
-    if lane=="klines":
-        if _structure_request_ctx.get():
-            timeout_s, max_hosts = 4.5, 4
-        else:
-            timeout_s, max_hosts = 3.0, 2
-    elif lane=="depth":
-        timeout_s, max_hosts = 3.5, 2
-    elif lane=="ticker24":
-        timeout_s, max_hosts = 8.0, 3
-    else:
-        timeout_s, max_hosts = 5.0, 3
+    is_structure = lane=="klines" and _structure_request_ctx.get()
+    route_key = "structure_klines" if is_structure else ("background_klines" if lane=="klines" else lane)
 
-    global_gate, lane_gate = _rest_gates(p)
-    last_exc=None
-    preferred=_rest_good_host.get(lane)
+    if lane=="klines":
+        timeout_s,max_hosts=(4.5,4) if is_structure else (3.0,2)
+    elif lane=="depth":
+        timeout_s,max_hosts=3.5,2
+    elif lane=="ticker24":
+        timeout_s,max_hosts=8.0,3
+    else:
+        timeout_s,max_hosts=5.0,3
+
+    global_gate,lane_gate=_rest_gates(p)
+
+    # Optional candle enrichments never compete with structural hydration.
+    # Deferral is normal control flow, not a REST failure and must not poison
+    # endpoint health/circuit-breaker state.
+    if lane=="klines" and not is_structure:
+        if _structure_active>0 or _rest_bg_kline_gate.locked():
+            return []
+
+    preferred=_rest_good_host.get(route_key)
     if lane in {"klines","depth","ticker24"}:
         base_hosts=[
             "https://data-api.binance.vision",
@@ -86,10 +93,12 @@ async def resilient_api_get(client, path, params=None):
         ]
     else:
         base_hosts=list(REST_BASES)
+
     ordered=([preferred] if preferred else [])+[h for h in base_hosts if h!=preferred]
     now=time.time()
-    healthy=[h for h in ordered if _rest_host_bad_until.get((lane,h),0)<=now]
+    healthy=[h for h in ordered if _rest_host_bad_until.get((route_key,h),0)<=now]
     hosts=(healthy or ordered)[:max_hosts]
+    last_exc=None
 
     async def _request_once(host):
         acquired=False
@@ -99,7 +108,7 @@ async def resilient_api_get(client, path, params=None):
             async with client.get(
                 f"{host}{p}",
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=timeout_s, connect=min(1.6,timeout_s)),
+                timeout=aiohttp.ClientTimeout(total=timeout_s,connect=min(1.6,timeout_s)),
             ) as response:
                 body=await response.text()
                 if response.status!=200:
@@ -114,19 +123,28 @@ async def resilient_api_get(client, path, params=None):
         bg_acquired=False
         try:
             if lane_gate is not None:
-                if lane=="klines" and not _structure_request_ctx.get():
-                    deadline=time.time()+2.0
-                    while _structure_active>0 and time.time()<deadline:
-                        await asyncio.sleep(0.05)
-                    if _structure_active>0:
-                        raise asyncio.TimeoutError("background kline yielded to structure")
-                    await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=2.0)
+                if lane=="klines" and not is_structure:
+                    if _structure_active>0 or _rest_bg_kline_gate.locked():
+                        return []
+                    try:
+                        await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=.25)
+                    except asyncio.TimeoutError:
+                        return []
                     bg_acquired=True
-                await asyncio.wait_for(lane_gate.acquire(),timeout=2.0)
-                lane_acquired=True
+                    if _structure_active>0:
+                        return []
+                    try:
+                        await asyncio.wait_for(lane_gate.acquire(),timeout=.75)
+                    except asyncio.TimeoutError:
+                        return []
+                    lane_acquired=True
+                else:
+                    await asyncio.wait_for(lane_gate.acquire(),timeout=2.0)
+                    lane_acquired=True
+
             payload=await _request_once(host)
-            _rest_good_host[lane]=host
-            _rest_host_bad_until.pop((lane,host),None)
+            _rest_good_host[route_key]=host
+            _rest_host_bad_until.pop((route_key,host),None)
             _rest_stats["ok"]+=1
             _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
             if idx>0:
@@ -137,20 +155,25 @@ async def resilient_api_get(client, path, params=None):
                 print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=3 depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
+
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError as exc:
+            if lane=="klines" and not is_structure:
+                return []
             last_exc=exc
             _rest_stats["fail"]+=1
             _rest_stats["gate_timeout"]+=1
             _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
-            _rest_host_bad_until[(lane,host)]=time.time()+15.0
+            _rest_host_bad_until[(route_key,host)]=time.time()+15.0
             await asyncio.sleep(.08)
         except Exception as exc:
+            if lane=="klines" and not is_structure:
+                return []
             last_exc=exc
             _rest_stats["fail"]+=1
             _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
-            _rest_host_bad_until[(lane,host)]=time.time()+15.0
+            _rest_host_bad_until[(route_key,host)]=time.time()+15.0
             await asyncio.sleep(.08)
         finally:
             if lane_acquired:
@@ -162,7 +185,7 @@ async def resilient_api_get(client, path, params=None):
     app.last_error=f"REST_FAILOVER_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
     try:
         safe_params={k:params.get(k) for k in ("symbol","interval","limit") if isinstance(params,dict) and k in params}
-        print(f"Ψ-REST FAIL lane={lane} path={p} params={safe_params} hosts={hosts} err={type(last_exc).__name__}:{last_exc}",flush=True)
+        print(f"Ψ-REST FAIL lane={route_key} path={p} params={safe_params} hosts={hosts} err={type(last_exc).__name__}:{last_exc}",flush=True)
     except Exception:
         pass
     raise RuntimeError(app.last_error)
