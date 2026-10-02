@@ -9,17 +9,8 @@ tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
 VERSION="11.0.5.0-breakout-structural-intelligence"
 
-REST_BASES = (
-    "https://data-api.binance.vision",
-    "https://api.binance.com",
-    "https://api-gcp.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com",
-)
-_rest_preferred = 0
-_rest_failover_printed = None
+REST_PUBLIC = "https://data-api.binance.vision"
+_rest_route_printed = False
 _rest_global_gate = None
 _rest_kline_gate = None
 _rest_depth_gate = None
@@ -32,51 +23,61 @@ def _rest_gates(path):
         _rest_kline_gate = asyncio.Semaphore(1)
     if _rest_depth_gate is None:
         _rest_depth_gate = asyncio.Semaphore(1)
-    if "/klines" in str(path):
+    p=str(path)
+    if "/klines" in p:
         return _rest_global_gate, _rest_kline_gate
-    if "/depth" in str(path):
+    if "/depth" in p:
         return _rest_global_gate, _rest_depth_gate
     return _rest_global_gate, None
 
 async def resilient_api_get(client, path, params=None):
-    global _rest_preferred, _rest_failover_printed
-    order=[_rest_preferred]+[i for i in range(len(REST_BASES)) if i!=_rest_preferred]
-    errs=[]
-    for idx in order:
-        host=REST_BASES[idx]
+    global _rest_route_printed
+    p=str(path)
+    if "/klines" in p:
+        timeout_s, attempts = 10.0, 2
+    elif "/depth" in p:
+        timeout_s, attempts = 8.0, 2
+    else:
+        timeout_s, attempts = 18.0, 3
+
+    global_gate, lane_gate = _rest_gates(p)
+    last_exc=None
+
+    async def _request_once():
+        async with global_gate:
+            async with client.get(
+                f"{REST_PUBLIC}{p}",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+                headers={"Connection":"close"},
+            ) as response:
+                body=await response.text()
+                if response.status!=200:
+                    raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
+                return json.loads(body)
+
+    for attempt in range(attempts):
         try:
-            global_gate, lane_gate = _rest_gates(path)
-            async def _request_once():
-                async with global_gate:
-                    async with client.get(
-                        f"{host}{path}",
-                        params=params,
-                        timeout=aiohttp.ClientTimeout(total=4.0),
-                        headers={"Connection":"close"},
-                    ) as response:
-                        body=await response.text()
-                        if response.status!=200:
-                            raise RuntimeError(f"HTTP {response.status}: {body[:160]}")
-                        payload=json.loads(body)
-                        app.rest_connected=True
-                        app.last_error=None
-                        if idx!=_rest_preferred or _rest_failover_printed is None:
-                            _rest_preferred=idx
-                            if _rest_failover_printed!=host:
-                                print(f"Ψ-REST FAILOVER active={host}",flush=True)
-                                _rest_failover_printed=host
-                        return payload
             if lane_gate is None:
-                return await _request_once()
-            async with lane_gate:
-                return await _request_once()
+                payload=await _request_once()
+            else:
+                async with lane_gate:
+                    payload=await _request_once()
+            app.rest_connected=True
+            app.last_error=None
+            if not _rest_route_printed:
+                print(f"Ψ-REST ROUTE active={REST_PUBLIC} global=3 klines=1 depth=1",flush=True)
+                _rest_route_printed=True
+            return payload
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            errs.append(f"{host}:{type(exc).__name__}:{exc}")
-            continue
+            last_exc=exc
+            if attempt+1<attempts:
+                await asyncio.sleep(0.5*(attempt+1))
+
     app.rest_connected=False
-    app.last_error="REST_FAILOVER_ALL: "+" | ".join(errs[-3:])
+    app.last_error=f"REST_PUBLIC_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
     raise RuntimeError(app.last_error)
 
 # Replace the shared module-level REST function before any scanner loop starts.
