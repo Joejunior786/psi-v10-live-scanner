@@ -5,7 +5,7 @@ base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
 VERSION="11.0.5.0-breakout-structural-intelligence"
-BOARD_ROWS=20
+BOARD_ROWS=30
 
 _old_deep=base.deep
 _old_candidate=base.candidate
@@ -168,7 +168,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 async def main():
-    print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 20 ranked rows.",flush=True)
+    print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows.",flush=True)
     await rescue.main()
 
 if __name__=="__main__":asyncio.run(main())
