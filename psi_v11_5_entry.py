@@ -11,11 +11,11 @@ VERSION="11.0.5.0-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
+    "https://data-api.binance.vision",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
     "https://api4.binance.com",
-    "https://data-api.binance.vision",
 ]
 _rest_route_printed = False
 _rest_global_gate = None
@@ -275,6 +275,8 @@ RECOVERY_BATCH = 2
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
+_recovery_retry_after = {}
+RECOVERY_FAIL_COOLDOWN_S = 45.0
 
 def _structure_age_recovery(sym):
     ts = int(q.structure_ms.get(sym,0) or 0)
@@ -334,6 +336,7 @@ async def _hydrate_one(sym):
                             pass
             row=app.evaluate_symbol(sym)
             if isinstance(row,dict) and row: q.latest[sym]=row
+            _recovery_retry_after.pop(sym,None)
             recovery_stats["ok"]+=1
             return True
         except asyncio.CancelledError:
@@ -343,6 +346,7 @@ async def _hydrate_one(sym):
             if attempt==0:
                 await asyncio.sleep(.25)
                 continue
+    _recovery_retry_after[sym]=time.time()+RECOVERY_FAIL_COOLDOWN_S
     recovery_stats["fail"]+=1
     if recovery_stats["fail"]<=20:
         print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(last_exc).__name__}: {last_exc}",flush=True)
@@ -356,10 +360,11 @@ async def structure_recovery_loop():
         total=len(syms)
         coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
         cold=coverage < max(1,int(total*.92))
+        now=time.time()
         if cold:
-            targets=[s for s in syms if _structure_age_recovery(s)>=999000][:RECOVERY_PRIORITY]
+            targets=[s for s in syms if _structure_age_recovery(s)>=999000 and _recovery_retry_after.get(s,0)<=now][:RECOVERY_PRIORITY]
         else:
-            targets=[s for s in syms[:RECOVERY_PRIORITY] if _structure_age_recovery(s)>RECOVERY_STALE_S]
+            targets=[s for s in syms[:RECOVERY_PRIORITY] if _structure_age_recovery(s)>RECOVERY_STALE_S and _recovery_retry_after.get(s,0)<=now]
         if targets:
             for i in range(0,len(targets),RECOVERY_BATCH):
                 batch=targets[i:i+RECOVERY_BATCH]
@@ -382,42 +387,11 @@ async def structure_recovery_loop():
                 recovery_stats["pool_kicks"]+=1
         except Exception as exc:
             print(f"Ψ-RECOVERY POOL_ERROR {type(exc).__name__}: {exc}",flush=True)
-        await asyncio.sleep(20.0 if coverage < max(1,int(total*.92)) else 45.0)
+        await asyncio.sleep(8.0 if coverage < max(1,int(total*.92)) else 45.0)
 
-async def extension_recovery_loop():
-    while app.session is None:
-        await asyncio.sleep(.5)
-    while True:
-        try:
-            if app.session is None or app.session.closed:
-                await asyncio.sleep(1.0)
-                continue
-            payload=await app.api_get(app.session,"/api/v3/ticker/24hr")
-            if not isinstance(payload,list): raise RuntimeError("ticker snapshot not list")
-            ts=time.time();new={}
-            for item in payload:
-                if not isinstance(item,dict): continue
-                sym=str(item.get("symbol") or "")
-                if not sym: continue
-                new[sym]={"change_pct":f(item.get("priceChangePercent")),"open":f(item.get("openPrice")),"high":f(item.get("highPrice")),"low":f(item.get("lowPrice")),"last":f(item.get("lastPrice")),"ts":ts}
-            if not new: raise RuntimeError("empty ticker snapshot")
-            extrest.ext_cache.clear();extrest.ext_cache.update(new)
-            extrest.ext_last_refresh=ts
-            extrest.ext_last_error=None
-            extrest.ext_refresh_ok+=1
-            recovery_stats["ext_ok"]+=1
-            print(f"Ψ-RECOVERY EXTENSION status=LIVE symbols={len(new)} ok={recovery_stats['ext_ok']} err={recovery_stats['ext_err']}",flush=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            recovery_stats["ext_err"]+=1
-            extrest.ext_refresh_errors+=1
-            extrest.ext_last_error=f"{type(exc).__name__}: {exc}"
-            print(f"Ψ-RECOVERY EXTENSION_ERROR {extrest.ext_last_error}",flush=True)
-        await asyncio.sleep(20.0)
 
 async def main():
     print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows.",flush=True)
-    await asyncio.gather(rescue.main(), structure_recovery_loop(), extension_recovery_loop())
+    await asyncio.gather(rescue.main(), structure_recovery_loop())
 
 if __name__=="__main__":asyncio.run(main())
