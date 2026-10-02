@@ -4,11 +4,13 @@ import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
 import psi_v11_3_1_entry as continuity_guard
 import stable10_app as stable_core
+import target10_app as target_core
+import qualifier_app as qualifier_core
 
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.1-breakout-structural-intelligence"
+VERSION="11.0.5.2-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -26,7 +28,8 @@ _rest_depth_gate = None
 _structure_request_ctx = contextvars.ContextVar("psi_structure_request", default=False)
 _structure_active = 0
 _rest_good_host = {}
-_rest_stats = {"ok":0,"fail":0,"failover":0,"host_ok":{},"host_fail":{}}
+_rest_host_bad_until = {}
+_rest_stats = {"ok":0,"fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0}
 
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
@@ -83,40 +86,51 @@ async def resilient_api_get(client, path, params=None):
         ]
     else:
         base_hosts=list(REST_BASES)
-    hosts=([preferred] if preferred else [])+[h for h in base_hosts if h!=preferred]
-    hosts=hosts[:max_hosts]
+    ordered=([preferred] if preferred else [])+[h for h in base_hosts if h!=preferred]
+    now=time.time()
+    healthy=[h for h in ordered if _rest_host_bad_until.get((lane,h),0)<=now]
+    hosts=(healthy or ordered)[:max_hosts]
 
     async def _request_once(host):
-        async with global_gate:
+        acquired=False
+        try:
+            await asyncio.wait_for(global_gate.acquire(),timeout=2.0)
+            acquired=True
             async with client.get(
                 f"{host}{p}",
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=timeout_s, connect=min(1.8,timeout_s)),
+                timeout=aiohttp.ClientTimeout(total=timeout_s, connect=min(1.6,timeout_s)),
             ) as response:
                 body=await response.text()
                 if response.status!=200:
                     raise RuntimeError(f"{host} HTTP {response.status}: {body[:180]}")
                 return json.loads(body)
+        finally:
+            if acquired:
+                global_gate.release()
 
     for idx,host in enumerate(hosts):
+        lane_acquired=False
+        bg_acquired=False
         try:
-            if lane_gate is None:
-                payload=await _request_once(host)
-            elif lane=="klines" and not _structure_request_ctx.get():
-                # Background historical polling may use only one kline slot and
-                # yields while structural hydration is active.
-                while _structure_active > 0:
-                    await asyncio.sleep(0.05)
-                async with _rest_bg_kline_gate:
-                    async with lane_gate:
-                        payload=await _request_once(host)
-            else:
-                async with lane_gate:
-                    payload=await _request_once(host)
+            if lane_gate is not None:
+                if lane=="klines" and not _structure_request_ctx.get():
+                    deadline=time.time()+2.0
+                    while _structure_active>0 and time.time()<deadline:
+                        await asyncio.sleep(0.05)
+                    if _structure_active>0:
+                        raise asyncio.TimeoutError("background kline yielded to structure")
+                    await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=2.0)
+                    bg_acquired=True
+                await asyncio.wait_for(lane_gate.acquire(),timeout=2.0)
+                lane_acquired=True
+            payload=await _request_once(host)
             _rest_good_host[lane]=host
+            _rest_host_bad_until.pop((lane,host),None)
             _rest_stats["ok"]+=1
             _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
-            if idx>0: _rest_stats["failover"]+=1
+            if idx>0:
+                _rest_stats["failover"]+=1
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
@@ -125,11 +139,24 @@ async def resilient_api_get(client, path, params=None):
             return payload
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as exc:
+            last_exc=exc
+            _rest_stats["fail"]+=1
+            _rest_stats["gate_timeout"]+=1
+            _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
+            _rest_host_bad_until[(lane,host)]=time.time()+15.0
+            await asyncio.sleep(.08)
         except Exception as exc:
             last_exc=exc
             _rest_stats["fail"]+=1
             _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
-            await asyncio.sleep(.12)
+            _rest_host_bad_until[(lane,host)]=time.time()+15.0
+            await asyncio.sleep(.08)
+        finally:
+            if lane_acquired:
+                lane_gate.release()
+            if bg_acquired:
+                _rest_bg_kline_gate.release()
 
     app.rest_connected=False
     app.last_error=f"REST_FAILOVER_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
@@ -156,9 +183,9 @@ async def _priority_load_structure(client, symbol):
 
 app.load_structure = _priority_load_structure
 
-# L1-L10 execution logic only needs a compact bootstrap snapshot. Keeping 20
-# levels cuts REST payload and resync pressure while preserving the required book.
-app.DEPTH_SNAPSHOT_LIMIT = min(20, int(getattr(app, "DEPTH_SNAPSHOT_LIMIT", 20) or 20))
+# The execution book now comes from Binance depth20 WebSocket snapshots.
+# The legacy REST depth bootstrap remains dormant.
+app.DEPTH_SNAPSHOT_LIMIT = 20
 
 BOARD_ROWS=30
 
@@ -359,7 +386,14 @@ async def _legacy_structure_noop():
     return None
 
 stable_core.refresh_structure=_legacy_structure_noop
+target_core.refresh_structure=_legacy_structure_noop
+try:
+    target_core._orig_refresh_structure=_legacy_structure_noop
+except Exception:
+    pass
+qualifier_core.refresh_structure=_legacy_structure_noop
 q.refresh_structure=_legacy_structure_noop
+app.refresh_structure=_legacy_structure_noop
 
 async def _execution_anomaly_refresh():
     # Full-universe discovery is WebSocket-native. Avoid the old 20-symbol

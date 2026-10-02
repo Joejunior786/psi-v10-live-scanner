@@ -453,6 +453,50 @@ def calculate_book_metrics(symbol: str, previous_bids, previous_asks) -> None:
         prune_time_deque(s[key], ts-120_000)
 
 
+def process_partial_depth_snapshot(symbol: str, data: dict) -> None:
+    """Process a complete Binance depth20 WebSocket snapshot.
+
+    Full top-20 snapshots remove the REST bootstrap dependency. Three
+    monotonically newer snapshots are required before book sequence is verified.
+    """
+    s = ensure_micro_state(symbol)
+    try:
+        update_id = int(data.get("lastUpdateId") or data.get("u") or 0)
+    except (TypeError, ValueError):
+        update_id = 0
+    raw_bids = data.get("bids") or data.get("b") or []
+    raw_asks = data.get("asks") or data.get("a") or []
+    if update_id <= 0 or not raw_bids or not raw_asks:
+        s["book_sequence_ok"] = False
+        return
+    last = s.get("last_book_update_id")
+    if last is not None and update_id <= int(last):
+        return
+    prev_bids = sorted_levels(s["book_bids"], True) if s.get("book_snapshot_ready") else []
+    prev_asks = sorted_levels(s["book_asks"], False) if s.get("book_snapshot_ready") else []
+    bids = {
+        safe_float(px): safe_float(qty)
+        for px, qty in raw_bids[:20]
+        if safe_float(px) > 0 and safe_float(qty) > 0
+    }
+    asks = {
+        safe_float(px): safe_float(qty)
+        for px, qty in raw_asks[:20]
+        if safe_float(px) > 0 and safe_float(qty) > 0
+    }
+    if not bids or not asks:
+        s["book_sequence_ok"] = False
+        return
+    s["book_bids"], s["book_asks"] = bids, asks
+    s["last_book_update_id"] = update_id
+    s["book_snapshot_ready"] = True
+    s["book_resyncing"] = False
+    s["book_sequence_ok"] = True
+    s["book_sequence_samples"] += 1
+    s["book_buffer"].clear()
+    calculate_book_metrics(symbol, prev_bids, prev_asks)
+
+
 def schedule_book_resync(symbol: str) -> None:
     s = ensure_micro_state(symbol)
     if s["book_resyncing"]:
@@ -859,43 +903,59 @@ async def structure_refresh_loop():
 async def websocket_loop():
     global websocket_connected,websocket_symbols,last_error
     while True:
-        bootstrap_tasks=[]
         try:
             symbols=list(selected_micro_symbols)
             if not symbols:
-                await asyncio.sleep(1); continue
+                await asyncio.sleep(1)
+                continue
             streams=[]
             for symbol in symbols:
-                lower=symbol.lower(); streams.extend([f"{lower}@aggTrade",f"{lower}@depth@100ms"])
+                lower=symbol.lower()
+                streams.extend([f"{lower}@aggTrade",f"{lower}@depth20@100ms"])
             url=f"{WS_BASE}/stream?streams={'/'.join(streams)}"
-            print(f"Î¨-V10.1 WebSocket connecting for {len(symbols)} symbols...",flush=True)
+            print(f"Î¨-V10.1 WebSocket connecting for {len(symbols)} symbols (aggTrade + depth20)...",flush=True)
             assert session is not None
             async with session.ws_connect(url,heartbeat=None,receive_timeout=90,max_msg_size=0) as ws:
-                websocket_connected=True; websocket_symbols=symbols; last_error=None
+                websocket_connected=True
+                websocket_symbols=symbols
+                last_error=None
                 for symbol in symbols:
                     s=ensure_micro_state(symbol)
-                    s["book_buffer"].clear(); s["book_snapshot_ready"]=False; s["book_sequence_ok"]=True; s["book_sequence_samples"]=0; s["book_resyncing"]=True
-                    task=asyncio.create_task(bootstrap_book(symbol)); bootstrap_tasks.append(task)
-                print("Î¨-V10.1 WebSocket connected.",flush=True)
+                    s["book_buffer"].clear()
+                    s["book_snapshot_ready"]=False
+                    s["book_sequence_ok"]=True
+                    s["book_sequence_samples"]=0
+                    s["book_resyncing"]=False
+                    s["last_book_update_id"]=None
+                print("Î¨-V10.1 WebSocket connected (REST-free depth20).",flush=True)
                 async for message in ws:
                     if set(selected_micro_symbols)!=set(symbols):
-                        print("Î¨-V10.1 micro universe changed; reconnecting WebSocket.",flush=True); break
+                        print("Î¨-V10.1 micro universe changed; reconnecting WebSocket.",flush=True)
+                        break
                     if message.type==aiohttp.WSMsgType.TEXT:
-                        try: payload=json.loads(message.data)
-                        except json.JSONDecodeError: continue
-                        stream_name=payload.get("stream",""); data=payload.get("data",{})
-                        if not stream_name or not isinstance(data,dict): continue
+                        try:
+                            payload=json.loads(message.data)
+                        except json.JSONDecodeError:
+                            continue
+                        stream_name=payload.get("stream","")
+                        data=payload.get("data",{})
+                        if not stream_name or not isinstance(data,dict):
+                            continue
                         symbol=stream_name.split("@")[0].upper()
-                        if "@aggTrade" in stream_name: process_agg_trade(symbol,data)
-                        elif "@depth" in stream_name: process_diff_depth(symbol,data)
-                    elif message.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR): break
-        except asyncio.CancelledError: raise
+                        if "@aggTrade" in stream_name:
+                            process_agg_trade(symbol,data)
+                        elif "@depth20" in stream_name:
+                            process_partial_depth_snapshot(symbol,data)
+                    elif message.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
+                        break
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            last_error=f"WEBSOCKET: {type(exc).__name__}: {exc}"; print(last_error,flush=True)
+            last_error=f"WEBSOCKET: {type(exc).__name__}: {exc}"
+            print(last_error,flush=True)
         finally:
-            for task in bootstrap_tasks:
-                if not task.done(): task.cancel()
-            websocket_connected=False; websocket_symbols=[]
+            websocket_connected=False
+            websocket_symbols=[]
         await asyncio.sleep(3)
 
 

@@ -385,23 +385,29 @@ def vacuum_metrics(sym):
     }
 
 async def fetch_depth(sym):
-    if app.session is None:
-        return
+    """Mirror the canonical live depth20 book into the vacuum cache."""
     try:
-        d = await app.api_get(app.session, "/api/v3/depth", {"symbol": sym, "limit": 20})
-        bids = d.get("bids") or []
-        asks = d.get("asks") or []
+        s=app.ensure_micro_state(sym)
+        if not s.get("book_snapshot_ready"):
+            return
+        bids=app.sorted_levels(s.get("book_bids") or {},True)[:20]
+        asks=app.sorted_levels(s.get("book_asks") or {},False)[:20]
         if not bids or not asks:
             return
-        best_bid, best_ask = f(bids[0][0]), f(asks[0][0])
-        mid = (best_bid + best_ask) / 2.0 if best_bid and best_ask else 0.0
-        snap = {"updated": time.time(), "mid": mid, "bids": bids[:20], "asks": asks[:20]}
-        depth_cache[sym] = snap
-        depth_hist[sym].append((snap["updated"], snap))
+        best_bid,best_ask=f(bids[0][0]),f(asks[0][0])
+        mid=(best_bid+best_ask)/2.0 if best_bid and best_ask else 0.0
+        snap={
+            "updated":time.time(),
+            "mid":mid,
+            "bids":[[px,qty] for px,qty in bids],
+            "asks":[[px,qty] for px,qty in asks],
+        }
+        depth_cache[sym]=snap
+        depth_hist[sym].append((snap["updated"],snap))
     except asyncio.CancelledError:
         raise
     except Exception:
-        stats["depth_errors"] += 1
+        stats["depth_errors"]+=1
 
 async def depth_loop():
     while True:
