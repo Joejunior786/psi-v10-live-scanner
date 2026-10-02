@@ -263,7 +263,7 @@ async def _hydrate_one(sym):
         try:
             if attempt==0 and app.session is not None and not app.session.closed:
                 client=app.session
-                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=14.0)
+                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=7.0)
                 if not isinstance(sd,dict):
                     raise RuntimeError("structure payload incomplete")
                 app.structure[sym]=sd
@@ -275,10 +275,10 @@ async def _hydrate_one(sym):
                     except Exception:
                         pass
             else:
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=16)
                 connector=aiohttp.TCPConnector(limit=4,ttl_dns_cache=60,force_close=True)
                 async with aiohttp.ClientSession(timeout=timeout,connector=connector,headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-recovery")}) as client:
-                    sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
+                    sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=14.0)
                     if not isinstance(sd,dict):
                         raise RuntimeError("structure payload incomplete")
                     app.structure[sym]=sd
