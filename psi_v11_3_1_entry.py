@@ -218,6 +218,21 @@ async def rebalance_continuity_guarded(force=False):
 
     affected, removed, additions = _changed_shards(before, after)
 
+    pure_growth = (
+        not removed
+        and len(after) > len(before)
+        and len(additions) <= getattr(base, "POOL_GROWTH_STEP", base.MAX_MIGRATIONS)
+        and len(after) <= base.POOL_SIZE
+    )
+    if pure_growth:
+        now = time.time()
+        for sym in additions:
+            entered = base.f(q.entered.get(sym), 0.0)
+            managed_entered[sym] = entered if entered > 0 else now
+        _accept_managed_pool(after, reason="VACANCY_GROWTH")
+        guard_stats["approved_growth"] += len(additions)
+        return
+
     valid_single_shard = (
         len(affected) <= 1
         and len(removed) <= base.MAX_MIGRATIONS

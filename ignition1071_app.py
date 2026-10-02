@@ -18,6 +18,9 @@ radar_last_sample = {}
 radar_last_full = {}
 radar_ticker_connected = False
 radar_mini_connected = False
+mini_24h = {}
+mini_last_message_ts = 0.0
+mini_last_count = 0
 base_discovery_loop = q.discovery_loop
 
 v7.VERSION = VERSION
@@ -147,7 +150,7 @@ async def ticker_loop():
 
 
 async def mini_loop():
-    global radar_mini_connected
+    global radar_mini_connected, mini_last_message_ts, mini_last_count
     url=f"{app.WS_BASE}/ws/!miniTicker@arr"
     while True:
         try:
@@ -160,11 +163,26 @@ async def mini_loop():
                         except json.JSONDecodeError: continue
                         if not isinstance(payload,list): continue
                         t=now()
+                        mini_last_message_ts=t
+                        mini_last_count=len(payload)
                         for x in payload:
                             if not isinstance(x,dict): continue
                             sym=x.get("s","")
+                            last=app.safe_float(x.get("c"))
+                            open_=app.safe_float(x.get("o"))
+                            high=app.safe_float(x.get("h"))
+                            low=app.safe_float(x.get("l"))
+                            if sym and last>0:
+                                mini_24h[sym]={
+                                    "change_pct": ((last/open_)-1.0)*100.0 if open_>0 else 0.0,
+                                    "open": open_,
+                                    "high": high,
+                                    "low": low,
+                                    "last": last,
+                                    "ts": t,
+                                }
                             if t-radar_last_full.get(sym,0)<2.5: continue
-                            push(sym,app.safe_float(x.get("c")),app.safe_float(x.get("q")),source="mini")
+                            push(sym,last,app.safe_float(x.get("q")),source="mini")
                     elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR): break
         except asyncio.CancelledError: raise
         except Exception as e:

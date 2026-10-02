@@ -4,16 +4,16 @@ import time
 
 import psi_v11_2_entry as base
 import ignition120_entry as v120
-import ignition1081_app as v81
+import ignition1071_app as v71
 
-VERSION = "11.0.2.3-adaptive-extension-websocket"
+VERSION = "11.0.2.4-adaptive-extension-miniticker"
 
 app = base.app
 
 WS_SYNC_SECONDS = 1.0
 REST_MAX_AGE_SECONDS = 45.0
 
-ext_cache = v81.market_24h
+ext_cache = v71.mini_24h
 ext_last_refresh = 0.0
 ext_last_error = None
 ext_refresh_ok = 0
@@ -33,8 +33,8 @@ def _rest_status(symbol):
     now = time.time()
     row = ext_cache.get(symbol) or {}
     ts = f(row.get("ts"))
-    feed_ts = f(getattr(v81, "extension_ticker_last_message_ts", 0.0))
-    connected = bool(getattr(v81, "extension_ticker_connected", False))
+    feed_ts = f(getattr(v71, "mini_last_message_ts", 0.0))
+    connected = bool(getattr(v71, "radar_mini_connected", False))
     feed_age = max(0.0, now - feed_ts) if feed_ts > 0 else None
     symbol_age = max(0.0, now - ts) if ts > 0 else None
 
@@ -52,13 +52,13 @@ def _rest_status(symbol):
         "feed_age_seconds": round(feed_age, 2) if feed_age is not None else None,
         "ticker_age_seconds": round(symbol_age, 2) if symbol_age is not None else None,
         "feed_connected": status == "LIVE",
-        "last_feed_symbol_count": int(getattr(v81, "extension_ticker_last_count", 0) or len(ext_cache)),
+        "last_feed_symbol_count": int(getattr(v71, "mini_last_count", 0) or len(ext_cache)),
     }
 
 def sync_extension_from_ws():
     global ext_last_refresh, ext_last_error, ext_refresh_ok, ext_refresh_errors, ext_failure_streak
-    feed_ts=f(getattr(v81,"extension_ticker_last_message_ts",0.0))
-    connected=bool(getattr(v81,"extension_ticker_connected",False))
+    feed_ts=f(getattr(v71,"mini_last_message_ts",0.0))
+    connected=bool(getattr(v71,"radar_mini_connected",False))
     if connected and feed_ts>0:
         if feed_ts>ext_last_refresh:
             ext_last_refresh=feed_ts
@@ -67,7 +67,7 @@ def sync_extension_from_ws():
         ext_failure_streak=0
         return len(ext_cache)
     ext_failure_streak+=1
-    ext_last_error="BINANCE_TICKER_WS_NOT_LIVE"
+    ext_last_error="BINANCE_MINITICKER_WS_NOT_LIVE"
     return 0
 
 
@@ -109,7 +109,7 @@ def _inject_rest_extension(symbol, row):
             "extension_feed_age_seconds": status["feed_age_seconds"],
             "extension_feed_connected": True,
             "extension_feed_symbol_count": status["last_feed_symbol_count"],
-            "adaptive_telemetry_source": "BINANCE_PUBLIC_WS_TICKER_ALL",
+            "adaptive_telemetry_source": "BINANCE_PUBLIC_WS_MINITICKER_ALL",
         })
         row["change_24h_pct"] = round(change, 4)
     else:
@@ -119,7 +119,7 @@ def _inject_rest_extension(symbol, row):
             "extension_feed_age_seconds": status["feed_age_seconds"],
             "extension_feed_connected": False,
             "extension_feed_symbol_count": status["last_feed_symbol_count"],
-            "adaptive_telemetry_source": "BINANCE_PUBLIC_WS_TICKER_ALL",
+            "adaptive_telemetry_source": "BINANCE_PUBLIC_WS_MINITICKER_ALL",
         })
 
     row["extension_guard"] = ext
@@ -168,7 +168,7 @@ async def extension_ws_sync_loop():
                     d=ext_cache.get(symbol) or {}
                     refs.append(f"{symbol}:P={d.get('change_pct')}")
                 print(
-                    f"Ψ-V11.0.2.3 EXTENSION_WS symbols={n} ok={ext_refresh_ok} "
+                    f"Ψ-V11.0.2.4 EXTENSION_MINI symbols={n} ok={ext_refresh_ok} "
                     f"errors={ext_refresh_errors} " + " ".join(refs),
                     flush=True,
                 )
@@ -178,7 +178,7 @@ async def extension_ws_sync_loop():
         except Exception as exc:
             ext_refresh_errors+=1
             ext_last_error=f"{type(exc).__name__}: {exc}"
-            print(f"Ψ-V11.0.2.3 EXTENSION_WS_ERROR {ext_last_error}",flush=True)
+            print(f"Ψ-V11.0.2.4 EXTENSION_MINI_ERROR {ext_last_error}",flush=True)
         await asyncio.sleep(WS_SYNC_SECONDS)
 
 
@@ -187,7 +187,7 @@ async def telemetry_health_loop():
         await asyncio.sleep(30)
         btc = _rest_status("BTCUSDT")
         print(
-            f"Ψ-V11.0.2.3 EXTENSION_SOURCE status={btc['status']} "
+            f"Ψ-V11.0.2.4 EXTENSION_SOURCE status={btc['status']} "
             f"cache={len(ext_cache)} feedAge={btc['feed_age_seconds']}s "
             f"btcAge={btc['ticker_age_seconds']}s ok={ext_refresh_ok} "
             f"errors={ext_refresh_errors}",
@@ -197,9 +197,9 @@ async def telemetry_health_loop():
 
 async def main():
     print(
-        "[v11.0.2.3] Adaptive extension guard production source: "
-        "Binance public !ticker@arr WebSocket all-market feed; "
-        "ticker heartbeat >45s becomes UNKNOWN and blocks execution.",
+        "[v11.0.2.4] Adaptive extension guard production source: "
+        "Binance public !miniTicker@arr WebSocket all-market feed; "
+        "miniTicker heartbeat >45s becomes UNKNOWN and blocks execution.",
         flush=True,
     )
     await asyncio.gather(
@@ -217,4 +217,4 @@ if __name__ == "__main__":
             base.base.v11.persist_outcomes(force=True)
         except Exception:
             pass
-        print("Psi-V11.0.2.2 stopped", flush=True)
+        print("Psi-V11.0.2.4 stopped", flush=True)

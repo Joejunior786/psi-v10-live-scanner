@@ -27,6 +27,8 @@ EXPLORER_HOLD_SECONDS = max(90.0, float(os.getenv("PSI_V11_EXPLORER_HOLD_SECONDS
 REBALANCE_MIN_SECONDS = max(15.0, float(os.getenv("PSI_V11_REBALANCE_MIN_SECONDS", "30")))
 SHARD_COOLDOWN_SECONDS = max(30.0, float(os.getenv("PSI_V11_SHARD_COOLDOWN_SECONDS", "120")))
 MAX_MIGRATIONS = max(1, min(6, int(os.getenv("PSI_V11_MAX_MIGRATIONS", "4"))))
+POOL_GROWTH_STEP = max(1, min(8, int(os.getenv("PSI_V11_POOL_GROWTH_STEP", "4"))))
+POOL_STRUCTURE_MAX_AGE = max(90.0, float(os.getenv("PSI_V11_POOL_STRUCTURE_MAX_AGE", "300")))
 HOT_PROMOTION_TTL = max(180.0, float(os.getenv("PSI_V11_HOT_PROMOTION_TTL", "600")))
 HEALTH_SECONDS = max(15.0, float(os.getenv("PSI_V11_CONTINUITY_HEALTH_SECONDS", "30")))
 
@@ -301,12 +303,20 @@ def _refresh_continuity_locks():
             forced_promotions.pop(sym, None)
 
 
+def _structure_fresh_for_pool(sym):
+    ts = int(q.structure_ms.get(sym, 0) or 0)
+    if ts <= 0 or not isinstance(app.structure.get(sym), dict):
+        return False
+    age = max(0.0, (q.ms() - ts) / 1000.0)
+    return age <= POOL_STRUCTURE_MAX_AGE
+
+
 def _core_symbols():
     _refresh_continuity_locks()
     now = time.time()
     rows = []
     for sym, until in continuity_until.items():
-        if until < now or sym not in q.universe_set:
+        if until < now or sym not in q.universe_set or not _structure_fresh_for_pool(sym):
             continue
         pri, reason = continuity_reason.get(sym, (0.0, "PRIORITY"))
         row = q.latest.get(sym) or {}
@@ -331,6 +341,8 @@ def _candidate_universe():
     def add(sym):
         sym = str(sym or "")
         if not sym or sym in seen or sym not in q.universe_set:
+            return
+        if not _structure_fresh_for_pool(sym):
             return
         try:
             if not v17.directional(sym):
@@ -428,12 +440,13 @@ async def rebalance_continuity(force=False):
 
     if not current:
         desired = []
+        initial_target = min(POOL_SIZE, POOL_GROWTH_STEP)
         for sym in cores + sorted(candidates, key=_candidate_score, reverse=True):
             if sym not in desired:
                 desired.append(sym)
-            if len(desired) >= POOL_SIZE:
+            if len(desired) >= initial_target:
                 break
-        app.selected_micro_symbols = desired[:POOL_SIZE]
+        app.selected_micro_symbols = desired[:initial_target]
         for sym in app.selected_micro_symbols:
             q.entered[sym] = now
             app.ensure_micro_state(sym)
@@ -452,6 +465,7 @@ async def rebalance_continuity(force=False):
         return
 
     if len(current) < POOL_SIZE:
+        added = 0
         for sym in cores + sorted(candidates, key=_candidate_score, reverse=True):
             if sym in current_set:
                 continue
@@ -460,7 +474,8 @@ async def rebalance_continuity(force=False):
             q.entered[sym] = now
             app.ensure_micro_state(sym)
             continuity_stats["vacancy_fills"] += 1
-            if len(current) >= POOL_SIZE:
+            added += 1
+            if len(current) >= POOL_SIZE or added >= POOL_GROWTH_STEP:
                 break
         app.selected_micro_symbols = current[:POOL_SIZE]
         app.last_micro_pool_change = now

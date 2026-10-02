@@ -8,7 +8,7 @@ import stable10_app as stable_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.0-breakout-structural-intelligence"
+VERSION="11.0.5.1-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -126,6 +126,9 @@ async def resilient_api_get(client, path, params=None):
 
 # Replace the shared module-level REST function before any scanner loop starts.
 app.api_get = resilient_api_get
+# L1-L10 execution logic only needs a compact bootstrap snapshot. Keeping 20
+# levels cuts REST payload and resync pressure while preserving the required book.
+app.DEPTH_SNAPSHOT_LIMIT = min(20, int(getattr(app, "DEPTH_SNAPSHOT_LIMIT", 20) or 20))
 
 BOARD_ROWS=30
 
@@ -515,11 +518,10 @@ async def structure_recovery_loop():
                 flush=True,
             )
 
-        # Continuity no longer waits for 92% of the full 403-symbol universe.
-        # Sixteen fresh priority structures are enough to start the 80-symbol
-        # execution pool; every individual execution still requires its own
-        # fresh structure and all Pinpoint hard gates.
-        if len(app.selected_micro_symbols or [])==0 and fresh>=min(16,total):
+        # Continuity is fresh-structure-only and grows in bounded steps. It can
+        # start as soon as verified structure exists; every execution symbol
+        # must retain its own fresh structure and all Pinpoint hard gates.
+        if fresh>0:
             try:
                 await continuity_guard.rebalance_continuity_guarded(force=True)
                 recovery_stats["pool_kicks"]+=1
@@ -542,7 +544,7 @@ async def structure_recovery_loop():
 async def _watchdog_refresh_extension():
     n=extrest.sync_extension_from_ws()
     if n<=0:
-        raise RuntimeError("Binance ticker WebSocket is not live")
+        raise RuntimeError("Binance miniTicker WebSocket is not live")
     watchdog_stats["ext_refresh"]+=1
     return n
 
