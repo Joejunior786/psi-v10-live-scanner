@@ -36,8 +36,8 @@ except Exception:
 # -----------------------------------------------------------------------------
 MTF_SAMPLE_SECONDS = 40.0
 MTF_MAX_SYMBOLS = 14
-DEPTH_SAMPLE_SECONDS = 15.0
-DEPTH_MAX_SYMBOLS = 12
+DEPTH_SAMPLE_SECONDS = 20.0
+DEPTH_MAX_SYMBOLS = 4
 FLOW_SAMPLE_SECONDS = 5.0
 FUTURES_SAMPLE_SECONDS = 30.0
 FUTURES_MAX_SYMBOLS = 10
@@ -396,8 +396,19 @@ async def fetch_depth(sym):
 async def depth_loop():
     while True:
         await asyncio.sleep(DEPTH_SAMPLE_SECONDS)
-        syms = candidate_symbols(DEPTH_MAX_SYMBOLS)
         try:
+            # Full-universe order-flow discovery already comes from WebSockets.
+            # REST depth is reserved for symbols in the continuity execution pool.
+            selected=set(getattr(app,"selected_micro_symbols",[]) or [])
+            if not selected:
+                continue
+            ranked=[
+                s for s in candidate_symbols(max(20,DEPTH_MAX_SYMBOLS*5))
+                if s in selected
+            ]
+            syms=ranked[:DEPTH_MAX_SYMBOLS]
+            if not syms:
+                continue
             await asyncio.gather(*(fetch_depth(sym) for sym in syms))
             stats["depth_samples"] += 1
         except asyncio.CancelledError:

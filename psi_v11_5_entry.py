@@ -1,4 +1,4 @@
-import asyncio, json, math, statistics, time
+import asyncio, json, math, statistics, time, os
 import aiohttp
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
@@ -29,9 +29,9 @@ def _rest_gates(path):
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(6)
+        _rest_kline_gate = asyncio.Semaphore(4)
     if _rest_depth_gate is None:
-        _rest_depth_gate = asyncio.Semaphore(2)
+        _rest_depth_gate = asyncio.Semaphore(1)
     p=str(path)
     if "/klines" in p:
         return _rest_global_gate, _rest_kline_gate
@@ -90,7 +90,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=6 depth=2 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=4 depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
         except asyncio.CancelledError:
@@ -276,12 +276,78 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 4
+RECOVERY_BATCH = 2
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
-recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0}
+recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
 RECOVERY_FAIL_COOLDOWN_S = 45.0
+RECOVERY_CYCLE_SLEEP_S = 2.0
+STRUCTURE_CACHE_MAX_AGE_S = 300.0
+STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
+_structure_cache_dirty = False
+
+def _recovery_scope():
+    return _recovery_symbols()[:RECOVERY_PRIORITY]
+
+def _load_structure_cache():
+    global _structure_cache_dirty
+    try:
+        if not os.path.exists(STRUCTURE_CACHE_PATH):
+            return 0
+        with open(STRUCTURE_CACHE_PATH,"r",encoding="utf-8") as fh:
+            payload=json.load(fh)
+        rows=payload.get("rows") or {}
+        now_ms=int(time.time()*1000)
+        universe=set(getattr(q,"universe_set",set()) or set())
+        loaded=0
+        for sym,sd in rows.items():
+            if sym not in universe or not isinstance(sd,dict):
+                continue
+            updated=int(sd.get("updated_ms") or 0)
+            age=(now_ms-updated)/1000.0 if updated>0 else 999999.0
+            if age<0 or age>STRUCTURE_CACHE_MAX_AGE_S:
+                continue
+            app.structure[sym]=sd
+            q.structure_ms[sym]=updated
+            loaded+=1
+        recovery_stats["cache_load"]+=loaded
+        _structure_cache_dirty=False
+        print(f"Ψ-RECOVERY CACHE_LOAD loaded={loaded} path={STRUCTURE_CACHE_PATH}",flush=True)
+        return loaded
+    except Exception as exc:
+        print(f"Ψ-RECOVERY CACHE_LOAD_ERROR {type(exc).__name__}: {exc}",flush=True)
+        return 0
+
+def _save_structure_cache():
+    global _structure_cache_dirty
+    if not _structure_cache_dirty:
+        return 0
+    try:
+        now_ms=int(time.time()*1000)
+        rows={}
+        for sym,sd in list(getattr(app,"structure",{}).items()):
+            if not isinstance(sd,dict): continue
+            updated=int(sd.get("updated_ms") or q.structure_ms.get(sym,0) or 0)
+            age=(now_ms-updated)/1000.0 if updated>0 else 999999.0
+            if 0<=age<=STRUCTURE_CACHE_MAX_AGE_S:
+                rows[sym]=sd
+        payload={"version":VERSION,"saved_at":time.time(),"rows":rows}
+        tmp=STRUCTURE_CACHE_PATH+".tmp"
+        with open(tmp,"w",encoding="utf-8") as fh:
+            json.dump(payload,fh,separators=(",",":"))
+        os.replace(tmp,STRUCTURE_CACHE_PATH)
+        recovery_stats["cache_save"]+=1
+        _structure_cache_dirty=False
+        return len(rows)
+    except Exception as exc:
+        print(f"Ψ-RECOVERY CACHE_SAVE_ERROR {type(exc).__name__}: {exc}",flush=True)
+        return 0
+
+async def structure_cache_loop():
+    while True:
+        await asyncio.sleep(20.0)
+        _save_structure_cache()
 
 # Production watchdog: detects data-pipeline starvation and performs bounded,
 # fail-closed recovery actions. It never changes signal thresholds or BUY authority.
@@ -329,6 +395,7 @@ def _recovery_symbols():
     return out
 
 async def _hydrate_one(sym):
+    global _structure_cache_dirty
     try:
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
@@ -347,6 +414,7 @@ async def _hydrate_one(sym):
         row=app.evaluate_symbol(sym)
         if isinstance(row,dict) and row: q.latest[sym]=row
         _recovery_retry_after.pop(sym,None)
+        _structure_cache_dirty=True
         recovery_stats["ok"]+=1
         return True
     except asyncio.CancelledError:
@@ -361,43 +429,57 @@ async def _hydrate_one(sym):
 async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
         await asyncio.sleep(.5)
+    _load_structure_cache()
+
     while True:
-        syms=_recovery_symbols()
-        total=len(syms)
-        coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
-        cold=coverage < max(1,int(total*.92))
+        scope=_recovery_scope()
+        total=len(scope)
+        if total<=0:
+            await asyncio.sleep(RECOVERY_CYCLE_SLEEP_S)
+            continue
+
         now=time.time()
-        priority=list(syms[:RECOVERY_PRIORITY])
-        if cold:
-            urgent=[s for s in priority if _structure_age_recovery(s)>RECOVERY_STALE_S and _recovery_retry_after.get(s,0)<=now]
-            urgent_set=set(urgent)
-            newcomers=[s for s in syms if _structure_age_recovery(s)>=999000 and s not in urgent_set and _recovery_retry_after.get(s,0)<=now]
-            targets=(urgent+newcomers)[:RECOVERY_PRIORITY]
-        else:
-            targets=[s for s in priority if _structure_age_recovery(s)>RECOVERY_STALE_S and _recovery_retry_after.get(s,0)<=now]
+        fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+        ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
+        targets=[
+            s for s in scope
+            if _structure_age_recovery(s)>RECOVERY_STALE_S
+            and _recovery_retry_after.get(s,0)<=now
+        ]
+
         if targets:
-            for i in range(0,len(targets),RECOVERY_BATCH):
-                batch=targets[i:i+RECOVERY_BATCH]
-                await asyncio.gather(*[_hydrate_one(s) for s in batch])
-                cov_now=sum(1 for s in syms if _structure_age_recovery(s)<999000)
-                print(f"Ψ-RECOVERY BATCH coverage={cov_now}/{total} batch={i//RECOVERY_BATCH+1} ok={recovery_stats['ok']} fail={recovery_stats['fail']}",flush=True)
-                if len(app.selected_micro_symbols or [])==0 and recovery_stats["ok"]>=16:
-                    try:
-                        await continuity_guard.rebalance_continuity_guarded(force=True)
-                        recovery_stats["pool_kicks"]+=1
-                    except Exception as exc:
-                        print(f"Ψ-RECOVERY POOL_ERROR {type(exc).__name__}: {exc}",flush=True)
-                await asyncio.sleep(.15)
-        recovery_stats["passes"]+=1
-        coverage=sum(1 for s in syms if _structure_age_recovery(s)<999000)
-        print(f"Ψ-RECOVERY STRUCTURE coverage={coverage}/{total} pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} failover={_rest_stats['failover']} hosts={_rest_stats['host_ok']}",flush=True)
-        try:
-            if len(app.selected_micro_symbols or [])==0 and coverage>=16:
+            batch=targets[:RECOVERY_BATCH]
+            await asyncio.gather(*[_hydrate_one(s) for s in batch])
+            fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+            ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
+            print(
+                f"Ψ-RECOVERY BATCH fresh={fresh}/{total} ever={ever}/{total} "
+                f"batch={len(batch)} ok={recovery_stats['ok']} fail={recovery_stats['fail']}",
+                flush=True,
+            )
+
+        # Continuity no longer waits for 92% of the full 403-symbol universe.
+        # Sixteen fresh priority structures are enough to start the 80-symbol
+        # execution pool; every individual execution still requires its own
+        # fresh structure and all Pinpoint hard gates.
+        if len(app.selected_micro_symbols or [])==0 and fresh>=min(16,total):
+            try:
                 await continuity_guard.rebalance_continuity_guarded(force=True)
                 recovery_stats["pool_kicks"]+=1
-        except Exception as exc:
-            print(f"Ψ-RECOVERY POOL_ERROR {type(exc).__name__}: {exc}",flush=True)
-        await asyncio.sleep(8.0 if coverage < max(1,int(total*.92)) else 45.0)
+            except Exception as exc:
+                print(f"Ψ-RECOVERY POOL_ERROR {type(exc).__name__}: {exc}",flush=True)
+
+        recovery_stats["passes"]+=1
+        if recovery_stats["passes"]%5==0 or not targets:
+            print(
+                f"Ψ-RECOVERY STRUCTURE scope={total} fresh={fresh}/{total} ever={ever}/{total} "
+                f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
+                f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} failover={_rest_stats['failover']} "
+                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']}",
+                flush=True,
+            )
+        await asyncio.sleep(RECOVERY_CYCLE_SLEEP_S)
 
 
 async def _watchdog_refresh_extension():
@@ -451,10 +533,10 @@ async def watchdog_loop():
         actions=[]
         try:
             now=time.time()
-            universe=list(getattr(q,"universe",[]) or [])
-            total=len(universe)
-            ever_cov=sum(1 for s in universe if _structure_age_recovery(s)<999000)
-            fresh_cov=sum(1 for s in universe if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+            scope=_recovery_scope()
+            total=len(scope)
+            ever_cov=sum(1 for s in scope if _structure_age_recovery(s)<999000)
+            fresh_cov=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
             pool=len(getattr(app,"selected_micro_symbols",[]) or [])
             pin=_watchdog_pinpoint_count()
             shards=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS))
@@ -490,7 +572,7 @@ async def watchdog_loop():
             # remains the sole hydrator, preventing duplicate request storms.
             if (
                 startup_age>WATCHDOG_STARTUP_GRACE_S
-                and ever_cov<max(16,int(total*.92))
+                and fresh_cov<min(total,(16 if pool==0 else 32))
                 and now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
             ):
                 _rest_good_host.pop("klines",None)
@@ -507,7 +589,7 @@ async def watchdog_loop():
             # Continuity should populate as soon as enough verified structure exists.
             if (
                 startup_age>WATCHDOG_STARTUP_GRACE_S
-                and pool==0 and ever_cov>=16
+                and pool==0 and fresh_cov>=min(16,total)
                 and now-_watchdog_last_pool_progress>WATCHDOG_POOL_STALL_S
             ):
                 try:
@@ -545,7 +627,7 @@ async def watchdog_loop():
                     print(f"Ψ-WATCHDOG ERROR SHARD_ASSIGN {type(exc).__name__}: {exc}",flush=True)
 
             ext_live=ext_age<=WATCHDOG_EXT_STALE_S
-            structure_progressing=(ever_cov>=16 or now-_watchdog_last_cov_progress<=WATCHDOG_STRUCTURE_STALL_S)
+            structure_progressing=(fresh_cov>=min(total,(16 if pool==0 else 32)) or now-_watchdog_last_cov_progress<=WATCHDOG_STRUCTURE_STALL_S)
             continuity_ok=(pool>0 or ever_cov<16)
             shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
             healthy=ext_live and structure_progressing and continuity_ok and shard_ok
@@ -569,6 +651,6 @@ async def watchdog_loop():
 
 async def main():
     print("[v11.0.5.0] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
-    await asyncio.gather(rescue.main(), structure_recovery_loop(), watchdog_loop())
+    await asyncio.gather(rescue.main(), structure_recovery_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())

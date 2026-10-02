@@ -6,7 +6,7 @@ import ignition121_entry as core
 
 scanner, q, app = core.scanner, core.q, core.app
 
-VERSION = "10.21.1-coverage-recovery"
+VERSION = "10.21.1-priority-freshness-recovery"
 
 # V10.21.1 keeps the V10.21 early-warning states, but prevents the auxiliary
 # freshness worker from starving the main discovery/structure pass.
@@ -82,17 +82,12 @@ def structure_coverage():
 
 
 def coverage_target():
-    """Return a reachable broad-coverage target for the current live universe."""
+    """Execution freshness target; full-universe discovery remains WebSocket-based."""
     try:
-        total = len(q.universe or [])
+        total=len(q.universe or [])
     except Exception:
-        total = 0
-    if total <= 0:
-        return max(1, COVERAGE_MIN)
-    ratio = max(0.50, min(1.0, float(COVERAGE_RATIO)))
-    ratio_target = max(1, int(math.ceil(total * ratio)))
-    return min(max(1, COVERAGE_MIN), ratio_target, total)
-
+        total=0
+    return min(max(1,PRIORITY_LIMIT),max(1,total))
 
 async def freshness_loop_1211():
     sem = asyncio.Semaphore(max(1, REFRESH_CONCURRENCY))
@@ -112,20 +107,15 @@ async def freshness_loop_1211():
 
             if target != last_target:
                 print(
-                    f"Ψ-V10.21.1 COVERAGE_TARGET target={target} "
-                    f"universe={len(q.universe or [])} ratio={COVERAGE_RATIO:.3f} "
-                    f"absoluteCap={COVERAGE_MIN}",
+                    f"Ψ-V10.21.1 PRIORITY_FRESHNESS target={target} "
+                    f"universe={len(q.universe or [])} broadCoverage={coverage} "
+                    f"priority={PRIORITY_LIMIT}",
                     flush=True,
                 )
                 last_target = target
 
-            # Do not compete with the main structure rotation until broad live
-            # coverage has been built. The target is dynamically reachable.
-            if coverage < target:
-                core.refresh_stats["coverage_pauses"] = core.refresh_stats.get("coverage_pauses", 0) + 1
-                core.refresh_stats["cycles"] += 1
-                continue
-
+            # Priority symbols refresh immediately. Broad 403-symbol historical
+            # structure coverage is diagnostic only and never blocks this worker.
             stale = [
                 s
                 for s in priority_symbols_1211(PRIORITY_LIMIT)
@@ -154,10 +144,10 @@ app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
 
 async def main():
     print(
-        "[v10.21.1] coverage recovery active: V10.21 early states retained; "
-        f"freshness waits for min({COVERAGE_MIN}, {COVERAGE_RATIO:.0%} of live universe); "
-        f"priority={PRIORITY_LIMIT}; refresh max={REFRESH_MAX}/{REFRESH_EVERY:.0f}s "
-        f"concurrency={REFRESH_CONCURRENCY}; structure fresh<= {core.STRUCTURE_MAX_AGE:.0f}s",
+        "[v10.21.1] priority freshness recovery active: full-universe discovery stays WebSocket-based; "
+        f"priority structure refresh begins immediately for {PRIORITY_LIMIT} symbols; "
+        f"refresh max={REFRESH_MAX}/{REFRESH_EVERY:.0f}s concurrency={REFRESH_CONCURRENCY}; "
+        f"structure fresh<= {core.STRUCTURE_MAX_AGE:.0f}s",
         flush=True,
     )
     await core.main()
