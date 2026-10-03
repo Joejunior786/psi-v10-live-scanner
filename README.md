@@ -1,13 +1,13 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.51 — Non-Blocking Execution-Scope Watchdog**
+Current integrated production build: **Ψ-V11.0.5.52 — Watchdog Stale-Structure Rescue**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.51`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.52`
 - Pinpoint remains the sole BUY NOW authority.
 - Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.51 build.
 
@@ -137,3 +137,8 @@ Watchdog seed expansion no longer blocks the 15-second health loop. At most one 
 The emergency lane is now strictly seed-only: it never refreshes a symbol that already has all three raw timeframe seeds. Already-seeded stale structure belongs exclusively to the normal FAST recovery loop, preventing duplicate requests and long Watchdog stalls. Completed background rescues are harvested on a later Watchdog cycle and reported as `STRUCTURE_SEED_DONE`.
 
 No signal, PRE-IGNITION, Pinpoint, integrity, risk, liquidity, or BUY threshold changed.
+
+
+## V11.0.5.52 Watchdog stale-structure rescue
+
+Watchdog now complements the normal WS-first FAST structure hydrator with a separate bounded direct-REST rescue lane for stale execution symbols. When execution structure freshness falls below the strict threshold, Watchdog can rescue up to two already-seeded execution symbols in parallel, matching the six reserved structure REST slots across 15m/1h/4h. It clears only the affected symbol's learned REST route/cooldowns before rescue. Missing seed sets still use the non-blocking bootstrap lane. This increases recovery throughput without loosening the 120-second structure freshness gate, PRE/BUY criteria, or Pinpoint execution authority.
