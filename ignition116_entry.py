@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.6-connection-aware-depth-dwell"
+VERSION = "10.16.7-no-rebalance-during-handshake"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -28,7 +28,6 @@ MICRO_SHARDS = 4
 MICRO_SHARD_SIZE = 20
 SHARD_POLL_SECONDS = 0.5
 SHARD_REBALANCE_MIN_DWELL_SECONDS = 12.0
-SHARD_DISCONNECTED_SETTLE_SECONDS = 30.0
 EXEC_WS_HEARTBEAT = 20.0
 EXEC_WS_RECEIVE_TIMEOUT = 90.0
 EXEC_WS_CONNECT_TIMEOUT = 20.0
@@ -417,14 +416,13 @@ def _assign_shards():
     # collected enough snapshots manufactures MICRO_NOT_READY gaps.
     now = time.time()
     if any(shard_current_symbols):
-        # Do not mutate membership while an assigned shard is still settling
-        # from a failed/ongoing handshake. Repeated transport failures keep
-        # the current execution pool stable rather than creating churn.
+        # Never rewrite membership underneath an assigned shard that is
+        # handshaking/reconnecting. Binance websocket handshakes can exceed
+        # 30 seconds under load; a fixed settle timeout allowed generation
+        # changes before the connection completed, creating an immediate
+        # connected -> membership-changed -> reconnect loop.
         for shard_id, members in enumerate(shard_current_symbols):
-            if not members or shard_connected[shard_id]:
-                continue
-            ref = max(shard_last_change[shard_id], shard_last_disconnect[shard_id])
-            if ref > 0 and now - ref < SHARD_DISCONNECTED_SETTLE_SECONDS:
+            if members and not shard_connected[shard_id]:
                 return set()
 
         # Protect the actual post-connect warm-up window. The previous debounce
@@ -527,7 +525,7 @@ async def _shard_loop(shard_id):
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16.6 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"Ψ-V10.16.7 SHARD{shard_id+1} connecting symbols={len(symbols)} "
                 f"gen={generation} host={base_url} mode=DEPTH_ONLY book=DEPTH20_WS",
                 flush=True,
             )
@@ -571,7 +569,7 @@ async def _shard_loop(shard_id):
                     # by a depth-only reconnect.
 
                 print(
-                    f"Ψ-V10.16.6 SHARD{shard_id+1} connected symbols={len(symbols)} "
+                    f"Ψ-V10.16.7 SHARD{shard_id+1} connected symbols={len(symbols)} "
                     f"host={base_url} preservedBooks={preserved_books} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
@@ -705,7 +703,7 @@ async def _v1016_board_loop():
                 for ts in shard_last_msg_ms
             ]
             print(
-                f"Ψ-V10.16.6 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.7 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
                 f"reconnects={shard_reconnects} generations={shard_generation} "
                 f"hosts={shard_last_host} msgAgeMs={ages}",
