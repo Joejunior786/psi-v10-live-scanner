@@ -45,9 +45,9 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(6, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "8")), 8))
-MAX_INFLIGHT_SYMBOLS = max(8, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "16")), 32))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 16))
+FETCH_CONCURRENCY = max(3, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 4))
+MAX_INFLIGHT_SYMBOLS = max(6, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "12")), 20))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 12))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -1416,61 +1416,73 @@ async def _fetch_tf(sym, tf, deep=False):
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
     rows = None
-    circuit = _ws_circuit_open()
 
-    # When WS has timed out repeatedly, bypass it temporarily. The previous
-    # design spent most of the per-fetch deadline waiting on known-bad sockets,
-    # preventing Binance REST fallback from ever running.
-    if circuit:
-        _stats["ws_circuit_bypass"] += 1
-    else:
-        shard = await _v12_borrow_shard(timeout=0.8)
-        if shard is not None:
+    # 0) Reuse the proven V11 persistent structure history for 1H/4H whenever
+    # it already satisfies the requested depth. This costs no Binance request.
+    if tf in {"1h", "4h"}:
+        reused, saved = _v11_raw_best(sym, tf)
+        if isinstance(reused, list) and len(reused) >= (DEEP_MIN_ROWS if deep else 55):
             try:
-                rows = await v12_ws_klines(
-                    sym, tf, limit,
-                    shard=shard,
-                    response_timeout=4.0 if deep else 2.8,
-                )
-            finally:
-                _v12_return_shard(shard)
+                merge = getattr(legacy, "_reuse_current_candle", None)
+                merged = merge(reused, sym, tf) if callable(merge) else None
+            except Exception:
+                merged = None
+            rows = merged if isinstance(merged, list) else reused
+            _stats["fetch_v11_cache_ok"] += 1
 
-    # REST is the primary path while the WS circuit is open, and the immediate
-    # fallback after any ordinary WS miss.
-    if not isinstance(rows, list) or len(rows) < 55:
-        _stats["rest_fallback_attempts"] += 1
-        if deep:
-            rows = await v12_rest_klines(sym, tf, limit)
+    # 1) Primary live transport: the scanner's original, proven Binance
+    # Spot WS-API kline loader. It already owns connection lifecycle,
+    # request/future matching, and the production 3-request concurrency gate.
+    if not isinstance(rows, list) or len(rows) < (DEEP_MIN_ROWS if deep else 55):
+        try:
+            rows = await legacy.binance_ws_api_klines(
+                sym,
+                tf,
+                limit,
+                wait_ready=1.25,
+                response_timeout=10.0 if deep else 8.0,
+                gate_timeout=1.25,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+
+        if isinstance(rows, list) and len(rows) >= 55:
+            _stats["legacy_ws_ok"] += 1
         else:
-            rows = await _v12_fast_rest_klines(sym, tf, limit)
-            if not isinstance(rows, list) or len(rows) < 55:
+            _stats["legacy_ws_miss"] += 1
+            rows = None
+
+    # 2) Bounded REST fallback. FAST uses the smaller two-host race first;
+    # DEEP goes directly to the wider race. A failed fallback never triggers
+    # another WS request in the same job; the fair scheduler retries later.
+    if rows is None:
+        try:
+            if deep:
                 rows = await v12_rest_klines(sym, tf, limit)
+            else:
+                rows = await _v12_fast_rest_klines(sym, tf, limit)
+                if not isinstance(rows, list) or len(rows) < 55:
+                    rows = await v12_rest_klines(sym, tf, limit)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+
         if isinstance(rows, list) and len(rows) >= 55:
             _stats["fetch_rest_ok"] += 1
-
-    # Probe WS once after REST failure only when the circuit is closed. When
-    # open, the RPC loops reconnect independently and later fetches will probe.
-    if (not circuit) and (not isinstance(rows, list) or len(rows) < 55):
-        shard = await _v12_borrow_shard(timeout=0.6)
-        if shard is not None:
-            try:
-                rows = await v12_ws_klines(
-                    sym, tf, limit,
-                    shard=shard,
-                    response_timeout=3.5 if deep else 2.4,
-                )
-                if isinstance(rows, list) and len(rows) >= 55:
-                    _stats["ws_failover_ok"] += 1
-            finally:
-                _v12_return_shard(shard)
+        else:
+            rows = None
 
     if isinstance(rows, list) and len(rows) >= 55:
-        _stats["fetch_ws_or_rest_ok"] += 1
         snapshot = snap(rows)
         if snapshot is not None:
             current = _cache.get(sym, {}).get(tf) or {}
             current_rows = current.get("rows") or []
-            if deep or len(current_rows) < DEEP_MIN_ROWS:
+
+            # Never replace a deeper cache entry with a shallower one.
+            if len(rows) >= len(current_rows):
                 _cache[sym][tf] = {
                     "rows": rows,
                     "snap": snapshot,
@@ -1479,12 +1491,16 @@ async def _fetch_tf(sym, tf, deep=False):
                 }
             else:
                 current["updated"] = time.time()
+                if current.get("snap") is None:
+                    current["snap"] = snap(current_rows)
+
             _stats["fetch_ok"] += 1
             if len(rows) >= DEEP_MIN_ROWS:
                 _stats["fetch_deep_ok"] += 1
             else:
                 _stats["fetch_fast_ok"] += 1
             return True
+
         _stats["fetch_short_history"] += 1
         return False
 
@@ -1912,14 +1928,14 @@ async def strategy_loop():
                 f"mtfReady={ready_now}/{len(universe)} deepMAReady={deep_ready}/{len(universe)} "
                 f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
-                f"shardPool={_v12_get_shard_pool().qsize()}/{V12_WS_SHARDS} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
-                f"fetchTO={_stats.get('fetch_timeout',0)} wsOK={_stats.get('ws_ok',0)} "
-                f"wsFail={_stats.get('ws_fail',0)} failoverOK={_stats.get('ws_failover_ok',0)} "
-                f"lastWS={_stats.get('ws_last_error','-')}",
+                f"fetchTO={_stats.get('fetch_timeout',0)} legacyWS={_stats.get('legacy_ws_ok',0)}/"
+                f"{_stats.get('legacy_ws_miss',0)} legacyGateOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
+                f"legacyGateTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
+                f"legacyGateDefer={getattr(legacy,'_ws_api_stats',{}).get('defer',0)}",
                 flush=True,
             )
 
@@ -2030,7 +2046,7 @@ async def main():
     loaded = await asyncio.to_thread(_load_cache_sync)
     print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
     print(
-        "[v12.1.0] MULTI-SETUP AUTHORITY + PHASED FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.1.1] MULTI-SETUP AUTHORITY + PHASED HYDRATION ON PROVEN WS TRANSPORT active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
@@ -2039,7 +2055,7 @@ async def main():
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
-    await asyncio.gather(legacy.main(), strategy_loop(), cache_persist_loop(), *(v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)))
+    await asyncio.gather(legacy.main(), strategy_loop(), cache_persist_loop())
 
 
 if __name__ == "__main__":
