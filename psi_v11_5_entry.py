@@ -49,7 +49,7 @@ def _rest_gates(path):
     if _rest_structure_gate is None:
         _rest_structure_gate = asyncio.Semaphore(6)
     if _rest_risk_kline_gate is None:
-        _rest_risk_kline_gate = asyncio.Semaphore(3)
+        _rest_risk_kline_gate = asyncio.Semaphore(6)
     if _rest_bg_kline_gate is None:
         _rest_bg_kline_gate = asyncio.Semaphore(1)
     if _rest_depth_gate is None:
@@ -195,7 +195,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=6+risk=3+background=1) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=6+risk<=6+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -598,15 +598,116 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
 
 app.load_klines = _structure_resilient_load_klines
 
-async def _risk_load_klines(client, symbol, interval, limit):
-    token = _risk_plan_request_ctx.set(True)
-    try:
-        return await app.load_klines(client, symbol, interval, limit)
-    finally:
-        _risk_plan_request_ctx.reset(token)
+RISK_RACE_HOSTS = [
+    "https://data-api.binance.vision",
+    "https://api.binance.com",
+    "https://api-gcp.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+]
+_risk_tf_cache = {}
+RISK_TF_CACHE_S = 18.0
 
-# V10.19.1 resolves this attribute at call time. Risk-plan candles therefore
-# use two dedicated slots and cannot be crowded out by lifecycle/MTF enrichers.
+async def _risk_fetch_race(client, symbol, interval, limit):
+    global _risk_last_ok, _risk_last_fail
+    symbol=str(symbol); interval=str(interval); limit=int(limit)
+    key=(symbol,interval,limit)
+    now=time.time()
+    cached=_risk_tf_cache.get(key)
+    if cached and now-float(cached[0])<=RISK_TF_CACHE_S:
+        return cached[1]
+
+    route_key=f"risk_klines:{symbol}:{interval}"
+    hosts=list(RISK_RACE_HOSTS)
+    preferred=_rest_good_host.get(route_key)
+    if preferred in hosts:
+        hosts=[preferred]+[h for h in hosts if h!=preferred]
+    elif symbol:
+        offset=(sum(ord(ch) for ch in symbol)+sum(ord(ch) for ch in interval))%len(hosts)
+        hosts=hosts[offset:]+hosts[:offset]
+
+    healthy=[h for h in hosts if _rest_host_bad_until.get((route_key,h),0)<=now]
+    ordered=healthy+[h for h in hosts if h not in healthy]
+    global_gate,lane_gate=_rest_gates("/api/v3/klines")
+    last_exc=None
+
+    async def one(host):
+        g=l=r=False
+        try:
+            await asyncio.wait_for(_rest_risk_kline_gate.acquire(),timeout=2.0);r=True
+            await asyncio.wait_for(global_gate.acquire(),timeout=2.0);g=True
+            await asyncio.wait_for(lane_gate.acquire(),timeout=2.0);l=True
+            async with client.get(
+                f"{host}/api/v3/klines",
+                params={"symbol":symbol,"interval":interval,"limit":limit},
+                timeout=aiohttp.ClientTimeout(total=4.8,connect=1.6),
+            ) as response:
+                body=await response.text()
+                if response.status!=200:
+                    raise RuntimeError(f"{host} HTTP {response.status}: {body[:160]}")
+                payload=json.loads(body)
+                if not isinstance(payload,list) or not payload:
+                    raise RuntimeError(f"{host} empty risk kline payload")
+                return host,payload
+        finally:
+            if l: lane_gate.release()
+            if g: global_gate.release()
+            if r: _rest_risk_kline_gate.release()
+
+    for round_idx in range(0,len(ordered),2):
+        pair=ordered[round_idx:round_idx+2]
+        tasks=[asyncio.create_task(one(host)) for host in pair]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    host,payload=await fut
+                    for t in tasks:
+                        if not t.done(): t.cancel()
+                    await asyncio.gather(*tasks,return_exceptions=True)
+                    _rest_good_host[route_key]=host
+                    _rest_host_bad_until.pop((route_key,host),None)
+                    _rest_stats["ok"]+=1
+                    _rest_stats["risk_ok"]+=1
+                    _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
+                    if round_idx>0: _rest_stats["failover"]+=1
+                    _risk_last_ok=time.time()
+                    app.rest_connected=True
+                    app.last_error=None
+                    _risk_tf_cache[key]=(time.time(),payload)
+                    return payload
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_exc=exc
+            for host in pair:
+                _rest_stats["attempt_fail"]+=1
+                _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
+                _rest_host_bad_until[(route_key,host)]=time.time()+12.0
+        finally:
+            for t in tasks:
+                if not t.done(): t.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
+
+    _rest_stats["fail"]+=1
+    _rest_stats["risk_fail"]+=1
+    _risk_last_fail=time.time()
+    app.rest_connected=False
+    app.last_error=f"RISK_RACE_FAIL {symbol} {interval} {limit}: {type(last_exc).__name__}: {last_exc}"
+    print(
+        f"Ψ-REST FAIL lane=risk_race:{symbol}:{interval} "
+        f"params={{'symbol':'{symbol}','interval':'{interval}','limit':{limit}}} "
+        f"err={type(last_exc).__name__}:{last_exc}",
+        flush=True,
+    )
+    return []
+
+async def _risk_load_klines(client, symbol, interval, limit):
+    return await _risk_fetch_race(client, symbol, interval, limit)
+
+# V10.19.1 resolves this attribute at call time. Risk-plan candles use their
+# own bounded host races and cannot be crowded out by structure/background work.
 app.load_risk_klines = _risk_load_klines
 _original_load_structure = app.load_structure
 
