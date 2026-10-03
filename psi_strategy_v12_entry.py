@@ -45,9 +45,9 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 6))
-MAX_INFLIGHT_SYMBOLS = max(10, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "18")), 24))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(6, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "12")), 18))
+FETCH_CONCURRENCY = max(3, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 4))
+MAX_INFLIGHT_SYMBOLS = max(8, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "12")), 16))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 12))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -1415,13 +1415,13 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
+    need = DEEP_MIN_ROWS if deep else 55
     rows = None
 
-    # 0) Reuse the proven V11 persistent structure history for 1H/4H whenever
-    # it already satisfies the requested depth. This costs no Binance request.
+    # 0) Zero-request reuse from V11's persisted Binance structure history.
     if tf in {"1h", "4h"}:
         reused, saved = _v11_raw_best(sym, tf)
-        if isinstance(reused, list) and len(reused) >= (DEEP_MIN_ROWS if deep else 55):
+        if isinstance(reused, list) and len(reused) >= need:
             try:
                 merge = getattr(legacy, "_reuse_current_candle", None)
                 merged = merge(reused, sym, tf) if callable(merge) else None
@@ -1430,124 +1430,54 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
 
-    # 1) Race proven Binance transports. FAST Daily/Weekly adds the bounded
-    # REST lane to the two scanner-owned WS lanes and accepts the first valid
-    # packet. This directly targets the remaining hydration bottleneck: Daily.
-    if not isinstance(rows, list) or len(rows) < (DEEP_MIN_ROWS if deep else 55):
-        need = DEEP_MIN_ROWS if deep else 55
-
-        async def structure_ws():
-            try:
-                return await legacy.binance_ws_api_klines(
-                    sym,
-                    tf,
-                    limit,
-                    wait_ready=0.65,
-                    response_timeout=5.0 if deep else 2.8,
-                    gate_timeout=0.45,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                return None
-
-        async def market_ws():
-            try:
-                fn = getattr(legacy, "market_ws_api_request", None)
-                if not callable(fn):
-                    return None
-                return await fn(
-                    "klines",
-                    {"symbol": str(sym).upper(), "interval": str(tf), "limit": int(limit)},
-                    wait_ready=0.65,
-                    response_timeout=5.0 if deep else 2.8,
-                    gate_timeout=0.45,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                return None
-
-        async def fast_rest():
-            if deep or tf not in {"1d", "1w"}:
-                return None
-            _stats["daily_rest_race_attempts"] += 1
-            return await _v12_fast_rest_klines(sym, tf, limit)
-
-        tasks = {
-            asyncio.create_task(structure_ws()),
-            asyncio.create_task(market_ws()),
-        }
-        rest_raced = (not deep and tf in {"1d", "1w"})
-        if rest_raced:
-            tasks.add(asyncio.create_task(fast_rest()))
-
-        winner = None
+    # 1) Single proven historical lane. This is the exact transport that
+    # successfully grew V12 coverage before the dual-lane experiment.
+    if not isinstance(rows, list) or len(rows) < need:
         try:
-            deadline = asyncio.get_running_loop().time() + (5.4 if deep else 3.6)
-            while tasks and winner is None:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                done, pending = await asyncio.wait(
-                    tasks,
-                    timeout=remaining,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    break
-                for task in done:
-                    try:
-                        candidate = task.result()
-                    except Exception:
-                        candidate = None
-                    if isinstance(candidate, list) and len(candidate) >= need:
-                        winner = candidate
-                        break
-                tasks = set(pending)
-            rows = winner
-        finally:
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["multi_transport_ok"] += 1
-            if rest_raced:
-                _stats["daily_race_ok"] += 1
-        else:
-            _stats["multi_transport_miss"] += 1
-            rows = None
-
-    # 2) Bounded REST fallback. FAST uses the smaller two-host race first;
-    # DEEP goes directly to the wider race. A failed fallback never triggers
-    # another WS request in the same job; the fair scheduler retries later.
-    if rows is None:
-        try:
-            if deep:
-                rows = await v12_rest_klines(sym, tf, limit)
-            elif tf in {"1d", "1w"}:
-                rows = await v12_rest_klines(sym, tf, limit)
-            else:
-                rows = await _v12_fast_rest_klines(sym, tf, limit)
+            rows = await legacy.binance_ws_api_klines(
+                sym,
+                tf,
+                limit,
+                wait_ready=1.25,
+                response_timeout=10.0 if deep else 8.0,
+                gate_timeout=1.25,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             rows = None
 
-        if isinstance(rows, list) and len(rows) >= 55:
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["legacy_ws_ok"] += 1
+        else:
+            _stats["legacy_ws_miss"] += 1
+            rows = None
+
+    # 2) One bounded fallback only. Do not chain multiple failing transports,
+    # because doing so caused the worker-level timeouts seen in V12.1.2.
+    if rows is None:
+        try:
+            rows = (
+                await v12_rest_klines(sym, tf, limit)
+                if deep
+                else await _v12_fast_rest_klines(sym, tf, limit)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+
+        if isinstance(rows, list) and len(rows) >= need:
             _stats["fetch_rest_ok"] += 1
         else:
             rows = None
 
-    if isinstance(rows, list) and len(rows) >= 55:
+    if isinstance(rows, list) and len(rows) >= need:
         snapshot = snap(rows)
         if snapshot is not None:
             current = _cache.get(sym, {}).get(tf) or {}
             current_rows = current.get("rows") or []
 
-            # Never replace a deeper cache entry with a shallower one.
             if len(rows) >= len(current_rows):
                 _cache[sym][tf] = {
                     "rows": rows,
@@ -2115,11 +2045,8 @@ async def main():
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     loaded = await asyncio.to_thread(_load_cache_sync)
     print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
-    # The production WS-API loader defaults to a conservative 3-slot gate.
-    # V12 full-universe hydration and the legacy recovery lane now share a
-    # six-slot cap—still bounded, but enough to prevent harmless V12 work from
-    # repeatedly deferring behind legacy structure requests.
-    legacy._ws_api_gate = asyncio.Semaphore(6)
+    # Keep the legacy WS-API loader's production-tested 3-request gate.
+    # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
         "[v12.1.4] MULTI-SETUP AUTHORITY + DAILY REST RACE active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
