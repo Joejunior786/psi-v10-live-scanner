@@ -14,6 +14,13 @@ MAX_EVENTS=3000
 trade_events=defaultdict(lambda:deque(maxlen=MAX_EVENTS))
 bbo={}
 tape_stats=defaultdict(int)
+REST_FALLBACK_INTERVAL=float(__import__("os").environ.get("PSI_TAPE_REST_FALLBACK_INTERVAL","1.0"))
+REST_FALLBACK_AGG_PER_CYCLE=int(__import__("os").environ.get("PSI_TAPE_REST_AGG_PER_CYCLE","4"))
+REST_FALLBACK_DEPTH_PER_CYCLE=int(__import__("os").environ.get("PSI_TAPE_REST_DEPTH_PER_CYCLE","4"))
+_rest_agg_last_id=defaultdict(lambda:-1)
+_rest_symbol_cursor=0
+_rest_depth_cursor=0
+_rest_last_book_snapshot=0.0
 
 def f(v,d=0.0):
     try:x=float(v)
@@ -63,9 +70,6 @@ async def _shard_loop(idx):
             while getattr(app,'session',None) is None or not list(getattr(q,'universe',[]) or []):
                 await asyncio.sleep(.25)
 
-            # Keep each connection deliberately small. The previous 4-shard
-            # layout put ~200 streams on a single combined URL, which made one
-            # failed handshake remove roughly a quarter of live tape coverage.
             syms=sorted(list(q.universe))[idx::SHARDS]
             streams=[]
             for s in syms:
@@ -79,29 +83,33 @@ async def _shard_loop(idx):
             for raw in (
                 str(getattr(app,'WS_BASE','') or '').rstrip('/'),
                 'wss://data-stream.binance.vision',
-                'wss://stream.binance.com:9443',
                 'wss://stream.binance.com:443',
+                'wss://stream.binance.com:9443',
             ):
                 if raw and raw not in bases:
                     bases.append(raw)
 
             base_url=bases[host_cursor % len(bases)]
-            url=f"{base_url}/stream?streams={'/'.join(streams)}"
+            # Use a short /ws handshake then SUBSCRIBE in-frame. This avoids
+            # long combined-stream query strings being rejected or timing out
+            # at egress/proxy layers.
+            url=f"{base_url}/ws"
             tape_stats[f'shard_{idx}_host_idx']=host_cursor % len(bases)
-
             async with app.session.ws_connect(
                 url,
                 heartbeat=WS_HEARTBEAT,
                 receive_timeout=WS_RECEIVE_TIMEOUT,
                 max_msg_size=0,
-                timeout=20,
+                timeout=12,
             ) as ws:
+                await ws.send_json({"method":"SUBSCRIBE","params":streams,"id":1000+idx})
                 tape_stats[key]=1
                 tape_stats['connects']+=1
                 tape_stats[f'shard_{idx}_last_connect_ms']=int(time.time()*1000)
+                tape_stats[f'shard_{idx}_mode']='RAW_SUBSCRIBE'
                 print(
                     f'Ψ-MONSTER-TAPE shard={idx+1}/{SHARDS} connected '
-                    f'symbols={len(syms)} streams={len(streams)} host={base_url}',
+                    f'symbols={len(syms)} streams={len(streams)} host={base_url} mode=RAW_SUBSCRIBE',
                     flush=True,
                 )
 
@@ -112,33 +120,38 @@ async def _shard_loop(idx):
                             p=json.loads(msg.data)
                         except Exception:
                             continue
-                        stream=str(p.get('stream') or '')
-                        d=p.get('data') or {}
+                        if isinstance(p,dict) and 'result' in p and p.get('id') is not None:
+                            continue
+                        d=p.get('data') if isinstance(p,dict) and isinstance(p.get('data'),dict) else p
+                        if not isinstance(d,dict):
+                            continue
+                        event=str(d.get('e') or '')
+                        stream=str(p.get('stream') or '') if isinstance(p,dict) else ''
                         now=time.time()
-                        sym=str(d.get('s') or stream.split('@')[0]).upper()
-                        if stream.endswith('@aggTrade'):
+                        sym=str(d.get('s') or (stream.split('@')[0] if stream else '')).upper()
+                        if not sym:
+                            continue
+                        is_trade=(event=='aggTrade' or stream.endswith('@aggTrade'))
+                        is_book=(event=='bookTicker' or stream.endswith('@bookTicker'))
+                        if is_trade:
                             price=f(d.get('p'));qty=f(d.get('q'))
                             if price>0 and qty>0:
-                                trade_events[sym].append((now,price,price*qty,not bool(d.get('m')),int(f(d.get('E')))))
-                                tape_stats['trades']+=1
-                                # Reuse this stable full-universe aggTrade feed
-                                # for the selected qualified micro pool. This is
-                                # the exact Binance aggTrade payload expected by
-                                # app.process_agg_trade(); no synthetic telemetry.
-                                if sym in set(getattr(app,'selected_micro_symbols',[]) or []):
-                                    try:
-                                        app.process_agg_trade(sym,d)
-                                        tape_stats['micro_trade_bridge']+=1
-                                    except Exception:
-                                        tape_stats['micro_trade_bridge_fail']+=1
-                        elif stream.endswith('@bookTicker'):
+                                event_ts=f(d.get('T') or d.get('E'))/1000.0
+                                stamp=event_ts if event_ts>0 else now
+                                if stamp>=now-WINDOW-5:
+                                    trade_events[sym].append((stamp,price,price*qty,not bool(d.get('m')),int(f(d.get('E') or d.get('T')))))
+                                    tape_stats['trades']+=1
+                                    if sym in set(getattr(app,'selected_micro_symbols',[]) or []):
+                                        try:
+                                            app.process_agg_trade(sym,d)
+                                            tape_stats['micro_trade_bridge']+=1
+                                        except Exception:
+                                            tape_stats['micro_trade_bridge_fail']+=1
+                        elif is_book:
                             bbo[sym]={'t':now,'bid':f(d.get('b')),'bq':f(d.get('B')),'ask':f(d.get('a')),'aq':f(d.get('A'))}
                             tape_stats['books']+=1
                     elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
                         raise RuntimeError(f'websocket_{msg.type.name.lower()}')
-
-                # A clean iterator exit is still a disconnect and must not
-                # leave the shard marked healthy.
                 raise RuntimeError('websocket_stream_ended')
 
         except asyncio.CancelledError:
@@ -156,8 +169,171 @@ async def _shard_loop(idx):
             host_cursor+=1
         finally:
             tape_stats[key]=0
-
         await asyncio.sleep(min(WS_RECONNECT_MAX_DELAY,1.0+min(reconnects,7)))
+
+
+def _rest_priority_symbols():
+    universe=list(getattr(q,'universe',[]) or [])
+    u=set(universe)
+    out=[];seen=set()
+    def add(s):
+        s=str(s or '')
+        if s and s in u and s not in seen:
+            seen.add(s);out.append(s)
+    for s in list(getattr(app,'selected_micro_symbols',[]) or []):
+        add(s)
+    try:
+        for r in list(base.latest.get('_board') or []):
+            add(r.get('symbol'))
+    except Exception:
+        pass
+    # Always include BTC/ETH anchors if listed.
+    add('BTCUSDT');add('ETHUSDT')
+    return out
+
+async def _rest_fetch_agg(sym):
+    try:
+        rows=await app.api_get(app.session,'/api/v3/aggTrades',{'symbol':sym,'limit':20})
+        if not isinstance(rows,list):
+            return 0
+        now=time.time();added=0
+        rows=sorted((x for x in rows if isinstance(x,dict)),key=lambda x:int(x.get('a',-1)))
+        for d in rows:
+            try:
+                aid=int(d.get('a',-1))
+            except Exception:
+                aid=-1
+            if aid<0 or aid<=_rest_agg_last_id[sym]:
+                continue
+            _rest_agg_last_id[sym]=aid
+            event_ms=int(f(d.get('T')))
+            stamp=event_ms/1000.0 if event_ms>0 else 0.0
+            if stamp<=0 or stamp<now-WINDOW-5:
+                continue
+            price=f(d.get('p'));qty=f(d.get('q'))
+            if price<=0 or qty<=0:
+                continue
+            trade_events[sym].append((stamp,price,price*qty,not bool(d.get('m')),event_ms))
+            payload=dict(d);payload['E']=event_ms
+            if sym in set(getattr(app,'selected_micro_symbols',[]) or []):
+                try:
+                    app.process_agg_trade(sym,payload)
+                    tape_stats['rest_micro_trade_bridge']+=1
+                except Exception:
+                    tape_stats['rest_micro_trade_bridge_fail']+=1
+            added+=1
+        tape_stats['rest_trades']+=added
+        return added
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        tape_stats['rest_agg_errors']+=1
+        return 0
+
+async def _rest_fetch_depth(sym):
+    try:
+        d=await app.api_get(app.session,'/api/v3/depth',{'symbol':sym,'limit':20})
+        if not isinstance(d,dict):
+            return 0
+        try:
+            app.process_partial_depth_snapshot(sym,d)
+            tape_stats['rest_depth_ok']+=1
+            return 1
+        except Exception:
+            tape_stats['rest_depth_process_fail']+=1
+            return 0
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        tape_stats['rest_depth_errors']+=1
+        return 0
+
+async def _rest_book_snapshot():
+    global _rest_last_book_snapshot
+    now=time.time()
+    if now-_rest_last_book_snapshot<1.5:
+        return 0
+    try:
+        rows=await app.api_get(app.session,'/api/v3/ticker/bookTicker')
+        if not isinstance(rows,list):
+            return 0
+        universe=set(getattr(q,'universe',[]) or [])
+        n=0
+        for d in rows:
+            if not isinstance(d,dict):
+                continue
+            sym=str(d.get('symbol') or '')
+            if sym not in universe:
+                continue
+            bid=f(d.get('bidPrice'));ask=f(d.get('askPrice'))
+            if bid<=0 or ask<=0:
+                continue
+            bbo[sym]={'t':now,'bid':bid,'bq':f(d.get('bidQty')),'ask':ask,'aq':f(d.get('askQty'))}
+            n+=1
+        _rest_last_book_snapshot=now
+        tape_stats['rest_books']+=n
+        tape_stats['rest_book_snapshots']+=1
+        return n
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        tape_stats['rest_book_errors']+=1
+        return 0
+
+async def _rest_fallback_loop():
+    global _rest_symbol_cursor,_rest_depth_cursor
+    while True:
+        try:
+            await asyncio.sleep(max(.5,REST_FALLBACK_INTERVAL))
+            if getattr(app,'session',None) is None or not list(getattr(q,'universe',[]) or []):
+                continue
+            ups=sum(int(tape_stats.get(f'shard_{i}_up',0)) for i in range(SHARDS))
+            if ups>=SHARDS:
+                tape_stats['rest_fallback_active']=0
+                continue
+            tape_stats['rest_fallback_active']=1
+            await _rest_book_snapshot()
+
+            priority=_rest_priority_symbols()
+            if not priority:
+                continue
+            # Only poll actual aggregate trades where websocket tape is stale.
+            stale=[s for s in priority if f(tape_metric(s).get('age_ms'),999999)>1200]
+            if stale:
+                start=_rest_symbol_cursor%len(stale)
+                batch=[stale[(start+i)%len(stale)] for i in range(min(REST_FALLBACK_AGG_PER_CYCLE,len(stale)))]
+                _rest_symbol_cursor=(start+len(batch))%len(stale)
+                await asyncio.gather(*(_rest_fetch_agg(s) for s in batch),return_exceptions=True)
+
+            selected=[s for s in priority if s in set(getattr(app,'selected_micro_symbols',[]) or [])]
+            depth_stale=[]
+            nowms=int(time.time()*1000)
+            for s in selected:
+                try:
+                    state=app.ensure_micro_state(s)
+                    if nowms-int(state.get('last_book_ms',0) or 0)>3500:
+                        depth_stale.append(s)
+                except Exception:
+                    depth_stale.append(s)
+            if depth_stale:
+                start=_rest_depth_cursor%len(depth_stale)
+                batch=[depth_stale[(start+i)%len(depth_stale)] for i in range(min(REST_FALLBACK_DEPTH_PER_CYCLE,len(depth_stale)))]
+                _rest_depth_cursor=(start+len(batch))%len(depth_stale)
+                await asyncio.gather(*(_rest_fetch_depth(s) for s in batch),return_exceptions=True)
+
+            if int(time.time())%15==0:
+                print(
+                    f"Ψ-TAPE FALLBACK active=YES shards={ups}/{SHARDS} restTrades={tape_stats['rest_trades']} "
+                    f"restBooks={tape_stats['rest_books']} restDepth={tape_stats['rest_depth_ok']} "
+                    f"aggErr={tape_stats['rest_agg_errors']} bookErr={tape_stats['rest_book_errors']} depthErr={tape_stats['rest_depth_errors']}",
+                    flush=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            tape_stats['rest_fallback_errors']+=1
+            print(f"Ψ-TAPE FALLBACK_ERROR {type(e).__name__}: {e}",flush=True)
+
 
 
 _old_cheap=base.cheap
@@ -229,6 +405,6 @@ for m in (base,getattr(base,'scientist',None),scanner):
 
 async def main():
     print('[v11.0.3.9] Ψ EVENT-TAPE MONSTER RADAR active — full-universe Binance aggTrade + bookTicker WebSocket shards add real-time aggressive-buy ratio, CVD impulse/acceleration, notional acceleration, trade-count acceleration, average-trade-size expansion, BBO imbalance and spread to the 500ms Monster Radar. Top candidates still receive deep L1-L20/vacuum, cross-venue, flow, MTF and structure enrichment. Research/radar only; Pinpoint remains sole BUY NOW authority.',flush=True)
-    await asyncio.gather(base.main(),*[_shard_loop(i) for i in range(SHARDS)])
+    await asyncio.gather(base.main(),_rest_fallback_loop(),*[_shard_loop(i) for i in range(SHARDS)])
 
 if __name__=='__main__':asyncio.run(main())
