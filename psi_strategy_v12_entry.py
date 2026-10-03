@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.14-circuit-race-fallback"
+VERSION = "12.2.0-adaptive-history-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -59,6 +59,7 @@ MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20"))
 FAST_TF_LIMIT = 64
 DEEP_TF_LIMIT = 210
 DEEP_MIN_ROWS = 202
+FAST_MIN_ROWS = 16  # enough for ATR14/basic price-volume structure; MA50/MA200 remain unavailable until naturally supported
 TF_LIMIT = {"1h": FAST_TF_LIMIT, "4h": FAST_TF_LIMIT, "1d": FAST_TF_LIMIT, "1w": FAST_TF_LIMIT}
 
 # Structural cache accumulates across the entire 403-symbol universe. Active
@@ -149,6 +150,8 @@ def _cache_snapshot_for_disk():
                 "rows": rows,
                 "updated": f(item.get("updated")),
                 "depth": item.get("depth") or ("DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST"),
+                "history_capped": bool(item.get("history_capped")),
+                "max_history_rows": int(item.get("max_history_rows") or len(rows)),
             }
         if saved:
             payload[sym] = saved
@@ -192,20 +195,23 @@ def _load_cache_sync():
                     continue
                 rows = item.get("rows") or []
                 updated = f(item.get("updated"))
-                if not isinstance(rows, list) or len(rows) < 55:
+                if not isinstance(rows, list) or not rows:
                     continue
                 # Keep only cache entries still meaningful for their structural TTL.
                 max_age = TF_TTL.get(tf, 0.0)
                 if updated <= 0 or now - updated > max_age:
                     continue
                 snapshot = snap(rows)
-                if snapshot is None:
+                capped = bool(item.get("history_capped"))
+                if snapshot is None and not capped:
                     continue
                 _cache[sym][tf] = {
                     "rows": rows,
                     "snap": snapshot,
                     "updated": updated,
                     "depth": item.get("depth") or ("DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST"),
+                    "history_capped": capped,
+                    "max_history_rows": int(item.get("max_history_rows") or len(rows)),
                 }
                 loaded += 1
         _stats["cache_loaded_items"] = loaded
@@ -462,11 +468,11 @@ def _ema_prev(values, period):
 
 
 def snap(rows):
-    if not isinstance(rows, list) or len(rows) < 55:
+    if not isinstance(rows, list) or len(rows) < FAST_MIN_ROWS:
         return None
     # Binance includes the currently-forming candle as the last row.
     closed = rows[:-1] if len(rows) > 1 else rows
-    if len(closed) < 50:
+    if len(closed) < FAST_MIN_ROWS - 1:
         return None
 
     closes = [f(r[4]) for r in closed]
@@ -554,6 +560,10 @@ def snap(rows):
         "range_low": range_low,
         "rising_lows": rising_lows,
         "falling_volume": falling_vol,
+        "history_rows": len(closed),
+        "has_ema50": len(closed) >= 51 and e50 is not None,
+        "has_ema200": len(closed) >= 201 and e200 is not None,
+        "history_limited": len(closed) < 50,
         "rows": closed,
     }
 
@@ -794,7 +804,7 @@ def evaluate_symbol(sym):
     # 13. Deep pullback exhaustion, 5%-90%.
     high90 = f(sd.get("range_high"))
     depth = max(0.0, (high90 - current) / high90 * 100.0) if high90 > 0 else 0.0
-    if 5.0 <= depth <= 90.0:
+    if f(sd.get("history_rows")) >= 20 and 5.0 <= depth <= 90.0:
         recent_lows = [f(r[3]) for r in sd.get("rows", [])[-8:]]
         failed_new_low = len(recent_lows) >= 4 and recent_lows[-1] >= min(recent_lows[:-1])
         exhausting = bool(sd.get("falling_volume")) or f(sd.get("lower_wick")) >= 0.30 or failed_new_low
@@ -844,7 +854,7 @@ def evaluate_symbol(sym):
 
     # 15. Daily range-bottom mean reversion.
     rlo, rhi = f(sd.get("range_low")), f(sd.get("range_high"))
-    if rhi > rlo > 0:
+    if f(sd.get("history_rows")) >= 20 and rhi > rlo > 0:
         rh = rhi - rlo
         pos = (current - rlo) / rh if rh > 0 else 1.0
         if pos <= 0.12:
@@ -1445,7 +1455,7 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
-    need = DEEP_MIN_ROWS if deep else 55
+    need = DEEP_MIN_ROWS if deep else FAST_MIN_ROWS
     rows = None
 
     # 0) Reuse verified V11 1H/4H history at zero request cost.
@@ -1482,9 +1492,11 @@ async def _fetch_tf(sym, tf, deep=False):
             except Exception:
                 rows = None
 
-            if isinstance(rows, list) and len(rows) >= need:
+            if isinstance(rows, list) and rows:
                 _stats["dedicated_ws_ok"] += 1
                 _stats[f"dedicated_{tf}_ok"] += 1
+                if len(rows) < need:
+                    _stats["history_short_resolved"] += 1
             else:
                 _stats["dedicated_ws_miss"] += 1
                 _stats[f"dedicated_{tf}_miss"] += 1
@@ -1556,80 +1568,40 @@ async def _fetch_tf(sym, tf, deep=False):
                     task.cancel()
             await asyncio.gather(*task_lane.keys(), return_exceptions=True)
 
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["circuit_fallback_ok"] += 1
-            _stats[f"circuit_{lane}_win"] += 1
-            _stats[f"circuit_{tf}_ok"] += 1
-        else:
-            _stats["circuit_fallback_miss"] += 1
-            _stats[f"circuit_{tf}_miss"] += 1
-            rows = None
-
-    # 3) DEEP fallback keeps the proven shared WS available.
-    if rows is None and deep:
-        try:
-            rows = await legacy.binance_ws_api_klines(
-                sym,
-                tf,
-                limit,
-                wait_ready=0.8,
-                response_timeout=4.0,
-                gate_timeout=0.7,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
-
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["shared_ws_fallback_ok"] += 1
-            _stats[f"shared_{tf}_ok"] += 1
-        else:
-            _stats["shared_ws_fallback_miss"] += 1
-            _stats[f"shared_{tf}_miss"] += 1
-            rows = None
-
-    # 4) Wider REST remains DEEP-only.
-    if rows is None and deep:
-        try:
-            rows = await v12_rest_klines(sym, tf, limit)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
-
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["fetch_rest_ok"] += 1
-        else:
-            rows = None
-
-    if isinstance(rows, list) and len(rows) >= need:
+        if isinstance(rows, list) and rows:
+        # A response shorter than requested is authoritative evidence that the
+        # listing does not yet have that much history. Store it and mark it
+        # resolved instead of retrying forever. Missing EMA50/EMA200 remains
+        # unavailable; no synthetic bars are created.
+        capped = len(rows) < limit
         snapshot = snap(rows)
-        if snapshot is not None:
-            current = _cache.get(sym, {}).get(tf) or {}
-            current_rows = current.get("rows") or []
+        current = _cache.get(sym, {}).get(tf) or {}
+        current_rows = current.get("rows") or []
 
-            if len(rows) >= len(current_rows):
-                _cache[sym][tf] = {
-                    "rows": rows,
-                    "snap": snapshot,
-                    "updated": time.time(),
-                    "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
-                }
-            else:
-                current["updated"] = time.time()
-                if current.get("snap") is None:
-                    current["snap"] = snap(current_rows)
+        if len(rows) >= len(current_rows):
+            _cache[sym][tf] = {
+                "rows": rows,
+                "snap": snapshot,
+                "updated": time.time(),
+                "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
+                "history_capped": capped,
+                "max_history_rows": len(rows),
+            }
+        else:
+            current["updated"] = time.time()
+            current["history_capped"] = bool(current.get("history_capped")) or capped
+            current["max_history_rows"] = max(int(current.get("max_history_rows") or 0), len(rows))
+            if current.get("snap") is None:
+                current["snap"] = snap(current_rows)
 
-            _stats["fetch_ok"] += 1
-            if len(rows) >= DEEP_MIN_ROWS:
-                _stats["fetch_deep_ok"] += 1
-            else:
-                _stats["fetch_fast_ok"] += 1
-            return True
-
-        _stats["fetch_short_history"] += 1
-        return False
+        _stats["fetch_ok"] += 1
+        if len(rows) >= DEEP_MIN_ROWS:
+            _stats["fetch_deep_ok"] += 1
+        elif capped:
+            _stats["fetch_history_capped"] += 1
+        else:
+            _stats["fetch_fast_ok"] += 1
+        return True
 
     _stats["fetch_fail"] += 1
     return False
@@ -1657,7 +1629,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     if weekly_only:
         weekly = _cache.get(sym, {}).get("1w") or {}
         rows = weekly.get("rows") or []
-        if weekly_deep and len(rows) >= DEEP_MIN_ROWS:
+        if weekly_deep and (len(rows) >= DEEP_MIN_ROWS or (weekly.get("history_capped") and rows)):
             return
         if not weekly_deep and weekly.get("snap") and now - f(weekly.get("updated")) <= ttl["1w"]:
             return
@@ -1668,13 +1640,15 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     for tf in ("1h", "4h", "1d"):
         item = _cache.get(sym, {}).get(tf) or {}
         rows = item.get("rows") or []
+        stale = now - f(item.get("updated")) > ttl[tf]
+        capped_fresh = bool(item.get("history_capped")) and bool(rows) and not stale
         if force_deep:
-            if len(rows) < DEEP_MIN_ROWS:
+            if len(rows) < DEEP_MIN_ROWS and not capped_fresh:
                 needed.append(tf)
         else:
-            needs_deep = active and len(rows) < DEEP_MIN_ROWS
-            stale = now - f(item.get("updated")) > ttl[tf]
-            if not item.get("snap") or stale or needs_deep:
+            needs_deep = active and len(rows) < DEEP_MIN_ROWS and not capped_fresh
+            resolved_fast = bool(item.get("snap")) or capped_fresh
+            if not resolved_fast or stale or needs_deep:
                 needed.append(tf)
 
     # Complete one symbol deterministically, but during FAST hydration fetch
@@ -1743,7 +1717,8 @@ def _bootstrap_symbols(universe, refresh_tasks):
         ready = 0
         for tf in ("1h", "4h", "1d"):
             item = c.get(tf) or {}
-            if item.get("snap") and now - f(item.get("updated")) <= TF_TTL[tf]:
+            fresh = now - f(item.get("updated")) <= TF_TTL[tf]
+            if fresh and (item.get("snap") or (item.get("history_capped") and item.get("rows"))):
                 ready += 1
         return ready
 
@@ -1805,7 +1780,11 @@ def _deep_backfill_symbols(universe, refresh_tasks, limit=2):
             continue
         c = _cache.get(sym) or {}
         core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
-        core_deep = all(len(((c.get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS for tf in ("1h", "4h", "1d"))
+        core_deep = all(
+            len(((c.get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+            or bool((c.get(tf) or {}).get("history_capped"))
+            for tf in ("1h", "4h", "1d")
+        )
         if core_ready and not core_deep:
             out.append(sym)
             if len(out) >= limit:
@@ -1825,7 +1804,7 @@ def _weekly_backfill_symbols(universe, refresh_tasks, limit=2, deep=False):
         weekly = c.get("1w") or {}
         rows = weekly.get("rows") or []
         if deep:
-            needed = len(rows) < DEEP_MIN_ROWS
+            needed = len(rows) < DEEP_MIN_ROWS and not bool(weekly.get("history_capped"))
         else:
             needed = not weekly.get("snap")
         if needed:
@@ -1936,9 +1915,31 @@ async def strategy_loop():
                 )
                 for s in universe
             )
+            core_resolved = sum(
+                all(
+                    (
+                        ((_cache.get(s, {}).get(tf) or {}).get("snap"))
+                        or (
+                            ((_cache.get(s, {}).get(tf) or {}).get("history_capped"))
+                            and ((_cache.get(s, {}).get(tf) or {}).get("rows")
+                        )
+                    )
+                    and now - f((_cache.get(s, {}).get(tf) or {}).get("updated")) <= TF_TTL[tf]
+                    for tf in ("1h", "4h", "1d")
+                )
+                for s in universe
+            )
             deep_ready = sum(
                 all(
                     len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                    for tf in ("1h", "4h", "1d")
+                )
+                for s in universe
+            )
+            deep_resolved = sum(
+                all(
+                    len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                    or bool((_cache.get(s, {}).get(tf) or {}).get("history_capped"))
                     for tf in ("1h", "4h", "1d")
                 )
                 for s in universe
@@ -1947,13 +1948,18 @@ async def strategy_loop():
                 len(((_cache.get(s, {}).get("1w") or {}).get("rows") or [])) >= DEEP_MIN_ROWS
                 for s in universe
             )
+            weekly_deep_resolved = sum(
+                len(((_cache.get(s, {}).get("1w") or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                or bool((_cache.get(s, {}).get("1w") or {}).get("history_capped"))
+                for s in universe
+            )
 
             # ---------------------------------------------------------------
             # PHASE A: FAST CORE
             # Complete 1H + 4H + Daily snapshots for the whole universe before
             # spending bandwidth on deep/weekly/active refreshes.
             # ---------------------------------------------------------------
-            if core_ready < len(universe):
+            if core_resolved < len(universe):
                 phase = "FAST_CORE"
                 bootstrap = _bootstrap_symbols(universe, refresh_tasks)
                 for sym in bootstrap:
@@ -1969,7 +1975,7 @@ async def strategy_loop():
             # Upgrade all 1H/4H/Daily histories to >=202 rows so EMA/SMA200
             # rules have full authority across every hydrated market.
             # ---------------------------------------------------------------
-            elif deep_ready < len(universe):
+            elif deep_resolved < len(universe):
                 phase = "DEEP_CORE"
                 deep_jobs = _deep_backfill_symbols(
                     universe, refresh_tasks,
@@ -1988,7 +1994,7 @@ async def strategy_loop():
             # Fetch full Weekly history directly (not a separate shallow pass)
             # so Weekly EMA50/EMA200 and cross/rejection rules become usable.
             # ---------------------------------------------------------------
-            elif weekly_deep_ready < len(universe):
+            elif weekly_deep_resolved < len(universe):
                 phase = "WEEKLY_DEEP"
                 weekly_jobs = _weekly_backfill_symbols(
                     universe, refresh_tasks,
@@ -2048,6 +2054,20 @@ async def strategy_loop():
                 bool((_cache.get(s, {}).get("1w") or {}).get("snap"))
                 for s in universe
             )
+            resolved_now = sum(
+                all(
+                    (
+                        ((_cache.get(s, {}).get(tf) or {}).get("snap"))
+                        or (
+                            ((_cache.get(s, {}).get(tf) or {}).get("history_capped"))
+                            and ((_cache.get(s, {}).get(tf) or {}).get("rows")
+                        )
+                    )
+                    and now - f((_cache.get(s, {}).get(tf) or {}).get("updated")) <= TF_TTL[tf]
+                    for tf in ("1h", "4h", "1d")
+                )
+                for s in universe
+            )
             deep_ready = sum(
                 all(
                     len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
@@ -2079,6 +2099,7 @@ async def strategy_loop():
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
+                f"histCapped={_stats.get('fetch_history_capped',0)} shortResolved={_stats.get('history_short_resolved',0)} "
                 f"fetchTO={_stats.get('fetch_timeout',0)} dedicatedWS={_stats.get('dedicated_ws_ok',0)}/"
                 f"{_stats.get('dedicated_ws_miss',0)} stageTO={_stats.get('dedicated_stage_timeout',0)} D1={_stats.get('dedicated_1d_ok',0)}/"
                 f"{_stats.get('dedicated_1d_miss',0)} H1={_stats.get('dedicated_1h_ok',0)}/"
@@ -2207,7 +2228,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.14] MULTI-SETUP AUTHORITY + CIRCUIT WS/REST RACE active — legacy BUY/PRE authority disabled; "
+        "[v12.2.0] MULTI-SETUP AUTHORITY + ADAPTIVE-HISTORY HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
