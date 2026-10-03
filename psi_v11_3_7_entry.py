@@ -4,7 +4,7 @@ import aiohttp
 import psi_v11_3_6_entry as base
 
 app,q,scanner=base.app,base.q,base.scanner
-VERSION='11.0.3.10-event-tape-micro-trade-bridge'
+VERSION='11.0.3.11-resilient-rest-tape'
 SHARDS=8
 WINDOW=35.0
 WS_HEARTBEAT=20.0
@@ -17,8 +17,10 @@ tape_stats=defaultdict(int)
 REST_FALLBACK_INTERVAL=float(__import__("os").environ.get("PSI_TAPE_REST_FALLBACK_INTERVAL","1.0"))
 REST_FALLBACK_AGG_PER_CYCLE=int(__import__("os").environ.get("PSI_TAPE_REST_AGG_PER_CYCLE","4"))
 REST_FALLBACK_DEPTH_PER_CYCLE=int(__import__("os").environ.get("PSI_TAPE_REST_DEPTH_PER_CYCLE","4"))
+REST_FALLBACK_ROTATE_AGG_PER_CYCLE=int(__import__("os").environ.get("PSI_TAPE_REST_ROTATE_AGG_PER_CYCLE","4"))
 _rest_agg_last_id=defaultdict(lambda:-1)
 _rest_symbol_cursor=0
+_rest_universe_cursor=0
 _rest_depth_cursor=0
 _rest_last_book_snapshot=0.0
 _rest_direct_gate=None
@@ -306,6 +308,13 @@ async def _rest_book_snapshot():
             if bid<=0 or ask<=0:
                 continue
             bbo[sym]={'t':now,'bid':bid,'bq':f(d.get('bidQty')),'ask':ask,'aq':f(d.get('askQty'))}
+            mid=(bid+ask)/2.0
+            try:
+                hist=base.price_hist[sym]
+                if not hist or now-hist[-1][0]>=0.75:
+                    hist.append((now,mid))
+            except Exception:
+                pass
             n+=1
         _rest_last_book_snapshot=now
         tape_stats['rest_books']+=n
@@ -318,7 +327,7 @@ async def _rest_book_snapshot():
         return 0
 
 async def _rest_fallback_loop():
-    global _rest_symbol_cursor,_rest_depth_cursor,_rest_fallback_announced
+    global _rest_symbol_cursor,_rest_universe_cursor,_rest_depth_cursor,_rest_fallback_announced
     while True:
         try:
             await asyncio.sleep(max(.5,REST_FALLBACK_INTERVAL))
@@ -339,15 +348,36 @@ async def _rest_fallback_loop():
                 )
 
             priority=_rest_priority_symbols()
-            if not priority:
+            universe=list(getattr(q,'universe',[]) or [])
+            if not priority and not universe:
                 continue
-            # Only poll actual aggregate trades where websocket tape is stale.
+
+            # Priority symbols receive frequent real aggregate-trade polling.
             stale=[s for s in priority if f(tape_metric(s).get('age_ms'),999999)>1200]
+            agg_batch=[]
             if stale:
                 start=_rest_symbol_cursor%len(stale)
-                batch=[stale[(start+i)%len(stale)] for i in range(min(REST_FALLBACK_AGG_PER_CYCLE,len(stale)))]
-                _rest_symbol_cursor=(start+len(batch))%len(stale)
-                await asyncio.gather(*(_rest_fetch_agg(s) for s in batch),return_exceptions=True)
+                take=min(REST_FALLBACK_AGG_PER_CYCLE,len(stale))
+                agg_batch.extend(stale[(start+i)%len(stale)] for i in range(take))
+                _rest_symbol_cursor=(start+take)%len(stale)
+
+            # Reserve a round-robin quota for the whole universe so lower-ranked
+            # symbols still receive periodic real trade telemetry.
+            if universe and REST_FALLBACK_ROTATE_AGG_PER_CYCLE>0:
+                start=_rest_universe_cursor%len(universe)
+                checked=0;added=0
+                while checked<len(universe) and added<REST_FALLBACK_ROTATE_AGG_PER_CYCLE:
+                    s=universe[(start+checked)%len(universe)]
+                    checked+=1
+                    if s in agg_batch:
+                        continue
+                    if f(tape_metric(s).get('age_ms'),999999)<=1200:
+                        continue
+                    agg_batch.append(s);added+=1
+                _rest_universe_cursor=(start+max(checked,1))%len(universe)
+
+            if agg_batch:
+                await asyncio.gather(*(_rest_fetch_agg(s) for s in agg_batch),return_exceptions=True)
 
             selected=[s for s in priority if s in set(getattr(app,'selected_micro_symbols',[]) or [])]
             depth_stale=[]
@@ -379,6 +409,16 @@ async def _rest_fallback_loop():
             print(f"Ψ-TAPE FALLBACK_ERROR {type(e).__name__}: {e}",flush=True)
 
 
+
+_old_px=base.px
+def px_v3(sym,row=None):
+    bt=bbo.get(sym) or {}
+    age=(time.time()-f(bt.get('t'),0))*1000.0 if bt else 999999.0
+    bid=f(bt.get('bid'));ask=f(bt.get('ask'))
+    if age<=5000 and bid>0 and ask>=bid:
+        return (bid+ask)/2.0
+    return _old_px(sym,row)
+base.px=px_v3
 
 _old_cheap=base.cheap
 def cheap_v2(sym,row,now):
