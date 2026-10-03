@@ -21,6 +21,9 @@ radar_mini_connected = False
 mini_24h = {}
 mini_last_message_ts = 0.0
 mini_last_count = 0
+mini_source = "NONE"
+mini_rest_ok = 0
+mini_rest_fail = 0
 base_discovery_loop = q.discovery_loop
 
 v7.VERSION = VERSION
@@ -149,50 +152,131 @@ async def ticker_loop():
         await asyncio.sleep(2)
 
 
-async def mini_loop():
-    global radar_mini_connected, mini_last_message_ts, mini_last_count
-    url=f"{app.WS_BASE}/ws/!miniTicker@arr"
+def _mini_ingest(payload, source):
+    global mini_last_message_ts,mini_last_count,mini_source
+    if not isinstance(payload,list):
+        return 0
+    t=now(); accepted=0
+    for x in payload:
+        if not isinstance(x,dict):
+            continue
+        sym=x.get("s") or x.get("symbol") or ""
+        last=app.safe_float(x.get("c") if x.get("c") is not None else x.get("lastPrice"))
+        open_=app.safe_float(x.get("o") if x.get("o") is not None else x.get("openPrice"))
+        high=app.safe_float(x.get("h") if x.get("h") is not None else x.get("highPrice"))
+        low=app.safe_float(x.get("l") if x.get("l") is not None else x.get("lowPrice"))
+        qv=app.safe_float(x.get("q") if x.get("q") is not None else x.get("quoteVolume"))
+        if sym and last>0:
+            mini_24h[sym]={
+                "change_pct": ((last/open_)-1.0)*100.0 if open_>0 else 0.0,
+                "open": open_,
+                "high": high,
+                "low": low,
+                "last": last,
+                "ts": t,
+            }
+            accepted+=1
+        if sym and last>0 and t-radar_last_full.get(sym,0)>=2.5:
+            push(sym,last,qv,source="mini" if source.startswith("WS") else "mini_rest")
+    if accepted:
+        mini_last_message_ts=t
+        mini_last_count=accepted
+        mini_source=source
+    return accepted
+
+async def _mini_rest_snapshot():
+    global radar_mini_connected,mini_rest_ok,mini_rest_fail,mini_source
+    if getattr(app,"session",None) is None:
+        return 0
+    hosts=[
+        "https://api.binance.com",
+        "https://data-api.binance.vision",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+    ]
+    last_exc=None
+    for host in hosts:
+        try:
+            async with app.session.get(
+                f"{host}/api/v3/ticker/24hr",
+                timeout=aiohttp.ClientTimeout(total=6,connect=2),
+            ) as resp:
+                body=await resp.text()
+                if resp.status!=200:
+                    raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
+                payload=json.loads(body)
+                n=_mini_ingest(payload,"REST_24HR")
+                if n:
+                    radar_mini_connected=True
+                    mini_rest_ok+=1
+                    print(f"Ψ-V10.7.1 RADAR mini REST fallback live symbols={n} host={host}",flush=True)
+                    return n
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc=exc
+            continue
+    mini_rest_fail+=1
+    print(f"RADAR_MINI_REST: {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",flush=True)
+    return 0
+
+async def mini_rest_loop():
     while True:
         try:
-            async with app.session.ws_connect(url,heartbeat=30,receive_timeout=90,max_msg_size=0) as ws:
+            await asyncio.sleep(5)
+            stale=(now()-mini_last_message_ts>8.0) or not radar_mini_connected
+            if stale:
+                await _mini_rest_snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"RADAR_MINI_REST_LOOP: {type(e).__name__}: {e}",flush=True)
+
+async def mini_loop():
+    global radar_mini_connected,mini_source
+    host_cursor=0
+    while True:
+        bases=[]
+        for raw in (
+            str(getattr(app,"WS_BASE","") or "").rstrip("/"),
+            "wss://data-stream.binance.vision",
+            "wss://stream.binance.com:443",
+            "wss://stream.binance.com:9443",
+        ):
+            if raw and raw not in bases:
+                bases.append(raw)
+        base_url=bases[host_cursor%len(bases)] if bases else "wss://data-stream.binance.vision"
+        url=f"{base_url}/ws/!miniTicker@arr"
+        try:
+            async with app.session.ws_connect(url,heartbeat=25,receive_timeout=60,max_msg_size=0,timeout=12) as ws:
                 radar_mini_connected=True
-                print("Ψ-V10.7.1 RADAR mini WS connected (!miniTicker@arr)",flush=True)
+                mini_source=f"WS:{base_url}"
+                print(f"Ψ-V10.7.1 RADAR mini WS connected host={base_url} (!miniTicker@arr)",flush=True)
                 async for msg in ws:
                     if msg.type==aiohttp.WSMsgType.TEXT:
-                        try: payload=json.loads(msg.data)
-                        except json.JSONDecodeError: continue
-                        if not isinstance(payload,list): continue
-                        t=now()
-                        mini_last_message_ts=t
-                        mini_last_count=len(payload)
-                        for x in payload:
-                            if not isinstance(x,dict): continue
-                            sym=x.get("s","")
-                            last=app.safe_float(x.get("c"))
-                            open_=app.safe_float(x.get("o"))
-                            high=app.safe_float(x.get("h"))
-                            low=app.safe_float(x.get("l"))
-                            if sym and last>0:
-                                mini_24h[sym]={
-                                    "change_pct": ((last/open_)-1.0)*100.0 if open_>0 else 0.0,
-                                    "open": open_,
-                                    "high": high,
-                                    "low": low,
-                                    "last": last,
-                                    "ts": t,
-                                }
-                            if t-radar_last_full.get(sym,0)<2.5: continue
-                            push(sym,last,app.safe_float(x.get("q")),source="mini")
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR): break
-        except asyncio.CancelledError: raise
+                        try:
+                            payload=json.loads(msg.data)
+                        except json.JSONDecodeError:
+                            continue
+                        _mini_ingest(payload,f"WS:{base_url}")
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError(f"mini_websocket_{msg.type.name.lower()}")
+                raise RuntimeError("mini_websocket_stream_ended")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            app.last_error=f"RADAR_MINI: {type(e).__name__}: {e}"; print(app.last_error,flush=True)
-        finally: radar_mini_connected=False
-        await asyncio.sleep(2)
+            app.last_error=f"RADAR_MINI: {type(e).__name__}: {e}"
+            print(f"{app.last_error} host={base_url}",flush=True)
+            host_cursor=(host_cursor+1)%max(1,len(bases))
+        finally:
+            # Do not mark the feed unavailable when a fresh REST fallback is
+            # already maintaining mini_24h.
+            radar_mini_connected=(mini_source=="REST_24HR" and now()-mini_last_message_ts<=8.0)
+        await asyncio.sleep(1)
 
 
 async def combined_discovery_loop():
-    await asyncio.gather(base_discovery_loop(),ticker_loop(),mini_loop())
+    await asyncio.gather(base_discovery_loop(),ticker_loop(),mini_loop(),mini_rest_loop())
 
 
 v7.ignition_metric=metric
