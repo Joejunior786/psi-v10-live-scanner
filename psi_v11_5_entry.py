@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.9-breakout-structural-intelligence"
+VERSION="11.0.5.10-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -25,24 +25,28 @@ REST_BASES = [
 _rest_route_printed = False
 _rest_global_gate = None
 _rest_kline_gate = None
+_rest_risk_kline_gate = None
 _rest_bg_kline_gate = None
 _rest_depth_gate = None
 _structure_request_ctx = contextvars.ContextVar("psi_structure_request", default=False)
+_risk_plan_request_ctx = contextvars.ContextVar("psi_risk_plan_request", default=False)
 _structure_owner_ctx = contextvars.ContextVar("psi_v11_structure_owner", default=False)
 _structure_active = 0
 _rest_good_host = {}
 _rest_host_bad_until = {}
-_rest_stats = {"ok":0,"fail":0,"attempt_fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0,"bg_ok":0,"bg_fail":0,"bg_defer":0}
+_rest_stats = {"ok":0,"fail":0,"attempt_fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0,"risk_ok":0,"risk_fail":0,"risk_defer":0,"bg_ok":0,"bg_fail":0,"bg_defer":0}
 _rest_last_fail = 0.0
 
 def _rest_gates(path):
-    global _rest_global_gate, _rest_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
+    global _rest_global_gate, _rest_kline_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(5)
+        _rest_kline_gate = asyncio.Semaphore(6)
+    if _rest_risk_kline_gate is None:
+        _rest_risk_kline_gate = asyncio.Semaphore(2)
     if _rest_bg_kline_gate is None:
-        _rest_bg_kline_gate = asyncio.Semaphore(2)
+        _rest_bg_kline_gate = asyncio.Semaphore(1)
     if _rest_depth_gate is None:
         _rest_depth_gate = asyncio.Semaphore(1)
     p=str(path)
@@ -65,10 +69,11 @@ async def resilient_api_get(client, path, params=None):
     p=str(path)
     lane=_rest_lane(p)
     is_structure = lane=="klines" and _structure_request_ctx.get()
-    route_key = "structure_klines" if is_structure else ("background_klines" if lane=="klines" else lane)
+    is_risk = lane=="klines" and (not is_structure) and _risk_plan_request_ctx.get()
+    route_key = "structure_klines" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane))
 
     if lane=="klines":
-        timeout_s,max_hosts=(9.5,3) if is_structure else (5.5,3)
+        timeout_s,max_hosts=(9.5,3) if is_structure else ((6.5,3) if is_risk else (5.5,3))
     elif lane=="depth":
         timeout_s,max_hosts=3.5,2
     elif lane=="ticker24":
@@ -122,18 +127,32 @@ async def resilient_api_get(client, path, params=None):
 
     for idx,host in enumerate(hosts):
         lane_acquired=False
+        risk_acquired=False
         bg_acquired=False
         try:
             if lane_gate is not None:
-                if lane=="klines" and not is_structure:
+                if lane=="klines" and is_risk:
                     try:
-                        await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=24.0)
+                        await asyncio.wait_for(_rest_risk_kline_gate.acquire(),timeout=6.0)
+                    except asyncio.TimeoutError:
+                        _rest_stats["risk_defer"]+=1
+                        raise
+                    risk_acquired=True
+                    try:
+                        await asyncio.wait_for(lane_gate.acquire(),timeout=6.0)
+                    except asyncio.TimeoutError:
+                        _rest_stats["risk_defer"]+=1
+                        raise
+                    lane_acquired=True
+                elif lane=="klines" and not is_structure:
+                    try:
+                        await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=8.0)
                     except asyncio.TimeoutError:
                         _rest_stats["bg_defer"]+=1
                         return []
                     bg_acquired=True
                     try:
-                        await asyncio.wait_for(lane_gate.acquire(),timeout=24.0)
+                        await asyncio.wait_for(lane_gate.acquire(),timeout=8.0)
                     except asyncio.TimeoutError:
                         _rest_stats["bg_defer"]+=1
                         return []
@@ -146,7 +165,9 @@ async def resilient_api_get(client, path, params=None):
             _rest_good_host[route_key]=host
             _rest_host_bad_until.pop((route_key,host),None)
             _rest_stats["ok"]+=1
-            if lane=="klines" and not is_structure:
+            if lane=="klines" and is_risk:
+                _rest_stats["risk_ok"]+=1
+            elif lane=="klines" and not is_structure:
                 _rest_stats["bg_ok"]+=1
             _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
             if idx>0:
@@ -154,7 +175,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=5(structure=3+background=2) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=6(structure=3+risk=2+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -176,12 +197,16 @@ async def resilient_api_get(client, path, params=None):
         finally:
             if lane_acquired:
                 lane_gate.release()
+            if risk_acquired:
+                _rest_risk_kline_gate.release()
             if bg_acquired:
                 _rest_bg_kline_gate.release()
 
     global _rest_last_fail
     _rest_stats["fail"]+=1
-    if lane=="klines" and not is_structure:
+    if lane=="klines" and is_risk:
+        _rest_stats["risk_fail"]+=1
+    elif lane=="klines" and not is_structure:
         _rest_stats["bg_fail"]+=1
     _rest_last_fail=time.time()
     app.rest_connected=False
@@ -195,6 +220,17 @@ async def resilient_api_get(client, path, params=None):
 
 # Replace the shared module-level REST function before any scanner loop starts.
 app.api_get = resilient_api_get
+
+async def _risk_load_klines(client, symbol, interval, limit):
+    token = _risk_plan_request_ctx.set(True)
+    try:
+        return await app.load_klines(client, symbol, interval, limit)
+    finally:
+        _risk_plan_request_ctx.reset(token)
+
+# V10.19.1 resolves this attribute at call time. Risk-plan candles therefore
+# use two dedicated slots and cannot be crowded out by lifecycle/MTF enrichers.
+app.load_risk_klines = _risk_load_klines
 _original_load_structure = app.load_structure
 
 async def _priority_load_structure(client, symbol):
@@ -794,7 +830,7 @@ async def structure_recovery_loop():
                 f"Ψ-RECOVERY STRUCTURE scope={total} fresh={fresh}/{total} ever={ever}/{total} "
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']}",
                 flush=True,
             )
@@ -939,7 +975,7 @@ async def watchdog_loop():
                 f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )

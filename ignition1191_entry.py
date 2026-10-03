@@ -21,7 +21,7 @@ MAX_PLAN_RISK_PCT = 3.5
 MIN_PLAN_RISK_PCT = 0.20
 
 risk_cache = {}
-risk_stats = {"samples": 0, "errors": 0, "sweep_reclaimed": 0, "sweep_risk": 0, "support_lost": 0, "plans": 0}
+risk_stats = {"samples": 0, "errors": 0, "timeouts": 0, "empty": 0, "sweep_reclaimed": 0, "sweep_risk": 0, "support_lost": 0, "plans": 0, "last_error": "", "last_symbol": ""}
 priority_symbols_provider = None
 
 _old_main = scanner.v7.main
@@ -265,11 +265,15 @@ async def build_risk_map(sym):
     if app.session is None:
         return
     try:
-        rows1 = await app.load_klines(app.session, sym, "1m", 64)
-        rows5 = await app.load_klines(app.session, sym, "5m", 72)
-        rows15 = await app.load_klines(app.session, sym, "15m", 52)
+        fetch = getattr(app, "load_risk_klines", app.load_klines)
+        rows1 = await fetch(app.session, sym, "1m", 64)
+        rows5 = await fetch(app.session, sym, "5m", 72)
+        rows15 = await fetch(app.session, sym, "15m", 52)
         c1, c5, c15 = candle_rows(rows1), candle_rows(rows5), candle_rows(rows15)
         if len(c5) < 20:
+            risk_stats["empty"] += 1
+            risk_stats["last_symbol"] = sym
+            risk_stats["last_error"] = f"EMPTY_CANDLES 1m={len(c1)} 5m={len(c5)} 15m={len(c15)}"
             return
         price = current_price(sym) or f(c1[-1].get("close") if c1 else c5[-1].get("close"))
         atr = atr14(c5[:-1] if len(c5) > 1 else c5)
@@ -290,8 +294,11 @@ async def build_risk_map(sym):
         risk_cache[sym] = {"symbol": sym, "updated": time.time(), "price": price, "atr5": atr, "atr5_pct": round(atr_pct, 4), "support1": f(supports[0].get("level")) if len(supports) > 0 else None, "support2": f(supports[1].get("level")) if len(supports) > 1 else None, "support3": f(supports[2].get("level")) if len(supports) > 2 else None, "support1_strength": f(supports[0].get("strength")) if supports else 0.0, "support1_distance_pct": pct(price, f(supports[0].get("level"))) if supports and f(supports[0].get("level")) > 0 else None, "resistance1": f(resistances[0].get("level")) if len(resistances) > 0 else None, "resistance2": f(resistances[1].get("level")) if len(resistances) > 1 else None, "resistance3": f(resistances[2].get("level")) if len(resistances) > 2 else None, **sweep, **plan}
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as exc:
         risk_stats["errors"] += 1
+        risk_stats["last_symbol"] = sym
+        risk_stats["last_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"Ψ-V10.19.1 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
 
 
 async def support_loop():
@@ -302,6 +309,10 @@ async def support_loop():
             await asyncio.wait_for(build_risk_map(sym), timeout=SUPPORT_BUILD_TIMEOUT)
         except asyncio.TimeoutError:
             risk_stats["errors"] += 1
+            risk_stats["timeouts"] += 1
+            risk_stats["last_symbol"] = sym
+            risk_stats["last_error"] = f"BUILD_TIMEOUT>{SUPPORT_BUILD_TIMEOUT:.0f}s"
+            print(f"Ψ-V10.19.1 RISKMAP_TIMEOUT {sym} timeout={SUPPORT_BUILD_TIMEOUT:.0f}s", flush=True)
 
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
@@ -421,7 +432,7 @@ async def print_risk_loop():
             states={}
             for _,x in fresh:
                 st=str(x.get("plan_state") or "WAIT");states[st]=states.get(st,0)+1
-            print(f"Ψ-V10.19.1 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']}", flush=True)
+            print(f"Ψ-V10.19.1 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
             ranked = sorted(fresh, key=lambda item: (1 if str(item[1].get("sweep_state")) == "SWEEP_RECLAIMED" else 0, f(item[1].get("sweep_score")), f(item[1].get("support1_strength")), -f(item[1].get("support1_distance_pct"), 99)), reverse=True)[:10]
             for i, (sym, x) in enumerate(ranked, 1):
                 risk_text = "-" if x.get("risk_pct") is None else f"{f(x.get('risk_pct')):.3f}%"
