@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.87-rotating-micro-rest-hosts"
+VERSION="11.0.5.88-parallel-micro-rest-race"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -167,6 +167,7 @@ _micro_rest_stats={
     "depth_ok":0,"depth_fail":0,"depth_host":"-",
     "trade_micro_ws_ok":0,"trade_micro_ws_fail":0,
     "trade_budget_timeout":0,
+    "rest_race_ok":0,"rest_race_fail":0,
 }
 
 MICRO_FALLBACK_CORE_SIZE=max(1,min(int(os.getenv("PSI_MICRO_FALLBACK_CORE","2")),8))
@@ -1263,20 +1264,17 @@ def _micro_rest_gate(lane):
 
 
 async def micro_rest_get(path, params, lane, total_timeout=3.5):
-    """Small, bounded Binance REST fallback for strict micro hydration.
+    """Bounded two-host Binance REST race for strict micro hydration.
 
-    Uses Binance public market-data hosts only. No result is promoted directly:
-    callers still feed it through app.process_agg_trade() or
-    app.process_partial_depth_snapshot(), preserving the exact sequence and
-    freshness gates used by formal execution.
+    Two official Binance Spot REST bases are tried concurrently and the first
+    valid payload wins. Results still flow through the exact existing trade/
+    book sequence and freshness validators; this changes transport latency
+    only, never execution authority.
     """
     if getattr(app,"session",None) is None or getattr(app.session,"closed",True):
         return None
     lane=str(lane)
     gate=_micro_rest_gate(lane)
-    # Binance Spot officially exposes these REST bases. Keep each fallback
-    # cycle bounded to two attempts, but rotate the pair after failures so a
-    # Railway route problem to one edge cannot permanently starve strict micro.
     hosts=[
         "https://data-api.binance.vision",
         "https://api.binance.com",
@@ -1295,36 +1293,74 @@ async def micro_rest_get(path, params, lane, total_timeout=3.5):
         ordered=rotated
     attempts=ordered[:2]
 
+    async def fetch_one(host):
+        try:
+            async with app.session.get(
+                f"{host}{path}",
+                params=dict(params or {}),
+                timeout=aiohttp.ClientTimeout(total=total_timeout,connect=min(1.2,total_timeout)),
+            ) as resp:
+                body=await resp.text()
+                if resp.status!=200:
+                    return None
+                payload=json.loads(body)
+                if lane=="trade":
+                    valid=isinstance(payload,list) and bool(payload)
+                else:
+                    valid=isinstance(payload,dict) and bool(payload.get("bids")) and bool(payload.get("asks"))
+                if not valid:
+                    return None
+                return host,payload
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
     async with gate:
-        for host in attempts:
-            try:
-                async with app.session.get(
-                    f"{host}{path}",
-                    params=dict(params or {}),
-                    timeout=aiohttp.ClientTimeout(total=total_timeout,connect=1.4),
-                ) as resp:
-                    body=await resp.text()
-                    if resp.status!=200:
-                        raise RuntimeError(f"HTTP {resp.status}: {body[:120]}")
-                    payload=json.loads(body)
-                    if lane=="trade":
-                        valid=isinstance(payload,list) and bool(payload)
-                    else:
-                        valid=isinstance(payload,dict) and bool(payload.get("bids")) and bool(payload.get("asks"))
-                    if not valid:
-                        raise RuntimeError("empty/invalid micro REST payload")
-                    _micro_rest_stats[f"{lane}_ok"]+=1
-                    _micro_rest_stats[f"{lane}_host"]=host
-                    # Start the next fallback after the successful host rather
-                    # than hammering the same edge forever.
-                    _micro_rest_host_cursor[lane]=(hosts.index(host)+1)%len(hosts)
-                    return payload
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                continue
+        tasks={asyncio.create_task(fetch_one(host)) for host in attempts}
+        winner=None
+        deadline=asyncio.get_running_loop().time()+total_timeout+0.35
+        try:
+            while tasks:
+                remaining=max(0.0,deadline-asyncio.get_running_loop().time())
+                if remaining<=0:
+                    break
+                done,pending=await asyncio.wait(
+                    tasks,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                tasks=set(pending)
+                for task in done:
+                    try:
+                        result=task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        result=None
+                    if result is not None:
+                        winner=result
+                        break
+                if winner is not None:
+                    break
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks,return_exceptions=True)
+
+        if winner is not None:
+            host,payload=winner
+            _micro_rest_stats[f"{lane}_ok"]+=1
+            _micro_rest_stats["rest_race_ok"]+=1
+            _micro_rest_stats[f"{lane}_host"]=host
+            _micro_rest_host_cursor[lane]=(hosts.index(host)+1)%len(hosts)
+            return payload
 
     _micro_rest_stats[f"{lane}_fail"]+=1
+    _micro_rest_stats["rest_race_fail"]+=1
     _micro_rest_host_cursor[lane]=(cursor+len(attempts))%len(hosts)
     return None
 
@@ -4681,6 +4717,7 @@ async def ws_api_micro_log_loop():
                 f"depthFail={_depth_ws_stats['fail']} depthTO={_depth_ws_stats['timeouts']} "
                 f"microTradeFB={_micro_rest_stats['trade_micro_ws_ok']}/{_micro_rest_stats['trade_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
+                f"restRace={_micro_rest_stats['rest_race_ok']}/{_micro_rest_stats['rest_race_fail']} "
                 f"restTrade={_micro_rest_stats['trade_ok']}/{_micro_rest_stats['trade_fail']} "
                 f"restDepth={_micro_rest_stats['depth_ok']}/{_micro_rest_stats['depth_fail']} "
                 f"lastMicroErr={str(_micro_ws_stats.get('last_error') or '-')[:80]} "
@@ -4934,7 +4971,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.87] Ψ ROTATING MICRO REST HOSTS active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.88] Ψ PARALLEL MICRO REST RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
