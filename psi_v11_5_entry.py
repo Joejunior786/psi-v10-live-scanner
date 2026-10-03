@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.67-triple-wsapi-feed-mesh"
+VERSION="11.0.5.68-batched-discovery-triple-mesh"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -3573,30 +3573,46 @@ async def watchdog_loop():
 async def ws_api_discovery_fallback_loop():
     """Full-universe discovery on its own WS-API connection.
 
-    One all-symbol MINI snapshot gives every eligible symbol the same refresh
-    cadence. Weight is bounded: one request every 4s = ~1200 weight/minute,
-    comfortably below Binance's 6000/minute WS-API request-weight limit.
+    Binance's giant all-symbol ticker.24hr response times out on this Railway
+    route even though bounded symbol arrays are reliable. Use non-overlapping
+    <=100-symbol MINI batches on the dedicated discovery socket. At 0.8s per
+    request this remains below the WS-API request-weight budget while giving
+    every eligible symbol a complete refresh round in roughly 4 seconds.
     """
+    cursor=0
     last_log=0.0
     batch_ok=0
     batch_fail=0
+    rounds=0
 
     while True:
         try:
-            await asyncio.sleep(4.0)
+            await asyncio.sleep(.8)
             ready,_,_=_market_ws_primitives()
             if not ready.is_set():
                 continue
 
             universe=list(getattr(q,"universe",[]) or [])
             if not universe:
+                cursor=0
                 continue
             universe_set=set(universe)
+            nuni=len(universe)
+            if cursor>=nuni:
+                cursor=0
+
+            start_idx=cursor
+            end_idx=min(nuni,start_idx+100)
+            batch=universe[start_idx:end_idx]
+            cursor=end_idx
+            if cursor>=nuni:
+                cursor=0
+                rounds+=1
 
             rows=await market_ws_api_request(
                 "ticker.24hr",
-                {"type":"MINI","symbolStatus":"TRADING"},
-                response_timeout=8.0,gate_timeout=.5,
+                {"symbols":batch,"type":"MINI"},
+                response_timeout=6.0,gate_timeout=.5,
             )
             if isinstance(rows,dict):
                 rows=[rows]
@@ -3624,14 +3640,14 @@ async def ws_api_discovery_fallback_loop():
                     })
                     try:
                         hist=base.price_hist[sym]
-                        if not hist or stamp-hist[-1][0]>=.75:
+                        if not hist or stamp-hist[-1][0]>=.50:
                             hist.append((stamp,px))
                     except Exception:
                         pass
 
                 if disc_payload:
                     accepted=qualifier_core._ingest_discovery_payload(
-                        disc_payload,"WS_API_24HR_MINI_ALL"
+                        disc_payload,"WS_API_24HR_MINI_BATCH"
                     )
                     _ws_market_stats["ticker24_ok"]+=1
                     _ws_market_stats["last_ticker24_ms"]=int(stamp*1000)
@@ -3639,9 +3655,9 @@ async def ws_api_discovery_fallback_loop():
 
                 if filtered:
                     try:
-                        extrest.v71._mini_ingest(filtered,"WS_API_24HR_MINI_ALL")
+                        extrest.v71._mini_ingest(filtered,"WS_API_24HR_MINI_BATCH")
                         extrest.v71.radar_mini_connected=True
-                        extrest.v71.mini_source="WS_API_24HR_MINI_ALL"
+                        extrest.v71.mini_source="WS_API_24HR_MINI_BATCH"
                         extrest.sync_extension_from_ws()
                     except Exception as exc:
                         _ws_market_stats["last_error"]=f"mini_ingest {type(exc).__name__}: {exc}"
@@ -3652,12 +3668,15 @@ async def ws_api_discovery_fallback_loop():
                 batch_fail+=1
 
             now=time.time()
-            if now-last_log>=8.0:
+            if now-last_log>=6.0:
                 last_log=now
                 ready_count=sum(len(qualifier_core.disc.get(s,()))>=4 for s in universe)
+                one_sample=sum(len(qualifier_core.disc.get(s,()))>=1 for s in universe)
                 print(
-                    f"Ψ-WSAPI DISCOVERY lane=LIVE accepted={accepted}/{len(universe)} "
-                    f"discReady={ready_count}/{len(universe)} snapshotsOK={batch_ok} snapshotsFail={batch_fail} "
+                    f"Ψ-WSAPI DISCOVERY lane=LIVE accepted={accepted}/{len(batch)} "
+                    f"seen={one_sample}/{len(universe)} discReady={ready_count}/{len(universe)} "
+                    f"rounds={rounds} cursor={cursor}/{len(universe)} "
+                    f"batchOK={batch_ok} batchFail={batch_fail} "
                     f"marketWSreq={_market_ws_stats['requests']} ok={_market_ws_stats['ok']} "
                     f"fail={_market_ws_stats['fail']} timeouts={_market_ws_stats['timeouts']} "
                     f"lastErr={str(_market_ws_stats.get('last_error') or '-')[:140]}",
@@ -4074,7 +4093,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.67] Ψ TRIPLE WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.68] Ψ BATCHED DISCOVERY TRIPLE WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
