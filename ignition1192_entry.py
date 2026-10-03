@@ -3,7 +3,7 @@ from collections import defaultdict
 import ignition1191_entry as base
 
 scanner, b17, q, app = base.scanner, base.b17, base.q, base.app
-VERSION = "10.19.6-trend-pullback-monitor-integrity-sync"
+VERSION = "10.19.7-trend-pullback-monitor-integrity-sync"
 TREND_EVERY, TREND_BATCH, TREND_AGE = 45.0, 24, 16 * 60.0
 PB_EVERY, PB_MAX, PB_AGE = 15.0, 24, 90.0
 ARM_STREAK, MIN_DEPTH, MAX_DEPTH = 2, 0.35, 8.0
@@ -255,20 +255,20 @@ async def print_loop():
         await asyncio.sleep(float(getattr(base.base,"PRINT_SECONDS",30)))
         try:
             fresh=[(s,x) for s,x in pb_cache.items() if time.time()-f(x.get("updated"))<=PB_AGE]; w=sum(str(x.get("state")) in {"PULLBACK_STARTING","PULLBACK_ZONE","LIQUIDITY_SWEEP","RECLAIM_PENDING"} for _,x in fresh); a=sum(str(x.get("state"))=="PULLBACK_ARMED" for _,x in fresh); b=sum(str(x.get("state"))=="PULLBACK_BUY" for _,x in fresh)
-            print(f"Ψ-V10.19.6 PULLBACK BOARD tracked={len(fresh)} watch={w} armed={a} buy={b} trendCycles={stats['trend']} pbCycles={stats['pb']} errors={stats['errors']}",flush=True)
+            print(f"Ψ-V10.19.7 PULLBACK BOARD tracked={len(fresh)} watch={w} armed={a} buy={b} trendCycles={stats['trend']} pbCycles={stats['pb']} errors={stats['errors']}",flush=True)
             for i,(s,x) in enumerate(sorted(fresh,key=lambda z:(rank.get(str(z[1].get('state')),0),f(z[1].get('score')),bool(z[1].get('first'))),reverse=True)[:10],1):
                 print(f"PB{i:02d}. {s:<14} state={x.get('state','WAIT'):<18} score={f(x.get('score')):5.1f} trend={f(x.get('trend_score')):5.1f} depth={f(x.get('depth')):+.3f}% zone={x.get('zone','NONE')}@{px(x.get('zone_level'))} zDist={f(x.get('zone_dist'),99):.3f}% sweep={x.get('sweep','WAIT')} flow={f(x.get('flow')):4.1f} layers={int(x.get('layers') or 0)}/6 hard={'PASS' if x.get('hard_pass') else 'BLOCK'} first={'YES' if x.get('first') else 'NO'} streak={int(x.get('streak') or 0)} entry={px(x.get('entry'))} stop={px(x.get('stop'))} tp1={px(x.get('tp1'))} tp2={px(x.get('tp2'))} tp3={px(x.get('tp3'))}",flush=True)
         except asyncio.CancelledError: raise
-        except Exception as e: print(f"Ψ-V10.19.6 PULLBACK_ERROR {type(e).__name__}: {e}",flush=True)
+        except Exception as e: print(f"Ψ-V10.19.7 PULLBACK_ERROR {type(e).__name__}: {e}",flush=True)
 
 b17.diag_pool=diag1192
 if _learn and _old_feat:_learn.feature_snapshot=feat1192
 if _learn and _old_keys:_learn.pattern_keys=keys1192
 async def main1192(): await asyncio.gather(_old_main(),trend_loop(),pb_loop(),print_loop())
 scanner.v7.main=main1192; scanner.VERSION=VERSION
-print("Ψ-V10.19.6 UPGRADE ACTIVE — separate trend-following pullback monitor: rotating 1H/4H EMA50/EMA200 trend confirmation, first-pullback priority, EMA/VWAP/support zones, stop-liquidity sweep/reclaim, sell-pressure contraction, CVD/OFI buyer-return, 2-cycle PULLBACK-ARMED persistence, conditional Entry/Stop/TP; formal BUY gates unchanged",flush=True)
+print("Ψ-V10.19.7 UPGRADE ACTIVE — separate trend-following pullback monitor: rotating 1H/4H EMA50/EMA200 trend confirmation, first-pullback priority, EMA/VWAP/support zones, stop-liquidity sweep/reclaim, sell-pressure contraction, CVD/OFI buyer-return, 2-cycle PULLBACK-ARMED persistence, conditional Entry/Stop/TP; formal BUY gates unchanged",flush=True)
 if __name__=="__main__":
-    try: print("Ψ-V10.19.6 ACTIVE — trend pullback monitor",flush=True); asyncio.run(scanner.v7.main())
+    try: print("Ψ-V10.19.7 ACTIVE — trend pullback monitor",flush=True); asyncio.run(scanner.v7.main())
     except KeyboardInterrupt:
         try: base.base.save_v119_state()
         except Exception: pass
