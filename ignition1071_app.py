@@ -277,7 +277,13 @@ async def mini_loop():
 
 
 async def combined_discovery_loop():
-    await asyncio.gather(base_discovery_loop(),ticker_loop(),mini_loop(),mini_rest_loop())
+    await asyncio.gather(
+        base_discovery_loop(),
+        q.discovery_rest_loop(),
+        ticker_loop(),
+        mini_loop(),
+        mini_rest_loop(),
+    )
 
 
 v7.ignition_metric=metric
