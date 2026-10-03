@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.0-phased-full-hydration"
+VERSION = "12.0.10-nonblocking-ws-recycle"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1302,6 +1302,15 @@ async def v12_ws_rpc_loop(shard):
         await asyncio.sleep(0.75)
 
 
+async def _v12_close_ws_quick(shard):
+    try:
+        ws = _v12_ws_conns[int(shard) % V12_WS_SHARDS]
+        if ws is not None and not ws.closed:
+            await asyncio.wait_for(ws.close(), timeout=0.45)
+    except Exception:
+        pass
+
+
 async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.0):
     if shard is None:
         shard = (sum(ord(ch) for ch in str(symbol)) + sum(ord(ch) for ch in str(interval))) % V12_WS_SHARDS
@@ -1364,12 +1373,9 @@ async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.
         _stats["ws_last_error"] = f"shard={shard} {type(exc).__name__}: {exc}"
         if isinstance(exc, asyncio.TimeoutError):
             _stats["ws_timeout_recycles"] += 1
-            ws = _v12_ws_conns[shard]
-            if ws is not None and not ws.closed:
-                try:
-                    await ws.close()
-                except Exception:
-                    pass
+            # Never block the fetch pipeline waiting for a dead socket to close.
+            # The RPC loop reconnects it independently.
+            asyncio.create_task(_v12_close_ws_quick(shard))
         return None
     finally:
         if rid is not None:
@@ -1397,9 +1403,16 @@ async def _fetch_tf(sym, tf, deep=False):
         finally:
             _v12_return_shard(shard)
 
-    # 2) If the WS path stalls, race official Binance REST front doors.
+    # 2) If the WS path stalls, use the bounded two-host FAST fallback
+    # already shared with the V11 cache-reuse layer. Deep requests use the
+    # wider official Binance REST race directly.
     if not isinstance(rows, list) or len(rows) < 55:
-        rows = await v12_rest_klines(sym, tf, limit)
+        if deep:
+            rows = await v12_rest_klines(sym, tf, limit)
+        else:
+            rows = await _v12_fast_rest_klines(sym, tf, limit)
+            if not isinstance(rows, list) or len(rows) < 55:
+                rows = await v12_rest_klines(sym, tf, limit)
         if isinstance(rows, list) and len(rows) >= 55:
             _stats["fetch_rest_ok"] += 1
 
@@ -1454,7 +1467,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 18.0 if deep else 14.0
+                timeout = 19.0 if deep else 15.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
