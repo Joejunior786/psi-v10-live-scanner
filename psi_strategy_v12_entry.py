@@ -1417,7 +1417,8 @@ async def _fetch_tf(sym, tf, deep=False):
     need = DEEP_MIN_ROWS if deep else 55
     rows = None
 
-    # 0) Zero-request reuse from V11's persisted Binance 1H/4H structure.
+    # 0) Reuse V11's verified 1H/4H Binance structure history at zero request
+    # cost. This makes Daily the dominant missing core timeframe during FAST_CORE.
     if tf in {"1h", "4h"}:
         reused, saved = _v11_raw_best(sym, tf)
         if isinstance(reused, list) and len(reused) >= need:
@@ -1429,65 +1430,91 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
 
-    # 1) Primary transport: one V12-only Binance WS-API socket.
-    # It is isolated from discovery, microstructure and execution traffic.
+    async def ws_fetch():
+        try:
+            return await legacy.binance_ws_api_klines(
+                sym,
+                tf,
+                limit,
+                wait_ready=0.8,
+                response_timeout=5.5 if deep else 4.0,
+                gate_timeout=0.8,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
+    async def rest_fetch():
+        try:
+            if deep:
+                return await v12_rest_klines(sym, tf, limit)
+            return await _v12_fast_rest_klines(sym, tf, limit)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
+    # 1) Daily FAST hydration is the main whole-universe bottleneck because V11
+    # already supplies much of 1H/4H. Race Binance WS and Binance REST in
+    # parallel instead of spending the REST budget only after a slow WS miss.
+    if (not isinstance(rows, list) or len(rows) < need) and tf == "1d" and not deep:
+        tasks = {
+            asyncio.create_task(ws_fetch()): "ws",
+            asyncio.create_task(rest_fetch()): "rest",
+        }
+        winner = None
+        winner_lane = None
+        try:
+            deadline = asyncio.get_running_loop().time() + 4.6
+            pending = set(tasks.keys())
+            while pending and winner is None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        candidate = task.result()
+                    except Exception:
+                        candidate = None
+                    if isinstance(candidate, list) and len(candidate) >= need:
+                        winner = candidate
+                        winner_lane = tasks.get(task)
+                        break
+            rows = winner
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks.keys(), return_exceptions=True)
+
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["daily_race_ok"] += 1
+            _stats[f"daily_{winner_lane}_win"] += 1
+        else:
+            _stats["daily_race_miss"] += 1
+            rows = None
+
+    # 2) Other timeframes keep the proven WS-first path, but with a bounded
+    # per-stage budget so a REST fallback always has time to execute.
     if not isinstance(rows, list) or len(rows) < need:
-        try:
-            rows = await v12_ws_klines(
-                sym,
-                tf,
-                limit,
-                shard=0,
-                response_timeout=5.0 if deep else 3.2,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
-
+        rows = await ws_fetch()
         if isinstance(rows, list) and len(rows) >= need:
-            _stats["dedicated_ws_ok"] += 1
+            _stats["legacy_ws_ok"] += 1
         else:
-            _stats["dedicated_ws_miss"] += 1
-            rows = None
-
-    # 2) Short proven shared-WS fallback. A miss returns quickly so the fair
-    # bootstrap scheduler can move to another market.
-    if rows is None:
-        try:
-            rows = await legacy.binance_ws_api_klines(
-                sym,
-                tf,
-                limit,
-                wait_ready=0.65,
-                response_timeout=3.5 if deep else 2.0,
-                gate_timeout=0.50,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
-
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["shared_ws_fallback_ok"] += 1
-        else:
-            _stats["shared_ws_fallback_miss"] += 1
-            rows = None
-
-    # 3) Keep REST only for DEEP history. FAST misses must fail quickly;
-    # otherwise a few unreachable hosts pin all full-universe worker slots.
-    if rows is None and deep:
-        try:
-            rows = await v12_rest_klines(sym, tf, limit)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
-
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["fetch_rest_ok"] += 1
-        else:
-            rows = None
+            _stats["legacy_ws_miss"] += 1
+            rows = await rest_fetch()
+            if isinstance(rows, list) and len(rows) >= need:
+                _stats["fetch_rest_ok"] += 1
+            else:
+                rows = None
 
     if isinstance(rows, list) and len(rows) >= need:
         snapshot = snap(rows)
@@ -1495,7 +1522,6 @@ async def _fetch_tf(sym, tf, deep=False):
             current = _cache.get(sym, {}).get(tf) or {}
             current_rows = current.get("rows") or []
 
-            # Never replace a deeper cache entry with a shallower packet.
             if len(rows) >= len(current_rows):
                 _cache[sym][tf] = {
                     "rows": rows,
@@ -1946,10 +1972,12 @@ async def strategy_loop():
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
-                f"fetchTO={_stats.get('fetch_timeout',0)} dedicatedWS={_stats.get('dedicated_ws_ok',0)}/"
-                f"{_stats.get('dedicated_ws_miss',0)} dedicatedRaw={_stats.get('ws_ok',0)}/"
-                f"{_stats.get('ws_fail',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
-                f"{_stats.get('shared_ws_fallback_miss',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)} "
+                f"fetchTO={_stats.get('fetch_timeout',0)} legacyWS={_stats.get('legacy_ws_ok',0)}/"
+                f"{_stats.get('legacy_ws_miss',0)} dailyRace={_stats.get('daily_race_ok',0)}/"
+                f"{_stats.get('daily_race_miss',0)} dailyWS={_stats.get('daily_ws_win',0)} "
+                f"dailyREST={_stats.get('daily_rest_win',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
+                f"{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
+                f"fetchRestOK={_stats.get('fetch_rest_ok',0)} "
                 f"structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
                 f"structTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)}",
                 flush=True,
