@@ -1101,35 +1101,62 @@ async def strategy_loop():
     global _cycle, _results
     print("Ψ-V12 STRATEGY_LOOP starting; waiting for Binance session/universe", flush=True)
     while app.session is None:
-        await asyncio.sleep(1.0)
-    await asyncio.sleep(3.0)
+        await asyncio.sleep(0.5)
+    await asyncio.sleep(2.0)
+
+    sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+    refresh_tasks = {}
 
     while True:
         try:
             universe = list(getattr(q, "universe", []) or [])
             if not universe:
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(2.0)
                 continue
+
+            # Retire completed refreshes without blocking the signal board.
+            for sym, task in list(refresh_tasks.items()):
+                if task.done():
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        _stats["refresh_task_fail"] += 1
+                    refresh_tasks.pop(sym, None)
+
+            # Prioritise strong discovery candidates while rotating fairly
+            # through the complete universe. A symbol already hydrating is not
+            # duplicated.
             chosen = _priority_symbols(universe)
-            sem = asyncio.Semaphore(FETCH_CONCURRENCY)
-            await asyncio.gather(*(refresh_symbol(s, sem) for s in chosen), return_exceptions=True)
+            for sym in chosen:
+                if sym not in refresh_tasks:
+                    refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem))
+
+            # Give newly scheduled work a short opportunity to land, then
+            # publish from every symbol already carrying usable MTF data.
+            await asyncio.sleep(0.35)
+
             ready_now = sum(
                 all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
-                for s in chosen
+                for s in universe
+            )
+            weekly_ready = sum(
+                bool((_cache.get(s, {}).get("1w") or {}).get("snap"))
+                for s in universe
             )
             print(
-                f"Ψ-V12 REFRESH cycle={_cycle + 1} selected={len(chosen)} mtfReady={ready_now}/{len(chosen)} "
-                f"fetchOK={_stats.get('fetch_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)}",
+                f"Ψ-V12 REFRESH cycle={_cycle + 1} selected={len(chosen)} "
+                f"mtfReady={ready_now}/{len(universe)} weeklyReady={weekly_ready}/{len(universe)} "
+                f"inFlight={len(refresh_tasks)} fetchOK={_stats.get('fetch_ok', 0)} "
+                f"fetchFail={_stats.get('fetch_fail', 0)} wsOK={_stats.get('ws_ok', 0)}",
                 flush=True,
             )
 
-            # Re-evaluate every symbol with cached MTF data. This preserves fair
-            # visibility while the rotating refresher keeps the cache current.
             new_results = {}
             now = time.time()
             for sym in universe:
                 c = _cache.get(sym) or {}
-                # 1H/4H must be reasonably current for actionable states.
                 if now - f((c.get("1h") or {}).get("updated")) > max(300.0, TF_TTL["1h"] * 4):
                     continue
                 try:
@@ -1139,15 +1166,21 @@ async def strategy_loop():
                     continue
                 if row:
                     new_results[sym] = row
+
             _results = new_results
             _cycle += 1
             _stats["cycles"] = _cycle
+            _stats["refresh_inflight"] = len(refresh_tasks)
             print_board(force=True)
+
         except asyncio.CancelledError:
+            for task in refresh_tasks.values():
+                task.cancel()
             raise
         except Exception as exc:
             _stats["loop_fail"] += 1
             print(f"Ψ-V12 LOOP_ERROR {type(exc).__name__}: {exc}", flush=True)
+
         await asyncio.sleep(LOOP_SECONDS)
 
 
