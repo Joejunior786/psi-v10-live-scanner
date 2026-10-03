@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.13-circuit-failover"
+VERSION = "12.1.14-circuit-race-fallback"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1493,18 +1493,88 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["dedicated_circuit_skip"] += 1
             rows = None
 
-    # 2) During FAST, use the proven legacy WS only while the dedicated
-    # circuit is open. This keeps normal FAST isolated, but preserves progress
-    # during a temporary dedicated-socket outage. DEEP may always use fallback.
-    if rows is None and (deep or _ws_circuit_open()):
+    # 2) Circuit fallback. During FAST, if the dedicated socket is unhealthy,
+    # race the proven shared WS against the bounded Binance REST helper. This
+    # prevents a second congested websocket from stalling whole-universe
+    # hydration. DEEP keeps the shared-WS then wider-REST path below.
+    if rows is None and (not deep) and _ws_circuit_open():
+        async def shared_fast():
+            try:
+                return await legacy.binance_ws_api_klines(
+                    sym,
+                    tf,
+                    limit,
+                    wait_ready=0.6,
+                    response_timeout=2.2,
+                    gate_timeout=0.5,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None
+
+        async def rest_fast():
+            try:
+                return await _v12_fast_rest_klines(sym, tf, limit)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None
+
+        task_lane = {
+            asyncio.create_task(shared_fast()): "shared",
+            asyncio.create_task(rest_fast()): "rest",
+        }
+        pending = set(task_lane)
+        winner = None
+        lane = None
+        try:
+            deadline = asyncio.get_running_loop().time() + 2.8
+            while pending and winner is None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                done, pending = await asyncio.wait(
+                    pending, timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        candidate = task.result()
+                    except Exception:
+                        candidate = None
+                    if isinstance(candidate, list) and len(candidate) >= need:
+                        winner = candidate
+                        lane = task_lane.get(task)
+                        break
+            rows = winner
+        finally:
+            for task in task_lane:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*task_lane.keys(), return_exceptions=True)
+
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["circuit_fallback_ok"] += 1
+            _stats[f"circuit_{lane}_win"] += 1
+            _stats[f"circuit_{tf}_ok"] += 1
+        else:
+            _stats["circuit_fallback_miss"] += 1
+            _stats[f"circuit_{tf}_miss"] += 1
+            rows = None
+
+    # 3) DEEP fallback keeps the proven shared WS available.
+    if rows is None and deep:
         try:
             rows = await legacy.binance_ws_api_klines(
                 sym,
                 tf,
                 limit,
-                wait_ready=0.7,
-                response_timeout=3.2 if deep else 2.4,
-                gate_timeout=0.6,
+                wait_ready=0.8,
+                response_timeout=4.0,
+                gate_timeout=0.7,
             )
         except asyncio.CancelledError:
             raise
@@ -1519,7 +1589,7 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats[f"shared_{tf}_miss"] += 1
             rows = None
 
-    # 3) REST remains DEEP-only; FAST circuit failover never touches REST.
+    # 4) Wider REST remains DEEP-only.
     if rows is None and deep:
         try:
             rows = await v12_rest_klines(sym, tf, limit)
@@ -2017,7 +2087,11 @@ async def strategy_loop():
                 f"{_stats.get('ws_fail',0)} stageTO={_stats.get('dedicated_stage_timeout',0)} "
                 f"gateTO={_stats.get('ws_gate_timeout',0)} lockTO={_stats.get('ws_lock_timeout',0)} "
                 f"sendTO={_stats.get('ws_send_timeout',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
-                f"{_stats.get('shared_ws_fallback_miss',0)} sharedD1={_stats.get('shared_1d_ok',0)}/{_stats.get('shared_1d_miss',0)} "
+                f"{_stats.get('shared_ws_fallback_miss',0)} circuitFB={_stats.get('circuit_fallback_ok',0)}/{_stats.get('circuit_fallback_miss',0)} "
+                f"circuitWS={_stats.get('circuit_shared_win',0)} circuitREST={_stats.get('circuit_rest_win',0)} "
+                f"fastRest={_stats.get('fast_rest_ok',0)}/{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
+                f"circuitSkip={_stats.get('dedicated_circuit_skip',0)} circuitOpen={int(_ws_circuit_open())} "
+                f"sharedD1={_stats.get('shared_1d_ok',0)}/{_stats.get('shared_1d_miss',0)} "
                 f"sharedH1={_stats.get('shared_1h_ok',0)}/{_stats.get('shared_1h_miss',0)} "
                 f"sharedH4={_stats.get('shared_4h_ok',0)}/{_stats.get('shared_4h_miss',0)} "
                 f"fetchRestOK={_stats.get('fetch_rest_ok',0)} lastWS={_stats.get('ws_last_error','-')}",
@@ -2133,7 +2207,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.12] MULTI-SETUP AUTHORITY + WORKER-BUDGET HEADROOM active — legacy BUY/PRE authority disabled; "
+        "[v12.1.14] MULTI-SETUP AUTHORITY + CIRCUIT WS/REST RACE active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
