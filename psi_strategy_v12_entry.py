@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.2-history-phase-resolution"
+VERSION = "12.2.3-phase-syntax-fixed"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1969,7 +1969,7 @@ async def strategy_loop():
                         ((_cache.get(s, {}).get(tf) or {}).get("snap"))
                         or (
                             ((_cache.get(s, {}).get(tf) or {}).get("history_capped"))
-                            and ((_cache.get(s, {}).get(tf) or {}).get("rows")
+                            and bool((_cache.get(s, {}).get(tf) or {}).get("rows"))
                         )
                     )
                     and now - f((_cache.get(s, {}).get(tf) or {}).get("updated")) <= TF_TTL[tf]
@@ -2108,7 +2108,7 @@ async def strategy_loop():
                         ((_cache.get(s, {}).get(tf) or {}).get("snap"))
                         or (
                             ((_cache.get(s, {}).get(tf) or {}).get("history_capped"))
-                            and ((_cache.get(s, {}).get(tf) or {}).get("rows")
+                            and bool((_cache.get(s, {}).get(tf) or {}).get("rows"))
                         )
                     )
                     and now - f((_cache.get(s, {}).get(tf) or {}).get("updated")) <= TF_TTL[tf]
@@ -2276,7 +2276,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.2] MULTI-SETUP AUTHORITY + HISTORY-PHASE RESOLUTION active — legacy BUY/PRE authority disabled; "
+        "[v12.2.3] MULTI-SETUP AUTHORITY + PHASE-SYNTAX FIXED active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
