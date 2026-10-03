@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.13-breakout-structural-intelligence"
+VERSION="11.0.5.14-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -40,9 +40,9 @@ _rest_last_fail = 0.0
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
-        _rest_global_gate = asyncio.Semaphore(12)
+        _rest_global_gate = asyncio.Semaphore(14)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(9)
+        _rest_kline_gate = asyncio.Semaphore(12)
     if _rest_risk_kline_gate is None:
         _rest_risk_kline_gate = asyncio.Semaphore(2)
     if _rest_bg_kline_gate is None:
@@ -73,7 +73,7 @@ async def resilient_api_get(client, path, params=None):
     route_key = "structure_klines" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane))
 
     if lane=="klines":
-        timeout_s,max_hosts=(4.0,2) if is_structure else ((6.5,3) if is_risk else (5.5,3))
+        timeout_s,max_hosts=(3.2,1) if is_structure else ((6.5,3) if is_risk else (5.5,3))
     elif lane=="depth":
         timeout_s,max_hosts=3.5,2
     elif lane=="ticker24":
@@ -88,15 +88,24 @@ async def resilient_api_get(client, path, params=None):
     # starve structural hydration.
 
     preferred=_rest_good_host.get(route_key)
-    if lane in {"klines","depth","ticker24"}:
+    if is_structure:
         base_hosts=[
-            "https://data-api.binance.vision",
-            "https://api-gcp.binance.com",
             "https://api.binance.com",
             "https://api1.binance.com",
             "https://api2.binance.com",
             "https://api3.binance.com",
             "https://api4.binance.com",
+            "https://data-api.binance.vision",
+        ]
+    elif lane in {"klines","depth","ticker24"}:
+        base_hosts=[
+            "https://data-api.binance.vision",
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+            "https://api3.binance.com",
+            "https://api4.binance.com",
+            "https://api-gcp.binance.com",
         ]
     else:
         base_hosts=list(REST_BASES)
@@ -175,7 +184,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=12 klines=9(structure<=6+risk=2+background=1) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=9+risk=2+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -226,9 +235,9 @@ app.api_get = resilient_api_get
 # the next retry reuses the verified siblings and refetches only the missing one.
 _original_load_klines = app.load_klines
 _structure_tf_cache = {}
-STRUCTURE_TF_CACHE_S = 30.0
+STRUCTURE_TF_CACHE_S = 180.0
 STRUCTURE_TF_RETRY_DELAY_S = 0.12
-STRUCTURE_TF_ATTEMPTS = 3
+STRUCTURE_TF_ATTEMPTS = 4
 _structure_tf_stats = {"cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0}
 
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
@@ -624,12 +633,12 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 2
+RECOVERY_BATCH = 3
 RECOVERY_PRIORITY = 80
-RECOVERY_STALE_S = 240.0
+RECOVERY_STALE_S = 270.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
-RECOVERY_FAIL_COOLDOWN_S = 16.0
+RECOVERY_FAIL_COOLDOWN_S = 20.0
 RECOVERY_CYCLE_SLEEP_S = 1.5
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
@@ -800,7 +809,7 @@ async def _hydrate_one(sym):
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=30.0)
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
         finally:
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
@@ -880,7 +889,7 @@ async def structure_recovery_loop():
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
-                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']}",
+                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} structHost={_rest_good_host.get('structure_klines','-')}",
                 flush=True,
             )
         await asyncio.sleep(RECOVERY_CYCLE_SLEEP_S)
@@ -958,16 +967,20 @@ async def watchdog_loop():
                 and fresh_cov<min(total,(16 if pool==0 else 32))
                 and now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
             ):
-                _rest_good_host.pop("klines",None)
+                prior_host=_rest_good_host.pop("structure_klines",None)
                 released=0
                 for sym,until in list(_recovery_retry_after.items()):
-                    if until<=now or sym in set(_recovery_symbols()[:RECOVERY_PRIORITY]):
+                    if until<=now:
                         _recovery_retry_after.pop(sym,None);released+=1
                 _watchdog_last_cov_progress=now
                 watchdog_stats["structure_kicks"]+=1
                 watchdog_stats["actions"]+=1
-                actions.append(f"STRUCTURE_ROUTE_RESET:{released}")
-                print(f"Ψ-WATCHDOG ACTION STRUCTURE_ROUTE_RESET coverage={ever_cov}/{total} released={released}",flush=True)
+                actions.append(f"STRUCTURE_ROUTE_ROTATE:{released}")
+                print(
+                    f"Ψ-WATCHDOG ACTION STRUCTURE_ROUTE_ROTATE coverage={ever_cov}/{total} "
+                    f"priorHost={prior_host or '-'} expiredReleased={released} activeCooldowns={len(_recovery_retry_after)}",
+                    flush=True,
+                )
 
             # Continuity should populate as soon as enough verified structure exists.
             if (
