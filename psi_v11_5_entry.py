@@ -3273,21 +3273,28 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def ws_api_market_feed_fallback_loop():
-    """Market-data failover over Binance Spot WS-API.
+    """Single-owner Binance WS-API market-data failover.
 
-    Railway currently reaches ws-api.binance.com reliably even when the market
-    stream hosts and large REST responses time out. All data here are direct
-    public Binance responses. BUY/PRE gates are unchanged and still require
-    verified micro/structure readiness.
+    The Railway route reliably reaches ws-api.binance.com even when Binance
+    market-stream sockets are unavailable. This loop stays within a bounded
+    request-weight budget:
+      * one 80-symbol 24h MINI batch per second for full-universe discovery;
+      * one small BBO batch every 2s for active candidates;
+      * four aggregate-trade queries per second for real aggressive flow;
+      * four depth20 snapshots every 2s for execution micro.
+    No synthetic order flow is created and formal PRE/BUY gates remain intact.
     """
     global _ws_market_trade_cursor,_ws_market_depth_cursor,_ws_market_universe_cursor
-    last_book_req=0.0
-    last_ticker24_req=0.0
+    mini_cursor=0
+    bbo_cursor=0
+    last_bbo_req=0.0
+    last_depth_req=0.0
     last_log=0.0
+    last_error_log=0.0
 
     while True:
         try:
-            await asyncio.sleep(.75)
+            await asyncio.sleep(1.0)
             ready,_,_=_ws_api_primitives()
             if not ready.is_set():
                 continue
@@ -3298,67 +3305,137 @@ async def ws_api_market_feed_fallback_loop():
                 continue
             universe_set=set(universe)
             selected=[s for s in list(getattr(app,"selected_micro_symbols",[]) or []) if s in universe_set]
-
             shards=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS))
-            discovery_age=(
-                now-f(getattr(qualifier_core,"disc_event_ms",0),0)/1000.0
-                if f(getattr(qualifier_core,"disc_event_ms",0),0)>0 else 999999.0
-            )
-            degraded=(shards<tape.SHARDS or discovery_age>4.0)
-            if not degraded:
+            disc_ms=f(getattr(qualifier_core,"disc_event_ms",0),0)
+            discovery_age=(now-disc_ms/1000.0) if disc_ms>0 else 999999.0
+            ext_age=(now-f(getattr(extrest,"ext_last_refresh",0),0)) if f(getattr(extrest,"ext_last_refresh",0),0)>0 else 999999.0
+
+            # When native streams are completely healthy this owner can idle.
+            # If any discovery/extension/micro path is stale, stay active.
+            if shards>=tape.SHARDS and discovery_age<=4.0 and ext_age<=8.0:
                 continue
 
-            # Full-universe BBO snapshot: one low-weight WS-API request.
-            if now-last_book_req>=1.5:
-                # Batch book tickers to keep individual WS-API responses small
-                # and avoid transport/proxy limits on one 400+ symbol payload.
-                rows=[]
-                book_batches=[universe[i:i+100] for i in range(0,len(universe),100)]
-                book_results=await asyncio.gather(*(
-                    binance_ws_api_request(
-                        "ticker.book",{"symbols":batch},
-                        response_timeout=5.0,gate_timeout=1.5
+            # -------------------------------------------------------------
+            # A) Full-universe discovery + extension in bounded MINI batches.
+            # Binance WS-API ticker.24hr supports an array of symbols.
+            # 80 symbols costs 40 request-weight; one batch/s covers ~403
+            # symbols every ~6s without the giant all-symbol response.
+            # -------------------------------------------------------------
+            nuni=len(universe)
+            mini_batch=[]
+            if nuni:
+                take=min(80,nuni)
+                mini_batch=[universe[(mini_cursor+i)%nuni] for i in range(take)]
+                mini_cursor=(mini_cursor+take)%nuni
+
+            mini_rows=None
+            if mini_batch:
+                mini_rows=await binance_ws_api_request(
+                    "ticker.24hr",
+                    {"symbols":mini_batch,"type":"MINI"},
+                    response_timeout=6.0,gate_timeout=1.2,
+                )
+
+            if isinstance(mini_rows,dict):
+                mini_rows=[mini_rows]
+            if isinstance(mini_rows,list) and mini_rows:
+                stamp=time.time()
+                disc_payload=[]
+                filtered=[]
+                for d in mini_rows:
+                    if not isinstance(d,dict):
+                        continue
+                    sym=str(d.get("symbol") or "")
+                    if sym not in universe_set:
+                        continue
+                    px=f(d.get("lastPrice"))
+                    if px<=0:
+                        continue
+                    filtered.append(d)
+                    disc_payload.append({
+                        "s":sym,
+                        "c":px,
+                        "q":f(d.get("quoteVolume")),
+                        "n":f(d.get("count")),
+                    })
+                    try:
+                        hist=base.price_hist[sym]
+                        if not hist or stamp-hist[-1][0]>=.75:
+                            hist.append((stamp,px))
+                    except Exception:
+                        pass
+
+                if disc_payload:
+                    qualifier_core._ingest_discovery_payload(
+                        disc_payload,"WS_API_24HR_MINI_BATCH"
                     )
-                    for batch in book_batches
-                ),return_exceptions=True)
-                for br in book_results:
-                    if isinstance(br,list):
-                        rows.extend(br)
-                    elif isinstance(br,dict):
-                        rows.append(br)
-                last_book_req=now
-                if rows:
-                    stamp=time.time()
-                    discovery_payload=[]
-                    accepted=0
-                    for d in rows:
+                    _ws_market_stats["ticker24_ok"]+=1
+                    _ws_market_stats["last_ticker24_ms"]=int(stamp*1000)
+                    tape.tape_stats["wsapi_discovery_rows"]+=len(disc_payload)
+
+                if filtered:
+                    try:
+                        extrest.v71._mini_ingest(filtered,"WS_API_24HR_MINI_BATCH")
+                        extrest.v71.radar_mini_connected=True
+                        extrest.v71.mini_source="WS_API_24HR_MINI_BATCH"
+                        extrest.sync_extension_from_ws()
+                    except Exception as exc:
+                        _ws_market_stats["last_error"]=f"mini_ingest {type(exc).__name__}: {exc}"
+
+            # -------------------------------------------------------------
+            # Build a current priority set. Discovery is fair across 403;
+            # expensive BBO/trade/depth telemetry follows live opportunity.
+            # -------------------------------------------------------------
+            priority=[];seen=set()
+            def add(sym):
+                sym=str(sym or "")
+                if sym and sym in universe_set and sym not in seen:
+                    seen.add(sym);priority.append(sym)
+
+            for sym in selected:
+                add(sym)
+            for sym in ("BTCUSDT","ETHUSDT"):
+                add(sym)
+            try:
+                for _,sym in qualifier_core.hot(24):
+                    add(sym)
+            except Exception:
+                pass
+            try:
+                for row in list(base.latest.get("_all_candidates") or [])[:32]:
+                    add(row.get("symbol"))
+            except Exception:
+                pass
+
+            # -------------------------------------------------------------
+            # B) Best bid/ask only for the active priority set.
+            # Batch mode avoids the large all-exchange ticker.book response.
+            # -------------------------------------------------------------
+            if priority and now-last_bbo_req>=2.0:
+                take=min(50,len(priority))
+                batch=[priority[(bbo_cursor+i)%len(priority)] for i in range(take)]
+                bbo_cursor=(bbo_cursor+take)%len(priority)
+                books=await binance_ws_api_request(
+                    "ticker.book",{"symbols":batch},
+                    response_timeout=5.0,gate_timeout=1.0,
+                )
+                last_bbo_req=now
+                if isinstance(books,dict):
+                    books=[books]
+                if isinstance(books,list) and books:
+                    stamp=time.time();accepted=0
+                    for d in books:
                         if not isinstance(d,dict):
                             continue
                         sym=str(d.get("symbol") or "")
                         if sym not in universe_set:
                             continue
-                        bid=f(d.get("bidPrice")); ask=f(d.get("askPrice"))
-                        bq=f(d.get("bidQty")); aq=f(d.get("askQty"))
+                        bid=f(d.get("bidPrice"));ask=f(d.get("askPrice"))
+                        bq=f(d.get("bidQty"));aq=f(d.get("askQty"))
                         if bid<=0 or ask<=0:
                             continue
-                        mid=(bid+ask)/2.0
                         tape.bbo[sym]={"t":stamp,"bid":bid,"bq":bq,"ask":ask,"aq":aq}
-                        try:
-                            hist=base.price_hist[sym]
-                            if not hist or stamp-hist[-1][0]>=.75:
-                                hist.append((stamp,mid))
-                        except Exception:
-                            pass
-                        meta=app.symbol_meta.get(sym,{}) if isinstance(getattr(app,"symbol_meta",None),dict) else {}
-                        qv=f(meta.get("quote_volume_24h"))
-                        discovery_payload.append({"s":sym,"c":mid,"q":qv,"n":0.0,"b":bid,"a":ask})
-                        try:
-                            extrest.v71.push(sym,mid,qv,None,bid,ask,"wsapi_book")
-                        except Exception:
-                            pass
                         accepted+=1
-                    if discovery_payload:
-                        qualifier_core._ingest_discovery_payload(discovery_payload,"WS_API_BOOK")
                     if accepted:
                         ms=int(stamp*1000)
                         _ws_market_stats["book_ok"]+=1
@@ -3367,67 +3444,22 @@ async def ws_api_market_feed_fallback_loop():
                         tape.tape_stats["wsapi_last_book_ms"]=ms
                         tape.tape_stats["wsapi_book_symbols"]=accepted
 
-            # Keep extension/anti-chase telemetry alive in <=20-symbol batches.
-            if now-last_ticker24_req>=4.0:
-                focus=[];seen=set()
-                def add(sym):
-                    sym=str(sym or "")
-                    if sym and sym in universe_set and sym not in seen and len(focus)<20:
-                        seen.add(sym);focus.append(sym)
-                for s in ("BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT"): add(s)
-                for s in selected: add(s)
-                try:
-                    for _,s in q.hot(20): add(s)
-                except Exception:
-                    pass
-                if focus:
-                    rows=await binance_ws_api_request(
-                        "ticker.24hr",{"symbols":focus,"type":"MINI"},response_timeout=5.0
-                    )
-                    last_ticker24_req=now
-                    if isinstance(rows,list) and rows:
-                        n=extrest.v71._mini_ingest(rows,"WS_API_24HR")
-                        if n:
-                            extrest.v71.radar_mini_connected=True
-                            extrest.v71.mini_source="WS_API_24HR"
-                            extrest.sync_extension_from_ws()
-                            ms=int(time.time()*1000)
-                            _ws_market_stats["ticker24_ok"]+=1
-                            _ws_market_stats["last_ticker24_ms"]=ms
-
-            # Real aggregate trades: selected execution pool first, then a
-            # separate round-robin universe quota for fair opportunity.
-            trade_syms=[];seen=set()
-            if selected:
-                start=_ws_market_trade_cursor%len(selected)
-                take=min(6,len(selected))
-                for i in range(take):
-                    s=selected[(start+i)%len(selected)]
-                    if s not in seen:
-                        seen.add(s);trade_syms.append(s)
-                _ws_market_trade_cursor=(start+take)%len(selected)
-            if universe:
-                start=_ws_market_universe_cursor%len(universe)
-                checked=0;added=0
-                while checked<len(universe) and added<2:
-                    s=universe[(start+checked)%len(universe)];checked+=1
-                    if s in seen:
-                        continue
-                    seen.add(s);trade_syms.append(s);added+=1
-                _ws_market_universe_cursor=(start+max(checked,1))%len(universe)
+            # -------------------------------------------------------------
+            # C) Real aggregate trades. Four rotating symbols per second keep
+            # current execution/leader candidates fresh while preserving weight.
+            # -------------------------------------------------------------
+            trade_targets=[]
+            if priority:
+                take=min(4,len(priority))
+                start=_ws_market_trade_cursor%len(priority)
+                trade_targets=[priority[(start+i)%len(priority)] for i in range(take)]
+                _ws_market_trade_cursor=(start+take)%len(priority)
 
             async def trade_one(sym):
                 rows=await binance_ws_api_request(
-                    "trades.aggregate",{"symbol":sym,"limit":50},
-                    response_timeout=4.0,gate_timeout=1.5
+                    "trades.aggregate",{"symbol":sym,"limit":30},
+                    response_timeout=7.0,gate_timeout=1.2,
                 )
-                aggregate=True
-                if not isinstance(rows,list):
-                    rows=await binance_ws_api_request(
-                        "trades.recent",{"symbol":sym,"limit":50},
-                        response_timeout=4.0,gate_timeout=1.5
-                    )
-                    aggregate=False
                 if not isinstance(rows,list):
                     return 0
                 last=int(tape._rest_agg_last_id.get(sym,-1))
@@ -3435,35 +3467,30 @@ async def ws_api_market_feed_fallback_loop():
                 for d in rows:
                     if not isinstance(d,dict):
                         continue
-                    if aggregate:
-                        try: aid=int(d.get("a"))
-                        except Exception: continue
-                        event_ms=int(f(d.get("T"),0))
-                        price=f(d.get("p"));qty=f(d.get("q"))
-                        maker=bool(d.get("m"))
-                    else:
-                        try: aid=int(d.get("id",-1))
-                        except Exception: continue
-                        event_ms=int(f(d.get("time"),0))
-                        price=f(d.get("price"));qty=f(d.get("qty"))
-                        maker=bool(d.get("isBuyerMaker"))
-                    if aid<=last:
+                    try:
+                        aid=int(d.get("a",-1))
+                    except Exception:
                         continue
-                    stamp=event_ms/1000.0 if event_ms>0 else time.time()
-                    if price<=0 or qty<=0:
+                    if aid<0 or aid<=last:
+                        continue
+                    event_ms=int(f(d.get("T"),0))
+                    price=f(d.get("p"));qty=f(d.get("q"))
+                    if event_ms<=0 or price<=0 or qty<=0:
+                        continue
+                    stamp=event_ms/1000.0
+                    if stamp<time.time()-tape.WINDOW-5:
+                        last=max(last,aid)
                         continue
                     tape.trade_events[sym].append(
-                        (stamp,price,price*qty,not maker,event_ms)
+                        (stamp,price,price*qty,not bool(d.get("m")),event_ms)
                     )
                     if sym in set(selected):
                         try:
-                            payload={
-                                "a":aid,"p":str(price),"q":str(qty),
-                                "T":event_ms,"E":event_ms,"m":maker
-                            }
+                            payload=dict(d);payload["E"]=event_ms
                             app.process_agg_trade(sym,payload)
+                            tape.tape_stats["wsapi_micro_trade_bridge"]+=1
                         except Exception:
-                            pass
+                            tape.tape_stats["wsapi_micro_trade_bridge_fail"]+=1
                     last=max(last,aid);added+=1
                 if last>=0:
                     tape._rest_agg_last_id[sym]=last
@@ -3475,54 +3502,73 @@ async def ws_api_market_feed_fallback_loop():
                     tape.tape_stats["wsapi_trade_rows"]+=added
                 return added
 
-            if trade_syms:
-                results=await asyncio.gather(*(trade_one(s) for s in trade_syms),return_exceptions=True)
-                if any(isinstance(x,int) and x>0 for x in results):
+            if trade_targets:
+                trade_results=await asyncio.gather(
+                    *(trade_one(s) for s in trade_targets),return_exceptions=True
+                )
+                if any(isinstance(x,int) and x>0 for x in trade_results):
                     _ws_market_stats["trade_ok"]+=1
 
-            # Full top-20 depth snapshots for selected symbols. Eight per cycle
-            # keeps a 40-symbol pool inside the 5s book-freshness window.
-            depth_targets=[]
-            if selected:
+            # -------------------------------------------------------------
+            # D) depth20 snapshots for execution symbols only.
+            # Four every 2s refreshes a 40-symbol pool in <=20s. Formal
+            # micro readiness remains fail-closed if freshness is insufficient.
+            # -------------------------------------------------------------
+            if selected and now-last_depth_req>=2.0:
+                take=min(4,len(selected))
                 start=_ws_market_depth_cursor%len(selected)
-                take=min(8,len(selected))
                 depth_targets=[selected[(start+i)%len(selected)] for i in range(take)]
                 _ws_market_depth_cursor=(start+take)%len(selected)
+                last_depth_req=now
 
-            async def depth_one(sym):
-                d=await binance_ws_api_request(
-                    "depth",{"symbol":sym,"limit":20},
-                    response_timeout=4.0,gate_timeout=1.5
+                async def depth_one(sym):
+                    d=await binance_ws_api_request(
+                        "depth",{"symbol":sym,"limit":20},
+                        response_timeout=5.0,gate_timeout=1.0,
+                    )
+                    if not isinstance(d,dict):
+                        return 0
+                    try:
+                        app.process_partial_depth_snapshot(sym,d)
+                        ms=int(time.time()*1000)
+                        _ws_market_stats["last_depth_ms"]=ms
+                        tape.tape_stats["wsapi_last_depth_ms"]=ms
+                        return 1
+                    except Exception:
+                        return 0
+
+                depth_results=await asyncio.gather(
+                    *(depth_one(s) for s in depth_targets),return_exceptions=True
                 )
-                if not isinstance(d,dict):
-                    return 0
-                try:
-                    app.process_partial_depth_snapshot(sym,d)
-                    ms=int(time.time()*1000)
-                    _ws_market_stats["last_depth_ms"]=ms
-                    tape.tape_stats["wsapi_last_depth_ms"]=ms
-                    return 1
-                except Exception:
-                    return 0
-
-            if depth_targets:
-                results=await asyncio.gather(*(depth_one(s) for s in depth_targets),return_exceptions=True)
-                ok=sum(1 for x in results if x==1)
+                ok=sum(1 for x in depth_results if x==1)
                 if ok:
                     _ws_market_stats["depth_ok"]+=ok
 
+            # -------------------------------------------------------------
+            # Diagnostics are emitted even when a request class is failing.
+            # -------------------------------------------------------------
             if now-last_log>=10.0:
                 last_log=now
                 book_age=(now*1000-f(_ws_market_stats.get("last_book_ms"),0))/1000.0 if f(_ws_market_stats.get("last_book_ms"),0)>0 else 999999.0
                 trade_age=(now*1000-f(_ws_market_stats.get("last_trade_ms"),0))/1000.0 if f(_ws_market_stats.get("last_trade_ms"),0)>0 else 999999.0
+                ticker_age=(now*1000-f(_ws_market_stats.get("last_ticker24_ms"),0))/1000.0 if f(_ws_market_stats.get("last_ticker24_ms"),0)>0 else 999999.0
                 print(
                     f"Ψ-WSAPI MARKET FALLBACK active=YES shards={shards}/{tape.SHARDS} "
+                    f"tickerAge={ticker_age:.1f}s discReady={sum(len(qualifier_core.disc.get(s,()))>=4 for s in universe)}/{len(universe)} "
                     f"books={_ws_market_stats['book_symbols']} bookAge={book_age:.1f}s "
                     f"tradeRows={_ws_market_stats['trade_rows']} tradeAge={trade_age:.1f}s "
                     f"depthOK={_ws_market_stats['depth_ok']} ticker24OK={_ws_market_stats['ticker24_ok']} "
-                    f"requests={_ws_market_stats['requests']} fail={_ws_market_stats['fail']} "
-                    f"lastError={str(_ws_market_stats.get('last_error') or '-')[:160]} "
+                    f"requests={_ws_market_stats['requests']} ok={_ws_market_stats['ok']} fail={_ws_market_stats['fail']} "
+                    f"lastErr={str(_ws_market_stats.get('last_error') or '-')[:160]} "
                     f"executionGates=UNCHANGED",
+                    flush=True,
+                )
+
+            if _ws_market_stats.get("fail",0) and now-last_error_log>=20.0:
+                last_error_log=now
+                print(
+                    f"Ψ-WSAPI MARKET DIAG lastError={_ws_market_stats.get('last_error') or '-'} "
+                    f"wsApiLastError={_ws_api_stats.get('last_error') or '-'}",
                     flush=True,
                 )
 
@@ -3532,7 +3578,6 @@ async def ws_api_market_feed_fallback_loop():
             _ws_market_stats["fail"]+=1
             _ws_market_stats["last_error"]=f"{type(exc).__name__}: {exc}"
             print(f"Ψ-WSAPI MARKET FALLBACK_ERROR {type(exc).__name__}: {exc}",flush=True)
-
 
 async def independent_market_feed_fallback_loop():
     """Top-level market-data failover.
