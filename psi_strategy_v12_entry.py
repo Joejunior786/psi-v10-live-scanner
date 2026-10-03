@@ -72,14 +72,14 @@ _stats = defaultdict(int)
 # Dedicated V12 Binance Spot WS-API connection for historical candles. This
 # prevents legacy recovery/structure traffic from starving the new strategy
 # engines and avoids dependence on Railway REST routing.
+V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
+V12_WS_SHARDS = max(2, min(int(os.getenv("PSI_V12_WS_SHARDS", "4")), 6))
 _v12_ws_conns = [None] * V12_WS_SHARDS
 _v12_ws_ready = [None] * V12_WS_SHARDS
 _v12_ws_locks = [None] * V12_WS_SHARDS
 _v12_ws_gates = [None] * V12_WS_SHARDS
 _v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
 _v12_ws_ids = [0] * V12_WS_SHARDS
-V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
-V12_WS_SHARDS = max(2, min(int(os.getenv("PSI_V12_WS_SHARDS", "4")), 6))
 
 
 def f(v, d=0.0):
