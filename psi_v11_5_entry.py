@@ -1209,6 +1209,108 @@ def _live_pullback_exhaustion(sym,ca):
         "buy":buy,"cvd":cvd,"tape":tape,
     }
 
+def _balanced_monster_board(candidates):
+    """Select up to BOARD_ROWS meaningful candidates across distinct lanes.
+
+    The full candidate universe remains in _all_candidates. This function only
+    controls display visibility; it never changes formal state, layers, risk
+    plans, Pinpoint authority, or execution gates.
+    """
+    rows=list(candidates or [])
+    state_rank={
+        "MONSTER-HOT":7,
+        "MONSTER-IGNITION":6,
+        "MONSTER-MEMORY":5,
+        "MONSTER-RESCUE":4,
+        "MONSTER-SEED":3,
+        "MONSTER-EXTENDED":2,
+        "MONSTER-WATCH":1,
+    }
+
+    def rank(r):
+        formal=str(r.get("formal") or "")
+        state=str(r.get("state") or "")
+        pb=str(r.get("monsterPullbackState") or "")
+        layers=int(f(r.get("layers")))
+        tape=f(r.get("eventTape"))
+        cvd=f(r.get("cvd1s"))
+        buy=f(r.get("buy1s"),.5)
+        return (
+            1 if formal=="PRE-IGNITION" else 0,
+            state_rank.get(state,0),
+            2 if pb=="PULLBACK_EXHAUSTED" else 1 if pb=="SELL_PRESSURE_EXHAUSTING" else 0,
+            layers,
+            f(r.get("bsi")),
+            f(r.get("retentionScore")),
+            f(r.get("early")),
+            tape,
+            cvd,
+            buy,
+            f(r.get("dna")),
+            f(r.get("peak")),
+        )
+
+    selected=[]
+    seen=set()
+    lane_counts=defaultdict(int)
+
+    def add_lane(name,pred,quota):
+        pool=sorted((r for r in rows if pred(r)),key=rank,reverse=True)
+        for r in pool:
+            if len(selected)>=BOARD_ROWS or lane_counts[name]>=quota:
+                break
+            sym=str(r.get("symbol") or "")
+            if not sym or sym in seen:
+                continue
+            r["displayLane"]=name
+            selected.append(r);seen.add(sym);lane_counts[name]+=1
+
+    # Reserve capacity so one crowded lane cannot hide another.
+    add_lane("PRE",lambda r:str(r.get("formal") or "")=="PRE-IGNITION" and int(f(r.get("layers")))>=4,8)
+    add_lane("MONSTER",lambda r:str(r.get("state") or "") in {
+        "MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED"
+    } and int(f(r.get("layers")))>=3,7)
+    add_lane("PULLBACK",lambda r:str(r.get("monsterPullbackState") or "") in {
+        "PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING"
+    } and int(f(r.get("layers")))>=3,5)
+    add_lane("NEAR5",lambda r:int(f(r.get("layers")))>=5,6)
+    add_lane("EARLY",lambda r:str(r.get("formal") or "")=="EARLY OPPORTUNITY" and int(f(r.get("layers")))>=3,5)
+
+    # Early anomaly lane: permit lower-layer names only when live tape itself
+    # is exceptional. This avoids generic 0/6 activity noise.
+    add_lane("ANOMALY",lambda r:(
+        int(f(r.get("layers")))>=2
+        and f(r.get("eventTape"))>=72
+        and f(r.get("buy1s"),.5)>=.62
+        and f(r.get("cvd1s"))>=.20
+    ),4)
+
+    # Fill any remaining slots with the strongest meaningful candidates.
+    def meaningful(r):
+        layers=int(f(r.get("layers")))
+        formal=str(r.get("formal") or "")
+        state=str(r.get("state") or "")
+        pb=str(r.get("monsterPullbackState") or "")
+        return (
+            layers>=3
+            or formal in {"PRE-IGNITION","EARLY OPPORTUNITY"}
+            or (state in {"MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED"} and layers>=2)
+            or pb in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING"}
+            or f(r.get("bsi"))>=58
+        )
+
+    for r in sorted((r for r in rows if meaningful(r)),key=rank,reverse=True):
+        if len(selected)>=BOARD_ROWS:
+            break
+        sym=str(r.get("symbol") or "")
+        if not sym or sym in seen:
+            continue
+        r["displayLane"]=r.get("displayLane") or "BEST"
+        selected.append(r);seen.add(sym)
+
+    # Never pad the visible board with generic 0/6 fallback rows.
+    return selected[:BOARD_ROWS]
+
 def scan_v5():
     now=time.time();u=list(getattr(q,"universe",[]) or []);rows=[]
     for sym in u:
@@ -1247,7 +1349,9 @@ def scan_v5():
     out.sort(key=lambda x:(priority.get(str(x.get("state")),0),f(x.get("bsi")),f(x.get("retentionScore")),f(x.get("early")),f(x.get("dna")),f(x.get("peak"))),reverse=True)
     base.stats["cycles"]+=1;base.stats["universe"]=len(u);base.stats["deep"]=len(pool);base.stats["cand"]=len(out);rescue.rescue_stats["last_pool"]=len(pool);rescue.rescue_stats["last_emergency"]=len(emergency)
     base.latest["_all_candidates"]=list(out)
-    return out[:BOARD_ROWS]
+    board=_balanced_monster_board(out)
+    base.latest["_display_mix"]=dict(Counter(str(r.get("displayLane") or "BEST") for r in board))
+    return board
 base.scan=scan_v5
 
 def _fmt_px(v):
