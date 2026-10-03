@@ -359,7 +359,7 @@ async def _v12_fast_rest_klines(sym, tf, limit):
                     if resp.status != 200:
                         return None
                     payload = await resp.json()
-                    return payload if isinstance(payload, list) and len(payload) >= 55 else None
+                    return payload if isinstance(payload, list) and payload else None
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -384,7 +384,7 @@ async def _v12_fast_rest_klines(sym, tf, limit):
                         rows = task.result()
                     except Exception:
                         rows = None
-                    if isinstance(rows, list) and len(rows) >= 55:
+                    if isinstance(rows, list) and rows:
                         winner = rows
                         break
                 tasks = set(pending)
@@ -1205,7 +1205,7 @@ async def _v12_rest_one(host, symbol, interval, limit):
                 _stats[f"rest_status_{resp.status}"] += 1
                 return None
             rows = await resp.json()
-            if isinstance(rows, list) and len(rows) >= 55:
+            if isinstance(rows, list) and rows:
                 _stats["rest_host_ok"] += 1
                 return rows
     except asyncio.CancelledError:
@@ -1461,7 +1461,7 @@ async def _fetch_tf(sym, tf, deep=False):
     # 0) Reuse verified V11 1H/4H history at zero request cost.
     if tf in {"1h", "4h"}:
         reused, saved = _v11_raw_best(sym, tf)
-        if isinstance(reused, list) and len(reused) >= FAST_MIN_ROWS:
+        if isinstance(reused, list) and len(reused) >= need:
             try:
                 merge = getattr(legacy, "_reuse_current_candle", None)
                 merged = merge(reused, sym, tf) if callable(merge) else None
@@ -1471,16 +1471,12 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["fetch_v11_cache_ok"] += 1
             _stats[f"v11_{tf}_ok"] += 1
 
-    # 1) Primary: isolated V12 Binance WS. A successful response may contain
-    # fewer bars than requested for a young listing; that is still valid data.
-    if rows is None or (deep and len(rows) < DEEP_MIN_ROWS and not bool((_cache.get(sym, {}).get(tf) or {}).get("history_capped"))):
+    # 1) Isolated V12 Binance WS is the normal FAST transport.
+    if not isinstance(rows, list) or not rows:
         if not _ws_circuit_open():
             try:
-                candidate = await v12_ws_klines(
-                    sym,
-                    tf,
-                    limit,
-                    shard=0,
+                rows = await v12_ws_klines(
+                    sym, tf, limit, shard=0,
                     response_timeout=5.0 if deep else 4.8,
                     ready_timeout=0.8,
                     gate_timeout=1.0,
@@ -1489,23 +1485,22 @@ async def _fetch_tf(sym, tf, deep=False):
             except asyncio.CancelledError:
                 raise
             except Exception:
-                candidate = None
+                rows = None
 
-            if isinstance(candidate, list) and candidate:
-                rows = candidate
+            if isinstance(rows, list) and rows:
                 _stats["dedicated_ws_ok"] += 1
                 _stats[f"dedicated_{tf}_ok"] += 1
-                if len(candidate) < need:
-                    _stats["history_short_resolved"] += 1
             else:
                 _stats["dedicated_ws_miss"] += 1
                 _stats[f"dedicated_{tf}_miss"] += 1
+                rows = None
         else:
             _stats["dedicated_circuit_skip"] += 1
 
-    # 2) FAST circuit fallback: when the dedicated socket is unhealthy, race
-    # the proven shared WS lane against a bounded Binance REST helper.
-    if rows is None and not deep and _ws_circuit_open():
+    # 2) When the dedicated circuit is open, race the proven shared WS against
+    # bounded Binance REST. Accept any non-empty official history; genuinely
+    # young listings are stored as history-capped instead of retried forever.
+    if rows is None and (not deep) and _ws_circuit_open():
         async def shared_fast():
             try:
                 return await legacy.binance_ws_api_klines(
@@ -1541,8 +1536,7 @@ async def _fetch_tf(sym, tf, deep=False):
                 if remaining <= 0:
                     break
                 done, pending = await asyncio.wait(
-                    pending,
-                    timeout=remaining,
+                    pending, timeout=remaining,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
@@ -1565,16 +1559,17 @@ async def _fetch_tf(sym, tf, deep=False):
 
         if isinstance(rows, list) and rows:
             _stats["circuit_fallback_ok"] += 1
-            _stats[f"circuit_{lane}_ok"] += 1
+            _stats[f"circuit_{lane}_win"] += 1
+            _stats[f"circuit_{tf}_ok"] += 1
         else:
             _stats["circuit_fallback_miss"] += 1
+            _stats[f"circuit_{tf}_miss"] += 1
             rows = None
 
-    # 3) DEEP fallback. Missing EMA200 history is never fabricated; a short
-    # real Binance response is stored as history-capped and resolves the job.
+    # 3) DEEP fallback: shared WS then wider REST.
     if rows is None and deep:
         try:
-            candidate = await legacy.binance_ws_api_klines(
+            rows = await legacy.binance_ws_api_klines(
                 sym, tf, limit,
                 wait_ready=0.8,
                 response_timeout=4.0,
@@ -1583,30 +1578,31 @@ async def _fetch_tf(sym, tf, deep=False):
         except asyncio.CancelledError:
             raise
         except Exception:
-            candidate = None
+            rows = None
 
-        if isinstance(candidate, list) and candidate:
-            rows = candidate
+        if isinstance(rows, list) and rows:
             _stats["shared_ws_fallback_ok"] += 1
             _stats[f"shared_{tf}_ok"] += 1
         else:
             _stats["shared_ws_fallback_miss"] += 1
             _stats[f"shared_{tf}_miss"] += 1
+            rows = None
 
     if rows is None and deep:
         try:
-            candidate = await v12_rest_klines(sym, tf, limit)
+            rows = await v12_rest_klines(sym, tf, limit)
         except asyncio.CancelledError:
             raise
         except Exception:
-            candidate = None
-        if isinstance(candidate, list) and candidate:
-            rows = candidate
+            rows = None
+        if isinstance(rows, list) and rows:
             _stats["fetch_rest_ok"] += 1
+        else:
+            rows = None
 
-    # 4) Store every genuine Binance history response. If it is shorter than
-    # requested, mark it capped so the scheduler stops retrying impossible
-    # MA50/MA200 history until the structural TTL expires.
+    # 4) Store any authoritative non-empty history. If Binance returns fewer
+    # candles than requested, mark the timeframe history-capped. MA50/MA200
+    # fields remain None until enough real candles exist; no synthetic history.
     if isinstance(rows, list) and rows:
         capped = len(rows) < limit
         snapshot = snap(rows)
@@ -1625,7 +1621,9 @@ async def _fetch_tf(sym, tf, deep=False):
         else:
             current["updated"] = time.time()
             current["history_capped"] = bool(current.get("history_capped")) or capped
-            current["max_history_rows"] = max(int(current.get("max_history_rows") or 0), len(rows))
+            current["max_history_rows"] = max(
+                int(current.get("max_history_rows") or 0), len(rows)
+            )
             if current.get("snap") is None:
                 current["snap"] = snap(current_rows)
 
@@ -1634,6 +1632,7 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["fetch_deep_ok"] += 1
         elif capped:
             _stats["fetch_history_capped"] += 1
+            _stats["history_short_resolved"] += 1
         else:
             _stats["fetch_fast_ok"] += 1
         return True
@@ -2127,8 +2126,8 @@ async def strategy_loop():
 
             print(
                 f"Ψ-V12 REFRESH cycle={_cycle + 1} phase={phase} "
-                f"mtfReady={ready_now}/{len(universe)} partial1={partial_1} partial2={partial_2} deepMAReady={deep_ready}/{len(universe)} "
-                f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
+                f"mtfReady={ready_now}/{len(universe)} coreResolved={core_resolved}/{len(universe)} partial1={partial_1} partial2={partial_2} "f"deepMAReady={deep_ready}/{len(universe)} deepResolved={deep_resolved}/{len(universe)} "
+                f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "f"weeklyDeepResolved={weekly_deep_resolved}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
@@ -2263,7 +2262,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.1] MULTI-SETUP AUTHORITY + ADAPTIVE-HISTORY FIXED active — legacy BUY/PRE authority disabled; "
+        "[v12.2.1] MULTI-SETUP AUTHORITY + ADAPTIVE HISTORY + CIRCUIT RACE active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
