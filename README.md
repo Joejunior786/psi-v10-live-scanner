@@ -1,15 +1,15 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.35 — Hard-Budget RiskMap + Integrity Sync**
+Current integrated production build: **Ψ-V11.0.5.36 — Hard-Budget RiskMap + Integrity Sync**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.35`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.36`
 - Pinpoint remains the sole BUY NOW authority.
-- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.35 build.
+- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.36 build.
 
 ## Live integrity rules
 
@@ -29,7 +29,7 @@ A BUY NOW candidate must still satisfy the full Pinpoint execution gate.
 
 A valid live Pinpoint trigger/stop/risk plan is accepted as the primary execution-risk plan. The separate RiskMap is retained as an additional structural/fallback plan source and no longer makes BUY mathematically impossible when its cache is temporarily unavailable.
 
-RiskMap refresh is hard-bounded: while Binance WS-API is healthy it uses two short WS attempts and fails fast; the two-host REST fallback is used only when WS-API is unavailable, and the 1m/5m/15m build returns at a fixed deadline without waiting for slow cancellation cleanup. A valid 5m result can still produce a structural plan when 1m/15m are delayed.
+RiskMap refresh is hard-bounded: while Binance WS-API is healthy it uses two short WS attempts and fails fast; the two-host REST fallback is used only when WS-API is unavailable, and the 1m/5m/15m build returns at a fixed internal deadline without waiting for slow cancellation cleanup. The outer scheduler no longer uses wait_for, preventing false timeouts when the event loop is busy. A valid 5m result can still produce a structural plan when 1m/15m are delayed.
 
 ## Scanner lanes
 
