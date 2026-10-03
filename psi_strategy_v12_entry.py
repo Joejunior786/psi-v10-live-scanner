@@ -817,30 +817,23 @@ async def _fetch_tf(sym, tf):
     if app.session is None:
         return False
     params = {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]}
-    hosts = (
-        "https://data-api.binance.vision",
-        "https://api.binance.com",
-        "https://api1.binance.com",
-    )
-    for host in hosts:
-        try:
-            async with app.session.get(
-                host + "/api/v3/klines",
-                params=params,
-                timeout=legacy.aiohttp.ClientTimeout(total=4.5, connect=1.5),
-            ) as resp:
-                if resp.status != 200:
-                    continue
-                rows = await resp.json()
-                if isinstance(rows, list) and len(rows) >= 55:
-                    _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
-                    _stats["fetch_ok"] += 1
-                    return True
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            continue
-    _stats["fetch_fail"] += 1
+    token = legacy._structure_request_ctx.set(True)
+    try:
+        rows = await legacy.resilient_api_get(
+            app.session,
+            "/api/v3/klines",
+            params,
+        )
+        if isinstance(rows, list) and len(rows) >= 55:
+            _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
+            _stats["fetch_ok"] += 1
+            return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _stats["fetch_fail"] += 1
+    finally:
+        legacy._structure_request_ctx.reset(token)
     return False
 
 
@@ -963,6 +956,15 @@ async def strategy_loop():
             chosen = _priority_symbols(universe)
             sem = asyncio.Semaphore(FETCH_CONCURRENCY)
             await asyncio.gather(*(refresh_symbol(s, sem) for s in chosen), return_exceptions=True)
+            ready_now = sum(
+                all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+                for s in chosen
+            )
+            print(
+                f"Ψ-V12 REFRESH cycle={_cycle + 1} selected={len(chosen)} mtfReady={ready_now}/{len(chosen)} "
+                f"fetchOK={_stats.get('fetch_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)}",
+                flush=True,
+            )
 
             # Re-evaluate every symbol with cached MTF data. This preserves fair
             # visibility while the rotating refresher keeps the cache current.
