@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.66-dual-wsapi-feed-mesh"
+VERSION="11.0.5.67-triple-wsapi-feed-mesh"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -112,6 +112,20 @@ _market_ws_gate=None
 _market_ws_pending={}
 _market_ws_id=0
 _market_ws_stats={
+    "connects":0,"reconnects":0,"requests":0,"ok":0,"fail":0,"timeouts":0,
+    "unavailable":0,"defer":0,"last_error":"",
+}
+
+# Dedicated micro WS-API transport. Discovery never shares this socket with
+# trade/depth requests, so expensive micro hydration cannot delay all-market
+# coverage.
+_micro_ws_conn=None
+_micro_ws_ready=None
+_micro_ws_send_lock=None
+_micro_ws_gate=None
+_micro_ws_pending={}
+_micro_ws_id=0
+_micro_ws_stats={
     "connects":0,"reconnects":0,"requests":0,"ok":0,"fail":0,"timeouts":0,
     "unavailable":0,"defer":0,"last_error":"",
 }
@@ -711,6 +725,141 @@ async def market_ws_api_request(method, params=None, wait_ready=2.0, response_ti
     finally:
         if rid is not None:
             _market_ws_pending.pop(rid,None)
+        if acquired:
+            gate.release()
+
+
+def _micro_ws_primitives():
+    global _micro_ws_ready,_micro_ws_send_lock,_micro_ws_gate
+    if _micro_ws_ready is None:
+        _micro_ws_ready=asyncio.Event()
+    if _micro_ws_send_lock is None:
+        _micro_ws_send_lock=asyncio.Lock()
+    if _micro_ws_gate is None:
+        _micro_ws_gate=asyncio.Semaphore(8)
+    return _micro_ws_ready,_micro_ws_send_lock,_micro_ws_gate
+
+
+def _micro_ws_fail_pending(reason):
+    for rid,fut in list(_micro_ws_pending.items()):
+        if fut is not None and not fut.done():
+            try:
+                fut.set_exception(RuntimeError(reason))
+            except Exception:
+                pass
+    _micro_ws_pending.clear()
+
+
+async def micro_ws_api_loop():
+    global _micro_ws_conn
+    ready,_,_=_micro_ws_primitives()
+    first=True
+    while getattr(app,"session",None) is None or getattr(app.session,"closed",True):
+        await asyncio.sleep(.25)
+
+    while True:
+        try:
+            async with app.session.ws_connect(
+                WS_API_URL,
+                heartbeat=25,
+                receive_timeout=90,
+                max_msg_size=0,
+            ) as ws:
+                _micro_ws_conn=ws
+                ready.set()
+                _micro_ws_stats["connects"]+=1
+                if not first:
+                    _micro_ws_stats["reconnects"]+=1
+                first=False
+                print(f"Ψ-MICRO-WS-API connected url={WS_API_URL}",flush=True)
+
+                async for msg in ws:
+                    if msg.type==aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload=json.loads(msg.data)
+                        except Exception:
+                            continue
+                        rid=str(payload.get("id") or "")
+                        if not rid:
+                            continue
+                        fut=_micro_ws_pending.pop(rid,None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(payload)
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.ERROR
+                    ):
+                        raise RuntimeError(f"Micro WS API closed type={msg.type}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _micro_ws_stats["fail"]+=1
+            _micro_ws_stats["last_error"]=f"{type(exc).__name__}: {exc}"
+            print(f"Ψ-MICRO-WS-API ERROR {type(exc).__name__}: {exc}",flush=True)
+        finally:
+            ready.clear()
+            _micro_ws_conn=None
+            _micro_ws_fail_pending("Micro WS API connection reset")
+        await asyncio.sleep(1.5)
+
+
+async def micro_ws_api_request(method, params=None, wait_ready=2.0, response_timeout=6.0, gate_timeout=1.5):
+    global _micro_ws_id
+    ready,send_lock,gate=_micro_ws_primitives()
+    try:
+        await asyncio.wait_for(ready.wait(),timeout=wait_ready)
+    except asyncio.TimeoutError:
+        _micro_ws_stats["unavailable"]+=1
+        return None
+
+    acquired=False;rid=None;fut=None
+    try:
+        try:
+            await asyncio.wait_for(gate.acquire(),timeout=gate_timeout)
+            acquired=True
+        except asyncio.TimeoutError:
+            _micro_ws_stats["defer"]+=1
+            return None
+
+        loop=asyncio.get_running_loop()
+        async with send_lock:
+            ws=_micro_ws_conn
+            if ws is None or ws.closed:
+                _micro_ws_stats["unavailable"]+=1
+                return None
+            _micro_ws_id+=1
+            rid=str(_micro_ws_id)
+            fut=loop.create_future()
+            _micro_ws_pending[rid]=fut
+            req={"id":rid,"method":str(method)}
+            if params:
+                req["params"]=dict(params)
+            await ws.send_json(req)
+            _micro_ws_stats["requests"]+=1
+
+        payload=await asyncio.wait_for(fut,timeout=response_timeout)
+        status=int(payload.get("status") or 0) if isinstance(payload,dict) else 0
+        if status==200:
+            _micro_ws_stats["ok"]+=1
+            return payload.get("result")
+
+        _micro_ws_stats["fail"]+=1
+        _micro_ws_stats["last_error"]=f"{method} status={status} payload={str(payload)[:220]}"
+        return None
+    except asyncio.TimeoutError:
+        _micro_ws_stats["timeouts"]+=1
+        _micro_ws_stats["fail"]+=1
+        _micro_ws_stats["last_error"]=f"{method} timeout"
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _micro_ws_stats["fail"]+=1
+        _micro_ws_stats["last_error"]=f"{method} {type(exc).__name__}: {exc}"
+        return None
+    finally:
+        if rid is not None:
+            _micro_ws_pending.pop(rid,None)
         if acquired:
             gate.release()
 
@@ -3422,15 +3571,19 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def ws_api_discovery_fallback_loop():
-    """Dedicated full-universe discovery lane on the market WS-API socket."""
-    mini_cursor=0
+    """Full-universe discovery on its own WS-API connection.
+
+    One all-symbol MINI snapshot gives every eligible symbol the same refresh
+    cadence. Weight is bounded: one request every 4s = ~1200 weight/minute,
+    comfortably below Binance's 6000/minute WS-API request-weight limit.
+    """
     last_log=0.0
     batch_ok=0
     batch_fail=0
 
     while True:
         try:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(4.0)
             ready,_,_=_market_ws_primitives()
             if not ready.is_set():
                 continue
@@ -3439,15 +3592,11 @@ async def ws_api_discovery_fallback_loop():
             if not universe:
                 continue
             universe_set=set(universe)
-            nuni=len(universe)
-            take=min(80,nuni)
-            batch=[universe[(mini_cursor+i)%nuni] for i in range(take)]
-            mini_cursor=(mini_cursor+take)%nuni
 
             rows=await market_ws_api_request(
                 "ticker.24hr",
-                {"symbols":batch,"type":"MINI"},
-                response_timeout=6.0,gate_timeout=.5,
+                {"type":"MINI","symbolStatus":"TRADING"},
+                response_timeout=8.0,gate_timeout=.5,
             )
             if isinstance(rows,dict):
                 rows=[rows]
@@ -3482,7 +3631,7 @@ async def ws_api_discovery_fallback_loop():
 
                 if disc_payload:
                     accepted=qualifier_core._ingest_discovery_payload(
-                        disc_payload,"WS_API_24HR_MINI_BATCH"
+                        disc_payload,"WS_API_24HR_MINI_ALL"
                     )
                     _ws_market_stats["ticker24_ok"]+=1
                     _ws_market_stats["last_ticker24_ms"]=int(stamp*1000)
@@ -3490,9 +3639,9 @@ async def ws_api_discovery_fallback_loop():
 
                 if filtered:
                     try:
-                        extrest.v71._mini_ingest(filtered,"WS_API_24HR_MINI_BATCH")
+                        extrest.v71._mini_ingest(filtered,"WS_API_24HR_MINI_ALL")
                         extrest.v71.radar_mini_connected=True
-                        extrest.v71.mini_source="WS_API_24HR_MINI_BATCH"
+                        extrest.v71.mini_source="WS_API_24HR_MINI_ALL"
                         extrest.sync_extension_from_ws()
                     except Exception as exc:
                         _ws_market_stats["last_error"]=f"mini_ingest {type(exc).__name__}: {exc}"
@@ -3503,14 +3652,14 @@ async def ws_api_discovery_fallback_loop():
                 batch_fail+=1
 
             now=time.time()
-            if now-last_log>=10.0:
+            if now-last_log>=8.0:
                 last_log=now
                 ready_count=sum(len(qualifier_core.disc.get(s,()))>=4 for s in universe)
                 print(
-                    f"Ψ-WSAPI DISCOVERY lane=LIVE accepted={accepted}/{len(batch)} "
-                    f"discReady={ready_count}/{len(universe)} batchOK={batch_ok} batchFail={batch_fail} "
-                    f"cursor={mini_cursor}/{len(universe)} marketWSreq={_market_ws_stats['requests']} "
-                    f"ok={_market_ws_stats['ok']} fail={_market_ws_stats['fail']} "
+                    f"Ψ-WSAPI DISCOVERY lane=LIVE accepted={accepted}/{len(universe)} "
+                    f"discReady={ready_count}/{len(universe)} snapshotsOK={batch_ok} snapshotsFail={batch_fail} "
+                    f"marketWSreq={_market_ws_stats['requests']} ok={_market_ws_stats['ok']} "
+                    f"fail={_market_ws_stats['fail']} timeouts={_market_ws_stats['timeouts']} "
                     f"lastErr={str(_market_ws_stats.get('last_error') or '-')[:140]}",
                     flush=True,
                 )
@@ -3534,7 +3683,7 @@ async def ws_api_micro_fallback_loop():
     while True:
         try:
             await asyncio.sleep(1.0)
-            ready,_,_=_market_ws_primitives()
+            ready,_,_=_micro_ws_primitives()
             if not ready.is_set():
                 continue
 
@@ -3571,7 +3720,7 @@ async def ws_api_micro_fallback_loop():
                 take=min(40,len(priority))
                 batch=[priority[(bbo_cursor+i)%len(priority)] for i in range(take)]
                 bbo_cursor=(bbo_cursor+take)%len(priority)
-                books=await market_ws_api_request(
+                books=await micro_ws_api_request(
                     "ticker.book",{"symbols":batch},
                     response_timeout=4.0,gate_timeout=.75,
                 )
@@ -3598,7 +3747,7 @@ async def ws_api_micro_fallback_loop():
 
             trade_targets=priority[:4]
             async def trade_one(sym):
-                rows=await market_ws_api_request(
+                rows=await micro_ws_api_request(
                     "trades.aggregate",{"symbol":sym,"limit":30},
                     response_timeout=5.5,gate_timeout=.75,
                 )
@@ -3650,7 +3799,7 @@ async def ws_api_micro_fallback_loop():
             if depth_targets and now-last_depth>=1.5:
                 last_depth=now
                 async def depth_one(sym):
-                    row=await market_ws_api_request(
+                    row=await micro_ws_api_request(
                         "depth",{"symbol":sym,"limit":20},
                         response_timeout=4.5,gate_timeout=.75,
                     )
@@ -3680,9 +3829,9 @@ async def ws_api_micro_fallback_loop():
                     f"books={_ws_market_stats['book_symbols']} bookAge={book_age:.1f}s "
                     f"tradeRows={_ws_market_stats['trade_rows']} tradeAge={trade_age:.1f}s "
                     f"depthOK={_ws_market_stats['depth_ok']} depthAge={depth_age:.1f}s "
-                    f"marketWSreq={_market_ws_stats['requests']} ok={_market_ws_stats['ok']} "
-                    f"fail={_market_ws_stats['fail']} timeouts={_market_ws_stats['timeouts']} "
-                    f"lastErr={str(_market_ws_stats.get('last_error') or '-')[:150]}",
+                    f"microWSreq={_micro_ws_stats['requests']} ok={_micro_ws_stats['ok']} "
+                    f"fail={_micro_ws_stats['fail']} timeouts={_micro_ws_stats['timeouts']} "
+                    f"lastErr={str(_micro_ws_stats.get('last_error') or '-')[:150]}",
                     flush=True,
                 )
 
@@ -3925,7 +4074,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.66] Ψ DUAL WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
+    print("[v11.0.5.67] Ψ TRIPLE WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
