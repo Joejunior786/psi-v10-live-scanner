@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.7-parallel-core-completion"
+VERSION = "12.1.8-syntax-fixed-merged-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1984,7 +1984,7 @@ async def strategy_loop():
                 f"{_stats.get('daily_race_miss',0)} dailyWS={_stats.get('daily_ws_win',0)} "
                 f"dailyREST={_stats.get('daily_rest_win',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
                 f"{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
-                f"fetchRestOK={_stats.get('fetch_rest_ok',0)}"",
+                f"fetchRestOK={_stats.get('fetch_rest_ok',0)}",
                 flush=True,
             )
 
