@@ -29,7 +29,7 @@ _structure_request_ctx = contextvars.ContextVar("psi_structure_request", default
 _structure_active = 0
 _rest_good_host = {}
 _rest_host_bad_until = {}
-_rest_stats = {"ok":0,"fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0}
+_rest_stats = {"ok":0,"fail":0,"attempt_fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0}
 
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
@@ -162,7 +162,7 @@ async def resilient_api_get(client, path, params=None):
             if lane=="klines" and not is_structure:
                 return []
             last_exc=exc
-            _rest_stats["fail"]+=1
+            _rest_stats["attempt_fail"]+=1
             _rest_stats["gate_timeout"]+=1
             _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
             _rest_host_bad_until[(route_key,host)]=time.time()+15.0
@@ -171,7 +171,7 @@ async def resilient_api_get(client, path, params=None):
             if lane=="klines" and not is_structure:
                 return []
             last_exc=exc
-            _rest_stats["fail"]+=1
+            _rest_stats["attempt_fail"]+=1
             _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
             _rest_host_bad_until[(route_key,host)]=time.time()+15.0
             await asyncio.sleep(.08)
@@ -181,6 +181,7 @@ async def resilient_api_get(client, path, params=None):
             if bg_acquired:
                 _rest_bg_kline_gate.release()
 
+    _rest_stats["fail"]+=1
     app.rest_connected=False
     app.last_error=f"REST_FAILOVER_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
     try:
@@ -621,7 +622,7 @@ async def structure_recovery_loop():
                 f"Ψ-RECOVERY STRUCTURE scope={total} fresh={fresh}/{total} ever={ever}/{total} "
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} failover={_rest_stats['failover']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} "
                 f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']}",
                 flush=True,
             )
@@ -764,7 +765,7 @@ async def watchdog_loop():
                 f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )
