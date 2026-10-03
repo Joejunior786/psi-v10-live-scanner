@@ -8,7 +8,7 @@ import app
 import qualifier_app as q
 import ignition10_app as v7
 
-VERSION = "10.7.1-ignition-feed"
+VERSION = "10.7.2-resilient-market-feed"
 SAMPLE_SECONDS = 1.0
 HISTORY_SAMPLES = 190
 TRIGGER_SCORE = 26.0
@@ -128,29 +128,57 @@ def hot(limit=q.HOT_COUNT):
 
 async def ticker_loop():
     global radar_ticker_connected
-    url=f"{app.WS_BASE}/ws/!ticker@arr"
+    host_cursor=0
     while True:
+        bases=[]
+        for raw in (
+            str(getattr(app,"WS_BASE","") or "").rstrip("/"),
+            "wss://data-stream.binance.vision",
+            "wss://stream.binance.com:443",
+            "wss://stream.binance.com:9443",
+        ):
+            if raw and raw not in bases:
+                bases.append(raw)
+        base_url=bases[host_cursor%len(bases)] if bases else "wss://data-stream.binance.vision"
+        url=f"{base_url}/ws/!ticker@arr"
         try:
-            async with app.session.ws_connect(url,heartbeat=30,receive_timeout=90,max_msg_size=0) as ws:
+            async with app.session.ws_connect(
+                url,heartbeat=25,receive_timeout=60,max_msg_size=0,timeout=12
+            ) as ws:
                 radar_ticker_connected=True
-                print("Ψ-V10.7.1 RADAR ticker WS connected (!ticker@arr)",flush=True)
+                print(f"Ψ-V10.7.2 RADAR ticker WS connected host={base_url} (!ticker@arr)",flush=True)
                 async for msg in ws:
                     if msg.type==aiohttp.WSMsgType.TEXT:
-                        try: payload=json.loads(msg.data)
-                        except json.JSONDecodeError: continue
-                        if not isinstance(payload,list): continue
+                        try:
+                            payload=json.loads(msg.data)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(payload,list):
+                            continue
                         for x in payload:
-                            if not isinstance(x,dict): continue
+                            if not isinstance(x,dict):
+                                continue
                             sym=x.get("s","")
-                            push(sym,app.safe_float(x.get("c")),app.safe_float(x.get("q")),app.safe_float(x.get("n")),
-                                 app.safe_float(x.get("b")),app.safe_float(x.get("a")),"ticker")
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR): break
-        except asyncio.CancelledError: raise
+                            push(
+                                sym,app.safe_float(x.get("c")),app.safe_float(x.get("q")),
+                                app.safe_float(x.get("n")),app.safe_float(x.get("b")),
+                                app.safe_float(x.get("a")),"ticker"
+                            )
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError(f"ticker_websocket_{msg.type.name.lower()}")
+                raise RuntimeError("ticker_websocket_stream_ended")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            app.last_error=f"RADAR_TICKER: {type(e).__name__}: {e}"; print(app.last_error,flush=True)
-        finally: radar_ticker_connected=False
-        await asyncio.sleep(2)
+            app.last_error=f"RADAR_TICKER: {type(e).__name__}: {e}"
+            print(f"{app.last_error} host={base_url}",flush=True)
+            host_cursor=(host_cursor+1)%max(1,len(bases))
+        finally:
+            radar_ticker_connected=False
+        await asyncio.sleep(1)
 
+
+def _mini_ingest
 
 def _mini_ingest(payload, source):
     global mini_last_message_ts,mini_last_count,mini_source
@@ -184,70 +212,165 @@ def _mini_ingest(payload, source):
         mini_source=source
     return accepted
 
-async def _mini_rest_snapshot():
-    global radar_mini_connected,mini_rest_ok,mini_rest_fail,mini_source
+async def _radar_book_rest_snapshot():
+    """Full-universe price/spread fallback using Binance bookTicker.
+
+    This is discovery telemetry only. No synthetic volume or order flow is
+    created, so it cannot by itself grant PRE/BUY authority.
+    """
     if getattr(app,"session",None) is None:
         return 0
-    symbols=list(getattr(q,"universe",[]) or [])
-    if not symbols:
-        return 0
     hosts=[
-        "https://api.binance.com",
         "https://data-api.binance.vision",
+        "https://api.binance.com",
         "https://api1.binance.com",
         "https://api2.binance.com",
     ]
-    total=0
-    # Small symbol batches avoid the oversized all-market 24h response that
-    # times out on Railway while preserving real Binance OHLC/24h telemetry.
-    for offset in range(0,len(symbols),60):
-        batch=symbols[offset:offset+60]
-        payload=None
-        last_exc=None
-        for host in hosts:
-            try:
-                async with app.session.get(
-                    f"{host}/api/v3/ticker/24hr",
-                    params={"symbols":json.dumps(batch,separators=(",",":")),"type":"MINI"},
-                    timeout=aiohttp.ClientTimeout(total=7,connect=2),
-                ) as resp:
-                    body=await resp.text()
-                    if resp.status!=200:
-                        raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
-                    payload=json.loads(body)
-                    break
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                last_exc=exc
-                continue
-        if not isinstance(payload,list):
-            mini_rest_fail+=1
-            print(f"RADAR_MINI_REST_BATCH: {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",flush=True)
+    last_exc=None
+    for host in hosts:
+        try:
+            async with app.session.get(
+                f"{host}/api/v3/ticker/bookTicker",
+                timeout=aiohttp.ClientTimeout(total=6,connect=2),
+            ) as resp:
+                body=await resp.text()
+                if resp.status!=200:
+                    raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
+                rows=json.loads(body)
+                if not isinstance(rows,list):
+                    raise RuntimeError("bookTicker payload is not a list")
+                accepted=0
+                for x in rows:
+                    if not isinstance(x,dict):
+                        continue
+                    sym=str(x.get("symbol") or "")
+                    if sym not in q.universe_set:
+                        continue
+                    bid=app.safe_float(x.get("bidPrice"))
+                    ask=app.safe_float(x.get("askPrice"))
+                    if bid<=0 or ask<=0:
+                        continue
+                    mid=(bid+ask)/2.0
+                    meta=app.symbol_meta.get(sym,{}) if isinstance(getattr(app,"symbol_meta",None),dict) else {}
+                    push(
+                        sym,mid,app.safe_float(meta.get("quote_volume_24h")),None,
+                        bid,ask,"book_rest"
+                    )
+                    accepted+=1
+                if accepted:
+                    print(
+                        f"Ψ-V10.7.2 RADAR book REST fallback live "
+                        f"symbols={accepted} host={host}",
+                        flush=True,
+                    )
+                return accepted
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc=exc
             continue
-        total+=_mini_ingest(payload,"REST_24HR_MINI_BATCH")
-    if total:
+    print(
+        f"RADAR_BOOK_REST: {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",
+        flush=True,
+    )
+    return 0
+
+
+async def _mini_rest_snapshot():
+    """Bounded 24h telemetry fallback for active candidates.
+
+    Avoid the heavy all-symbol 24h response that times out on this runtime.
+    """
+    global radar_mini_connected,mini_rest_ok,mini_rest_fail,mini_source
+    if getattr(app,"session",None) is None:
+        return 0
+
+    universe_set=set(getattr(q,"universe_set",set()) or set())
+    priority=[];seen=set()
+    def add(sym):
+        sym=str(sym or "")
+        if sym and sym in universe_set and sym not in seen:
+            seen.add(sym);priority.append(sym)
+
+    for sym in ("BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT"):
+        add(sym)
+    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+        add(sym)
+    try:
+        for _,sym in q.hot(12):
+            add(sym)
+    except Exception:
+        pass
+    priority=priority[:16]
+    if not priority:
+        return 0
+
+    hosts=[
+        "https://data-api.binance.vision",
+        "https://api.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+    ]
+    sem=asyncio.Semaphore(4)
+
+    async def one(sym):
+        async with sem:
+            offset=sum(ord(ch) for ch in sym)%len(hosts)
+            ordered=hosts[offset:]+hosts[:offset]
+            for host in ordered:
+                try:
+                    async with app.session.get(
+                        f"{host}/api/v3/ticker/24hr",
+                        params={"symbol":sym,"type":"MINI"},
+                        timeout=aiohttp.ClientTimeout(total=4,connect=1.5),
+                    ) as resp:
+                        body=await resp.text()
+                        if resp.status!=200:
+                            raise RuntimeError(f"{host} HTTP {resp.status}: {body[:100]}")
+                        row=json.loads(body)
+                        if isinstance(row,dict):
+                            return row
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+        return None
+
+    results=await asyncio.gather(*(one(s) for s in priority),return_exceptions=True)
+    rows=[x for x in results if isinstance(x,dict)]
+    n=_mini_ingest(rows,"REST_24HR_PARTIAL") if rows else 0
+    if n:
         radar_mini_connected=True
-        mini_source="REST_24HR_MINI_BATCH"
         mini_rest_ok+=1
-        print(f"Ψ-V10.7.1 RADAR mini REST fallback live symbols={total}/{len(symbols)} source=BATCHED_MINI",flush=True)
-    else:
-        mini_rest_fail+=1
-    return total
+        print(
+            f"Ψ-V10.7.2 RADAR mini REST fallback live "
+            f"symbols={n}/{len(priority)} mode=BOUNDED_SINGLE",
+            flush=True,
+        )
+        return n
+    mini_rest_fail+=1
+    print(
+        f"RADAR_MINI_REST: no live 24h rows priority={len(priority)}",
+        flush=True,
+    )
+    return 0
 
 
 async def mini_rest_loop():
     while True:
         try:
-            await asyncio.sleep(5)
-            stale=(now()-mini_last_message_ts>8.0) or not radar_mini_connected
-            if stale:
+            await asyncio.sleep(3)
+            ws_stale=(now()-mini_last_message_ts>8.0) or not radar_mini_connected
+            if ws_stale:
+                await _radar_book_rest_snapshot()
                 await _mini_rest_snapshot()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"RADAR_MINI_REST_LOOP: {type(e).__name__}: {e}",flush=True)
 
+
+async def mini_loop():
 async def mini_loop():
     global radar_mini_connected,mini_source
     host_cursor=0
