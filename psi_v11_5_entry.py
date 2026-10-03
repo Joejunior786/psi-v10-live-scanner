@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.61-top-level-feed-failover"
+VERSION="11.0.5.62-resilient-feed-mesh"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -2697,6 +2697,16 @@ async def _watchdog_refresh_extension():
     n=extrest.sync_extension_from_ws()
     if n<=0:
         try:
+            fallback=getattr(getattr(extrest,"v71",None),"_mini_rest_snapshot",None)
+            if callable(fallback):
+                await fallback()
+            n=extrest.sync_extension_from_ws()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            n=0
+    if n<=0:
+        try:
             status=extrest._rest_status("BTCUSDT")
         except Exception:
             status={}
@@ -3055,7 +3065,19 @@ async def watchdog_loop():
             )
             rest_recent_ok=(_rest_last_fail<=0 or now-_rest_last_fail>60.0)
             continuity_ok=(startup_age<=WATCHDOG_STARTUP_GRACE_S or pool>0)
-            shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
+            rest_book_age=(now*1000-f(tape.tape_stats.get("rest_last_book_ms"),0))/1000.0 if f(tape.tape_stats.get("rest_last_book_ms"),0)>0 else 999999.0
+            rest_trade_age=(now*1000-f(tape.tape_stats.get("rest_last_trade_ms"),0))/1000.0 if f(tape.tape_stats.get("rest_last_trade_ms"),0)>0 else 999999.0
+            rest_tape_live=(
+                bool(tape.tape_stats.get("rest_fallback_active"))
+                and rest_book_age<=5.0
+                and rest_trade_age<=15.0
+            )
+            shard_ok=(
+                pool==0
+                or shards==tape.SHARDS
+                or rest_tape_live
+                or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S
+            )
 
             live_micro=0
             for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
@@ -3102,7 +3124,7 @@ async def watchdog_loop():
                 f"structureFreshExec={exec_fresh}/{exec_total} structureEverExec={exec_ever}/{exec_total} "
                 f"structureFreshScope={fresh_cov}/{total} structureEverScope={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} liveMicro={live_micro}/{pool} "
-                f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
+                f"monsterShards={shards}/{tape.SHARDS} restTape={'LIVE' if rest_tape_live else 'STALE'} restBookAge={rest_book_age:.1f}s restTradeAge={rest_trade_age:.1f}s extAge={ext_age:.1f}s "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wdRescueOK={recovery_stats['rescue_ok']} wdRescueFail={recovery_stats['rescue_fail']} wdStaleOK={recovery_stats['rescue_stale_ok']} wdStaleFail={recovery_stats['rescue_stale_fail']} wdRouteReset={recovery_stats['route_resets']} wdRestOK={_structure_tf_stats['watchdog_rest_ok']} wdRestFail={_structure_tf_stats['watchdog_rest_fail']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
@@ -3133,13 +3155,12 @@ async def independent_market_feed_fallback_loop():
             disc_age=(now-f(getattr(qualifier_core,"disc_event_ms",0),0)/1000.0) if f(getattr(qualifier_core,"disc_event_ms",0),0)>0 else 999999.0
             if disc_age>4.0:
                 try:
-                    payload=await tape._direct_rest_json("/api/v3/ticker/bookTicker")
-                    accepted=qualifier_core._ingest_discovery_payload(payload,"REST_BOOK_TICKER_TOPLEVEL")
+                    accepted=await qualifier_core._discovery_rest_snapshot()
                     if accepted and now-last_disc_log>10:
                         last_disc_log=now
                         print(
                             f"Ψ-TOPLEVEL DISCOVERY FALLBACK live accepted={accepted}/{len(getattr(qualifier_core,'universe',[]) or [])} "
-                            f"source=BINANCE_REST_BOOK_TICKER",
+                            f"source={getattr(qualifier_core,'disc_source','BINANCE_REST')}",
                             flush=True,
                         )
                 except Exception as exc:
@@ -3213,7 +3234,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.61] Ψ TOP-LEVEL FEED-FAILOVER + NON-BLOCKING EXECUTION-SCOPE WATCHDOG active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.62] Ψ RESILIENT FEED MESH + NON-BLOCKING EXECUTION-SCOPE WATCHDOG active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), independent_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
