@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.11-fastcore-isolated-ws"
+VERSION = "12.1.11-single-bounded-fast-ws"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1459,27 +1459,23 @@ async def _fetch_tf(sym, tf, deep=False):
                 merged = None
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
+            _stats[f"v11_{tf}_ok"] += 1
 
-    # 1) Primary: isolated V12 Binance WS. This exact lane previously returned
-    # 12/12 successful FAST packets with zero misses.
+    # 1) FAST core hydration uses exactly one bounded transport: the isolated
+    # V12 Binance WS-API socket. v12_ws_klines already owns ready/gate/send/
+    # response timeouts, so do NOT wrap it in another asyncio.wait_for.
     if not isinstance(rows, list) or len(rows) < need:
         try:
-            rows = await asyncio.wait_for(
-                v12_ws_klines(
-                    sym,
-                    tf,
-                    limit,
-                    shard=0,
-                    response_timeout=4.8 if deep else 2.8,
-                    ready_timeout=0.55,
-                    gate_timeout=0.70,
-                    send_timeout=0.60,
-                ),
-                timeout=6.5 if deep else 4.4,
+            rows = await v12_ws_klines(
+                sym,
+                tf,
+                limit,
+                shard=0,
+                response_timeout=5.0 if deep else 4.8,
+                ready_timeout=0.8,
+                gate_timeout=1.0,
+                send_timeout=0.9,
             )
-        except asyncio.TimeoutError:
-            _stats["dedicated_stage_timeout"] += 1
-            rows = None
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1493,17 +1489,17 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats[f"dedicated_{tf}_miss"] += 1
             rows = None
 
-    # 2) Shared-WS fallback is DEEP-only. FAST_CORE stays entirely on the
-    # isolated V12 socket; a miss returns quickly so fair rotation advances.
+    # 2) Only DEEP history may use fallbacks. FAST misses return immediately so
+    # the scheduler never pins a worker behind multiple transports.
     if rows is None and deep:
         try:
             rows = await legacy.binance_ws_api_klines(
                 sym,
                 tf,
                 limit,
-                wait_ready=0.65,
-                response_timeout=3.5 if deep else 2.0,
-                gate_timeout=0.50,
+                wait_ready=0.8,
+                response_timeout=4.0,
+                gate_timeout=0.7,
             )
         except asyncio.CancelledError:
             raise
@@ -1516,8 +1512,6 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["shared_ws_fallback_miss"] += 1
             rows = None
 
-    # 3) REST is DEEP-only. FAST misses return immediately so fair rotation
-    # cannot be pinned by unreachable REST hosts.
     if rows is None and deep:
         try:
             rows = await v12_rest_klines(sym, tf, limit)
@@ -1525,6 +1519,7 @@ async def _fetch_tf(sym, tf, deep=False):
             raise
         except Exception:
             rows = None
+
         if isinstance(rows, list) and len(rows) >= need:
             _stats["fetch_rest_ok"] += 1
         else:
@@ -2121,7 +2116,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.11] MULTI-SETUP AUTHORITY + FASTCORE ISOLATED WS active — legacy BUY/PRE authority disabled; "
+        "[v12.1.11] MULTI-SETUP AUTHORITY + SINGLE-BOUNDED FAST WS active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
