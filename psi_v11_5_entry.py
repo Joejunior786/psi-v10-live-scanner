@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.16-breakout-structural-intelligence"
+VERSION="11.0.5.17-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -240,10 +240,87 @@ app.api_get = resilient_api_get
 _original_load_klines = app.load_klines
 _structure_tf_cache = {}
 _structure_symbol_gates = {}
+_structure_raw_cache = {}
+_structure_raw_dirty = False
+STRUCTURE_RAW_CACHE_PATH = os.environ.get(
+    "PSI_STRUCTURE_RAW_CACHE_PATH",
+    "/data/psi_v11_structure_raw.json" if os.path.isdir("/data") else "/app/psi_v11_structure_raw.json",
+)
 STRUCTURE_TF_CACHE_S = 180.0
 STRUCTURE_TF_RETRY_DELAY_S = 0.12
 STRUCTURE_TF_ATTEMPTS = 3
-_structure_tf_stats = {"cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0}
+STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
+_structure_tf_stats = {
+    "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
+    "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,
+}
+
+def _raw_key(symbol, interval, limit):
+    return f"{symbol}|{interval}|{int(limit)}"
+
+def _interval_ms(interval):
+    return {"15m":900000,"1h":3600000,"4h":14400000}.get(str(interval),0)
+
+def _minimum_structure_rows(interval):
+    return 205 if str(interval) in {"1h","4h"} else 22
+
+def _bootstrap_structure_limit(interval, requested):
+    if str(interval) in {"1h","4h"} and int(requested)>=205:
+        return min(int(requested),220)
+    if str(interval)=="15m" and int(requested)>=22:
+        return min(int(requested),40)
+    return int(requested)
+
+def _load_structure_raw_cache():
+    global _structure_raw_cache
+    try:
+        if not os.path.exists(STRUCTURE_RAW_CACHE_PATH):
+            return 0
+        with open(STRUCTURE_RAW_CACHE_PATH,"r",encoding="utf-8") as fh:
+            payload=json.load(fh)
+        rows=payload.get("rows") or {}
+        clean={}
+        for key,entry in rows.items():
+            if not isinstance(entry,dict):
+                continue
+            data=entry.get("rows")
+            if not isinstance(data,list) or not data:
+                continue
+            clean[str(key)]={"rows":data,"saved":float(entry.get("saved") or 0.0)}
+        _structure_raw_cache=clean
+        _structure_tf_stats["raw_load"]+=len(clean)
+        print(f"Ψ-RECOVERY RAW_CACHE_LOAD entries={len(clean)} path={STRUCTURE_RAW_CACHE_PATH}",flush=True)
+        return len(clean)
+    except Exception as exc:
+        print(f"Ψ-RECOVERY RAW_CACHE_LOAD_ERROR {type(exc).__name__}: {exc}",flush=True)
+        return 0
+
+def _save_structure_raw_cache():
+    global _structure_raw_dirty
+    if not _structure_raw_dirty:
+        return 0
+    try:
+        tmp=STRUCTURE_RAW_CACHE_PATH+".tmp"
+        payload={"version":VERSION,"saved_at":time.time(),"rows":_structure_raw_cache}
+        with open(tmp,"w",encoding="utf-8") as fh:
+            json.dump(payload,fh,separators=(",",":"))
+        os.replace(tmp,STRUCTURE_RAW_CACHE_PATH)
+        _structure_tf_stats["raw_save"]+=1
+        _structure_raw_dirty=False
+        return len(_structure_raw_cache)
+    except Exception as exc:
+        print(f"Ψ-RECOVERY RAW_CACHE_SAVE_ERROR {type(exc).__name__}: {exc}",flush=True)
+        return 0
+
+def _merge_kline_rows(seed, fresh, keep):
+    merged={}
+    for row in list(seed or [])+list(fresh or []):
+        try:
+            if row and len(row)>=7:
+                merged[int(row[0])]=row
+        except Exception:
+            continue
+    return [merged[k] for k in sorted(merged.keys())][-int(keep):]
 
 def _structure_symbol_gate(symbol):
     key=str(symbol)
@@ -254,45 +331,90 @@ def _structure_symbol_gate(symbol):
     return gate
 
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
+    global _structure_raw_dirty
     if not _structure_request_ctx.get():
         return await _original_load_klines(client, symbol, interval, limit)
 
-    key=(str(symbol),str(interval),int(limit))
+    symbol=str(symbol); interval=str(interval); limit=int(limit)
+    key=(symbol,interval,limit)
     now=time.time()
     cached=_structure_tf_cache.get(key)
     if cached and now-float(cached[0])<=STRUCTURE_TF_CACHE_S:
         _structure_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    # app.load_structure launches 1h/4h/15m together. Serialize those siblings
-    # per symbol so a 3-symbol recovery batch creates at most 3 structure REST
-    # requests at once instead of 9.
+    raw_key=_raw_key(symbol,interval,limit)
+    raw_entry=_structure_raw_cache.get(raw_key) or {}
+    seed=raw_entry.get("rows") if isinstance(raw_entry,dict) else None
+    if isinstance(seed,list) and seed:
+        _structure_tf_stats["raw_hit"]+=1
+
     async with _structure_symbol_gate(symbol):
         cached=_structure_tf_cache.get(key)
         if cached and time.time()-float(cached[0])<=STRUCTURE_TF_CACHE_S:
             _structure_tf_stats["cache_hit"]+=1
             return cached[1]
 
+        raw_entry=_structure_raw_cache.get(raw_key) or {}
+        seed=raw_entry.get("rows") if isinstance(raw_entry,dict) else None
+        request_limit=_bootstrap_structure_limit(interval,limit)
+        incremental=False
+
+        if isinstance(seed,list) and len(seed)>=_minimum_structure_rows(interval):
+            try:
+                last_open=int(seed[-1][0])
+            except Exception:
+                last_open=0
+            step=_interval_ms(interval)
+            bars_behind=max(0,int(math.ceil(max(0.0,(time.time()*1000-last_open))/step))) if step>0 and last_open>0 else STRUCTURE_RAW_MAX_INCREMENTAL_BARS+1
+            if bars_behind<=STRUCTURE_RAW_MAX_INCREMENTAL_BARS:
+                request_limit=max(3,min(limit,bars_behind+2))
+                incremental=True
+
+        rows=None
         for attempt in range(STRUCTURE_TF_ATTEMPTS):
-            rows=await _original_load_klines(client, symbol, interval, limit)
+            rows=await _original_load_klines(client, symbol, interval, request_limit)
             if isinstance(rows,list) and rows:
-                _structure_tf_cache[key]=(time.time(),rows)
                 if attempt==0:
                     _structure_tf_stats["fetch_ok"]+=1
                 else:
                     _structure_tf_stats["retry_ok"]+=1
-                return rows
+                break
             if attempt+1<STRUCTURE_TF_ATTEMPTS:
                 await asyncio.sleep(STRUCTURE_TF_RETRY_DELAY_S)
 
-    _structure_tf_stats["fail"]+=1
-    print(
-        f"Ψ-STRUCTURE-TF FAIL {symbol} tf={interval} limit={limit} "
-        f"cacheHits={_structure_tf_stats['cache_hit']} fetchOK={_structure_tf_stats['fetch_ok']} "
-        f"retryOK={_structure_tf_stats['retry_ok']} fail={_structure_tf_stats['fail']}",
-        flush=True,
-    )
-    return None
+        if not isinstance(rows,list) or not rows:
+            _structure_tf_stats["fail"]+=1
+            print(
+                f"Ψ-STRUCTURE-TF FAIL {symbol} tf={interval} req={request_limit}/{limit} "
+                f"incremental={int(incremental)} cacheHits={_structure_tf_stats['cache_hit']} "
+                f"rawHits={_structure_tf_stats['raw_hit']} retryOK={_structure_tf_stats['retry_ok']} "
+                f"fail={_structure_tf_stats['fail']}",
+                flush=True,
+            )
+            return None
+
+        merged=_merge_kline_rows(seed if incremental else [],rows,limit)
+        if len(merged)<_minimum_structure_rows(interval):
+            # An old/incomplete persisted series is never promoted as live structure.
+            if incremental:
+                full_limit=_bootstrap_structure_limit(interval,limit)
+                full=await _original_load_klines(client,symbol,interval,full_limit)
+                if isinstance(full,list) and full:
+                    merged=_merge_kline_rows([],full,limit)
+                    incremental=False
+            if len(merged)<_minimum_structure_rows(interval):
+                _structure_tf_stats["fail"]+=1
+                return None
+
+        _structure_tf_cache[key]=(time.time(),merged)
+        _structure_raw_cache[raw_key]={"rows":merged,"saved":time.time()}
+        _structure_raw_dirty=True
+        if incremental:
+            _structure_tf_stats["incremental_ok"]+=1
+        else:
+            _structure_tf_stats["full_seed"]+=1
+        return merged
 
 app.load_klines = _structure_resilient_load_klines
 
@@ -775,6 +897,7 @@ async def structure_cache_loop():
     while True:
         await asyncio.sleep(20.0)
         _save_structure_cache()
+        _save_structure_raw_cache()
 
 # Production watchdog: detects data-pipeline starvation and performs bounded,
 # fail-closed recovery actions. It never changes signal thresholds or BUY authority.
@@ -861,6 +984,7 @@ async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
         await asyncio.sleep(.5)
     _load_structure_cache()
+    _load_structure_raw_cache()
 
     while True:
         scope=_recovery_scope()
@@ -890,7 +1014,9 @@ async def structure_recovery_loop():
                 f"batch={len(batch)} batchOK={sum(bool(x) for x in results)} batchFail={sum(not bool(x) for x in results)} "
                 f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"structHosts={sorted({str(_rest_good_host.get('structure_klines:'+s,'-')).replace('https://','') for s in batch})} "
-                f"tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
+                f"tfCache={_structure_tf_stats['cache_hit']} rawHit={_structure_tf_stats['raw_hit']} "
+                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} "
+                f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
             )
 
@@ -911,7 +1037,10 @@ async def structure_recovery_loop():
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
-                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} structRoutes={sum(1 for k in _rest_good_host if str(k).startswith('structure_klines:'))}",
+                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} "
+                f"rawLoad={_structure_tf_stats['raw_load']} rawSave={_structure_tf_stats['raw_save']} "
+                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} "
+                f"structRoutes={sum(1 for k in _rest_good_host if str(k).startswith('structure_klines:'))}",
                 flush=True,
             )
         await asyncio.sleep(RECOVERY_CYCLE_SLEEP_S)
