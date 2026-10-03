@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.11-breakout-structural-intelligence"
+VERSION="11.0.5.12-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -220,6 +220,53 @@ async def resilient_api_get(client, path, params=None):
 
 # Replace the shared module-level REST function before any scanner loop starts.
 app.api_get = resilient_api_get
+
+# Structure-timeframe resilience. A structure build needs 1h + 4h + 15m.
+# Cache only successful short-lived payloads, so if one sibling timeframe fails
+# the next retry reuses the verified siblings and refetches only the missing one.
+_original_load_klines = app.load_klines
+_structure_tf_cache = {}
+STRUCTURE_TF_CACHE_S = 30.0
+STRUCTURE_TF_RETRY_DELAY_S = 0.20
+_structure_tf_stats = {"cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0}
+
+async def _structure_resilient_load_klines(client, symbol, interval, limit):
+    if not _structure_request_ctx.get():
+        return await _original_load_klines(client, symbol, interval, limit)
+
+    key=(str(symbol),str(interval),int(limit))
+    now=time.time()
+    cached=_structure_tf_cache.get(key)
+    if cached and now-float(cached[0])<=STRUCTURE_TF_CACHE_S:
+        _structure_tf_stats["cache_hit"]+=1
+        return cached[1]
+
+    rows=await _original_load_klines(client, symbol, interval, limit)
+    if isinstance(rows,list) and rows:
+        _structure_tf_cache[key]=(time.time(),rows)
+        _structure_tf_stats["fetch_ok"]+=1
+        return rows
+
+    # The first resilient route attempt marks failed hosts temporarily bad.
+    # A second call therefore uses the remaining healthy endpoints instead of
+    # repeating already-failed routes.
+    await asyncio.sleep(STRUCTURE_TF_RETRY_DELAY_S)
+    rows=await _original_load_klines(client, symbol, interval, limit)
+    if isinstance(rows,list) and rows:
+        _structure_tf_cache[key]=(time.time(),rows)
+        _structure_tf_stats["retry_ok"]+=1
+        return rows
+
+    _structure_tf_stats["fail"]+=1
+    print(
+        f"Ψ-STRUCTURE-TF FAIL {symbol} tf={interval} limit={limit} "
+        f"cacheHits={_structure_tf_stats['cache_hit']} fetchOK={_structure_tf_stats['fetch_ok']} "
+        f"retryOK={_structure_tf_stats['retry_ok']} fail={_structure_tf_stats['fail']}",
+        flush=True,
+    )
+    return None
+
+app.load_klines = _structure_resilient_load_klines
 
 async def _risk_load_klines(client, symbol, interval, limit):
     token = _risk_plan_request_ctx.set(True)
@@ -583,7 +630,7 @@ RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
-RECOVERY_FAIL_COOLDOWN_S = 30.0
+RECOVERY_FAIL_COOLDOWN_S = 18.0
 RECOVERY_CYCLE_SLEEP_S = 1.5
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
@@ -833,7 +880,7 @@ async def structure_recovery_loop():
                 f"Ψ-RECOVERY STRUCTURE scope={total} fresh={fresh}/{total} ever={ever}/{total} "
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']}",
                 flush=True,
             )
