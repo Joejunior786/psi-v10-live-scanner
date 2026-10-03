@@ -43,7 +43,7 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 8))
+FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 6))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
 TF_LIMIT = {"1h": 260, "4h": 260, "1d": 260, "1w": 260}
@@ -817,23 +817,48 @@ async def _fetch_tf(sym, tf):
     if app.session is None:
         return False
     params = {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]}
-    token = legacy._risk_plan_request_ctx.set(True)
+    rows = None
+
+    # Primary: existing proven Binance Spot WS-API kline RPC.
     try:
-        rows = await legacy.resilient_api_get(
-            app.session,
-            "/api/v3/klines",
-            params,
+        rows = await legacy.binance_ws_api_klines(
+            sym, tf, TF_LIMIT[tf],
+            wait_ready=1.5,
+            response_timeout=4.0,
+            gate_timeout=1.2,
         )
         if isinstance(rows, list) and len(rows) >= 55:
-            _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
-            _stats["fetch_ok"] += 1
-            return True
+            _stats["fetch_ws_ok"] += 1
     except asyncio.CancelledError:
         raise
     except Exception:
-        _stats["fetch_fail"] += 1
-    finally:
-        legacy._risk_plan_request_ctx.reset(token)
+        rows = None
+
+    # Fallback: multi-host REST failover lane. This is deliberately the
+    # risk/priority lane, never the one-at-a-time background candle lane.
+    if not isinstance(rows, list) or len(rows) < 55:
+        token = legacy._risk_plan_request_ctx.set(True)
+        try:
+            rows = await legacy.resilient_api_get(
+                app.session,
+                "/api/v3/klines",
+                params,
+            )
+            if isinstance(rows, list) and len(rows) >= 55:
+                _stats["fetch_rest_ok"] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+        finally:
+            legacy._risk_plan_request_ctx.reset(token)
+
+    if isinstance(rows, list) and len(rows) >= 55:
+        _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
+        _stats["fetch_ok"] += 1
+        return True
+
+    _stats["fetch_fail"] += 1
     return False
 
 
