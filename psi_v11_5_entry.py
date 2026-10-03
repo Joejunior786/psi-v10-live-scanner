@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.19-breakout-structural-intelligence"
+VERSION="11.0.5.20-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -872,12 +872,14 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 4
+RECOVERY_BATCH = 3
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 285.0
-recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
+recovery_stats = {"passes":0,"ok":0,"fail":0,"fast_ok":0,"fast_fail":0,"seed_ok":0,"seed_fail":0,"seed_cycles":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
+_recovery_inflight = set()
 RECOVERY_FAIL_COOLDOWN_S = 20.0
+COLD_SEED_SLEEP_S = 2.0
 RECOVERY_CYCLE_SLEEP_S = 1.0
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
@@ -891,7 +893,8 @@ def _execution_structure_batch_symbols():
     now=time.time()
     stale=[
         s for s in scope
-        if _structure_age_recovery(s)>RECOVERY_STALE_S
+        if _raw_seed_count(s)>=3
+        and _structure_age_recovery(s)>RECOVERY_STALE_S
         and _recovery_retry_after.get(s,0)<=now
     ]
     return stale[:RECOVERY_BATCH]
@@ -1041,15 +1044,20 @@ def _recovery_symbols():
     for s in list(getattr(q,"universe",[]) or []): add(s)
     return out
 
-async def _hydrate_one(sym):
+async def _hydrate_one(sym, lane="FAST"):
     global _structure_cache_dirty
+    sym=str(sym)
+    if sym in _recovery_inflight:
+        return None
+    _recovery_inflight.add(sym)
     try:
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
+            timeout_s=20.0 if lane=="FAST" else 30.0
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=timeout_s)
         finally:
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
@@ -1067,15 +1075,19 @@ async def _hydrate_one(sym):
         _recovery_retry_after.pop(sym,None)
         _structure_cache_dirty=True
         recovery_stats["ok"]+=1
+        recovery_stats["fast_ok" if lane=="FAST" else "seed_ok"]+=1
         return True
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         _recovery_retry_after[sym]=time.time()+RECOVERY_FAIL_COOLDOWN_S
         recovery_stats["fail"]+=1
-        if recovery_stats["fail"]<=30:
-            print(f"Ψ-RECOVERY STRUCTURE_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
+        recovery_stats["fast_fail" if lane=="FAST" else "seed_fail"]+=1
+        if recovery_stats["fail"]<=40:
+            print(f"Ψ-RECOVERY {lane}_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
         return False
+    finally:
+        _recovery_inflight.discard(sym)
 
 async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
@@ -1095,13 +1107,14 @@ async def structure_recovery_loop():
         ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
         targets=[
             s for s in scope
-            if _structure_age_recovery(s)>RECOVERY_STALE_S
+            if _raw_seed_count(s)>=3
+            and _structure_age_recovery(s)>RECOVERY_STALE_S
             and _recovery_retry_after.get(s,0)<=now
+            and s not in _recovery_inflight
         ]
         scope_pos={s:i for i,s in enumerate(scope)}
         targets.sort(
             key=lambda s:(
-                -_raw_seed_count(s),
                 0 if _structure_age_recovery(s)<999000 else 1,
                 scope_pos.get(s,9999),
             )
@@ -1110,12 +1123,12 @@ async def structure_recovery_loop():
         if targets:
             batch=targets[:RECOVERY_BATCH]
             batch_started=time.time()
-            results=await asyncio.gather(*[_hydrate_one(s) for s in batch])
+            results=await asyncio.gather(*[_hydrate_one(s,"FAST") for s in batch])
             batch_s=time.time()-batch_started
             fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
             ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
             print(
-                f"Ψ-RECOVERY BATCH fresh={fresh}/{total} ever={ever}/{total} "
+                f"Ψ-RECOVERY FAST_BATCH fresh={fresh}/{total} ever={ever}/{total} "
                 f"batch={len(batch)} batchOK={sum(bool(x) for x in results)} batchFail={sum(not bool(x) for x in results)} "
                 f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"structHosts={sorted({str(_rest_good_host.get('structure_klines:'+s,'-')).replace('https://','') for s in batch})} "
@@ -1141,6 +1154,7 @@ async def structure_recovery_loop():
             print(
                 f"Ψ-RECOVERY STRUCTURE scope={total} fresh={fresh}/{total} ever={ever}/{total} "
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
+                f"fast={recovery_stats['fast_ok']}/{recovery_stats['fast_fail']} seed={recovery_stats['seed_ok']}/{recovery_stats['seed_fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} "
@@ -1150,6 +1164,55 @@ async def structure_recovery_loop():
                 flush=True,
             )
         await asyncio.sleep(RECOVERY_CYCLE_SLEEP_S)
+
+
+async def cold_seed_loop():
+    # Cold/partial historical seeding is deliberately separated from the
+    # execution freshness lane. One symbol at a time may consume two race
+    # hosts, leaving capacity reserved for FAST refresh + risk maps.
+    while app.session is None or not getattr(q,"universe",None):
+        await asyncio.sleep(.5)
+
+    while True:
+        await asyncio.sleep(COLD_SEED_SLEEP_S)
+        try:
+            now=time.time()
+            scope=_recovery_scope()
+            candidates=[
+                s for s in scope
+                if _raw_seed_count(s)<3
+                and _recovery_retry_after.get(s,0)<=now
+                and s not in _recovery_inflight
+            ]
+            if not candidates:
+                continue
+
+            scope_pos={s:i for i,s in enumerate(scope)}
+            candidates.sort(
+                key=lambda s:(
+                    -_raw_seed_count(s),
+                    0 if _structure_age_recovery(s)<999000 else 1,
+                    scope_pos.get(s,9999),
+                )
+            )
+            sym=candidates[0]
+            before=_raw_seed_count(sym)
+            started=time.time()
+            result=await _hydrate_one(sym,"SEED")
+            after=_raw_seed_count(sym)
+            recovery_stats["seed_cycles"]+=1
+            _save_structure_raw_cache()
+            print(
+                f"Ψ-RECOVERY SEED symbol={sym} seedBefore={before}/3 seedAfter={after}/3 "
+                f"ok={int(result is True)} sec={time.time()-started:.2f} "
+                f"seedOK={recovery_stats['seed_ok']} seedFail={recovery_stats['seed_fail']} "
+                f"rawEntries={len(_structure_raw_cache)}",
+                flush=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Ψ-RECOVERY SEED_LOOP_ERROR {type(exc).__name__}: {exc}",flush=True)
 
 
 async def _watchdog_refresh_extension():
@@ -1309,6 +1372,6 @@ async def watchdog_loop():
 
 async def main():
     print("[v11.0.5.1] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
-    await asyncio.gather(rescue.main(), structure_recovery_loop(), structure_cache_loop(), watchdog_loop())
+    await asyncio.gather(rescue.main(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
