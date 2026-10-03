@@ -12,7 +12,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.1-hydration-fix"
+VERSION = "12.0.2-hydration-shards"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -72,13 +72,14 @@ _stats = defaultdict(int)
 # Dedicated V12 Binance Spot WS-API connection for historical candles. This
 # prevents legacy recovery/structure traffic from starving the new strategy
 # engines and avoids dependence on Railway REST routing.
-_v12_ws_conn = None
-_v12_ws_ready = None
-_v12_ws_lock = None
-_v12_ws_gate = None
-_v12_ws_pending = {}
-_v12_ws_id = 0
+_v12_ws_conns = [None] * V12_WS_SHARDS
+_v12_ws_ready = [None] * V12_WS_SHARDS
+_v12_ws_locks = [None] * V12_WS_SHARDS
+_v12_ws_gates = [None] * V12_WS_SHARDS
+_v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
+_v12_ws_ids = [0] * V12_WS_SHARDS
 V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
+V12_WS_SHARDS = max(2, min(int(os.getenv("PSI_V12_WS_SHARDS", "4")), 6))
 
 
 def f(v, d=0.0):
@@ -836,32 +837,37 @@ def build_plan(sym, current, best, setups, s1, s4, sd, sw):
 
 
 
-def _v12_ws_primitives():
-    global _v12_ws_ready, _v12_ws_lock, _v12_ws_gate
-    if _v12_ws_ready is None:
-        _v12_ws_ready = asyncio.Event()
-    if _v12_ws_lock is None:
-        _v12_ws_lock = asyncio.Lock()
-    if _v12_ws_gate is None:
-        _v12_ws_gate = asyncio.Semaphore(12)
-    return _v12_ws_ready, _v12_ws_lock, _v12_ws_gate
+def _v12_ws_primitives(shard):
+    shard = int(shard) % V12_WS_SHARDS
+    if _v12_ws_ready[shard] is None:
+        _v12_ws_ready[shard] = asyncio.Event()
+    if _v12_ws_locks[shard] is None:
+        _v12_ws_locks[shard] = asyncio.Lock()
+    if _v12_ws_gates[shard] is None:
+        # Two in-flight requests per physical socket is intentionally modest.
+        # Aggregate throughput comes from independent sockets, not one flooded
+        # connection.
+        _v12_ws_gates[shard] = asyncio.Semaphore(2)
+    return _v12_ws_ready[shard], _v12_ws_locks[shard], _v12_ws_gates[shard]
 
 
-def _v12_ws_fail_pending(reason):
-    for rid, fut in list(_v12_ws_pending.items()):
+def _v12_ws_fail_pending(shard, reason):
+    pending = _v12_ws_pending[shard]
+    for rid, fut in list(pending.items()):
         if fut is not None and not fut.done():
             try:
                 fut.set_exception(RuntimeError(reason))
             except Exception:
                 pass
-    _v12_ws_pending.clear()
+    pending.clear()
 
 
-async def v12_ws_rpc_loop():
-    global _v12_ws_conn
-    ready, _, _ = _v12_ws_primitives()
+async def v12_ws_rpc_loop(shard):
+    shard = int(shard) % V12_WS_SHARDS
+    ready, _, _ = _v12_ws_primitives(shard)
     while app.session is None:
         await asyncio.sleep(0.25)
+
     while True:
         ws = None
         try:
@@ -871,10 +877,11 @@ async def v12_ws_rpc_loop():
                 autoping=True,
                 receive_timeout=40,
             ) as ws:
-                _v12_ws_conn = ws
+                _v12_ws_conns[shard] = ws
                 ready.set()
                 _stats["ws_connects"] += 1
-                print(f"Ψ-V12 WS-RPC connected url={V12_WS_API_URL}", flush=True)
+                print(f"Ψ-V12 WS-RPC shard={shard+1}/{V12_WS_SHARDS} connected url={V12_WS_API_URL}", flush=True)
+
                 async for msg in ws:
                     if msg.type == legacy.aiohttp.WSMsgType.TEXT:
                         try:
@@ -882,7 +889,7 @@ async def v12_ws_rpc_loop():
                         except Exception:
                             continue
                         rid = str(payload.get("id") or "")
-                        fut = _v12_ws_pending.pop(rid, None)
+                        fut = _v12_ws_pending[shard].pop(rid, None)
                         if fut is not None and not fut.done():
                             fut.set_result(payload)
                     elif msg.type in {
@@ -890,25 +897,28 @@ async def v12_ws_rpc_loop():
                         legacy.aiohttp.WSMsgType.CLOSE,
                         legacy.aiohttp.WSMsgType.ERROR,
                     }:
-                        raise RuntimeError(f"V12 WS RPC closed type={msg.type}")
+                        raise RuntimeError(f"V12 WS RPC shard={shard} closed type={msg.type}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _stats["ws_errors"] += 1
-            _stats["ws_last_error"] = f"{type(exc).__name__}: {exc}"
+            _stats[f"ws_shard_{shard}_error"] = f"{type(exc).__name__}: {exc}"
         finally:
             ready.clear()
-            if _v12_ws_conn is ws:
-                _v12_ws_conn = None
-            _v12_ws_fail_pending("V12 WS RPC reset")
+            if _v12_ws_conns[shard] is ws:
+                _v12_ws_conns[shard] = None
+            _v12_ws_fail_pending(shard, f"V12 WS RPC shard {shard} reset")
         await asyncio.sleep(0.75)
 
 
-async def v12_ws_klines(symbol, interval, limit):
-    global _v12_ws_id
-    ready, lock, gate = _v12_ws_primitives()
+async def v12_ws_klines(symbol, interval, limit, shard=None):
+    if shard is None:
+        shard = (sum(ord(ch) for ch in str(symbol)) + sum(ord(ch) for ch in str(interval))) % V12_WS_SHARDS
+    shard = int(shard) % V12_WS_SHARDS
+
+    ready, lock, gate = _v12_ws_primitives(shard)
     try:
-        await asyncio.wait_for(ready.wait(), timeout=2.0)
+        await asyncio.wait_for(ready.wait(), timeout=1.25)
     except asyncio.TimeoutError:
         _stats["ws_unavailable"] += 1
         return None
@@ -916,46 +926,55 @@ async def v12_ws_klines(symbol, interval, limit):
     acquired = False
     rid = None
     try:
-        await asyncio.wait_for(gate.acquire(), timeout=1.5)
+        await asyncio.wait_for(gate.acquire(), timeout=1.0)
         acquired = True
         loop = asyncio.get_running_loop()
+
         async with lock:
-            ws = _v12_ws_conn
+            ws = _v12_ws_conns[shard]
             if ws is None or ws.closed:
                 return None
-            _v12_ws_id += 1
-            rid = str(_v12_ws_id)
+            _v12_ws_ids[shard] += 1
+            rid = f"{shard}-{_v12_ws_ids[shard]}"
             fut = loop.create_future()
-            _v12_ws_pending[rid] = fut
-            await ws.send_json({
-                "id": rid,
-                "method": "klines",
-                "params": {
-                    "symbol": str(symbol).upper(),
-                    "interval": str(interval),
-                    "limit": int(limit),
-                },
-            })
+            _v12_ws_pending[shard][rid] = fut
+            await asyncio.wait_for(
+                ws.send_json({
+                    "id": rid,
+                    "method": "klines",
+                    "params": {
+                        "symbol": str(symbol).upper(),
+                        "interval": str(interval),
+                        "limit": int(limit),
+                    },
+                }),
+                timeout=1.5,
+            )
             _stats["ws_requests"] += 1
 
-        payload = await asyncio.wait_for(fut, timeout=5.0)
+        payload = await asyncio.wait_for(fut, timeout=4.0)
         status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
         rows = payload.get("result") if isinstance(payload, dict) else None
         if status == 200 and isinstance(rows, list) and rows:
             _stats["ws_ok"] += 1
+            _stats[f"ws_shard_{shard}_ok"] += 1
             return rows
+
         _stats["ws_fail"] += 1
-        _stats["ws_last_error"] = f"status={status} payload={str(payload)[:180]}"
+        _stats[f"ws_shard_{shard}_fail"] += 1
+        _stats["ws_last_error"] = f"shard={shard} status={status} payload={str(payload)[:180]}"
         return None
+
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         _stats["ws_fail"] += 1
-        _stats["ws_last_error"] = f"{type(exc).__name__}: {exc}"
+        _stats[f"ws_shard_{shard}_fail"] += 1
+        _stats["ws_last_error"] = f"shard={shard} {type(exc).__name__}: {exc}"
         return None
     finally:
         if rid is not None:
-            _v12_ws_pending.pop(rid, None)
+            _v12_ws_pending[shard].pop(rid, None)
         if acquired:
             gate.release()
 
@@ -965,17 +984,19 @@ async def _fetch_tf(sym, tf):
         return False
 
     rows = None
-    # Dedicated V12 WS-RPC is the authoritative hydration transport. Retry once
-    # on the same socket; do not fall into the slow Railway REST timeout path,
-    # which previously held a hydration permit for ~7 seconds per miss.
+    preferred = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
+
+    # First request uses the symbol/timeframe's stable shard; a retry moves to
+    # the next physical socket so a slow connection cannot hold that symbol.
     for attempt in range(2):
-        rows = await v12_ws_klines(sym, tf, TF_LIMIT[tf])
+        shard = (preferred + attempt) % V12_WS_SHARDS
+        rows = await v12_ws_klines(sym, tf, TF_LIMIT[tf], shard=shard)
         if isinstance(rows, list) and len(rows) >= 55:
             _stats["fetch_ws_ok"] += 1
             break
         rows = None
         if attempt == 0:
-            await asyncio.sleep(0.12)
+            await asyncio.sleep(0.05)
 
     if isinstance(rows, list) and len(rows) >= 55:
         snapshot = snap(rows)
@@ -1004,7 +1025,7 @@ async def refresh_symbol(sym, sem, active=False):
     async def one(tf):
         async with sem:
             try:
-                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=11.0)
+                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=12.5)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
@@ -1314,7 +1335,7 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     print(
-        "[v12.0.1] MULTI-SETUP AUTHORITY + FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.2] MULTI-SETUP AUTHORITY + SHARDED FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
@@ -1323,7 +1344,7 @@ async def main():
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
-    await asyncio.gather(legacy.main(), v12_ws_rpc_loop(), strategy_loop())
+    await asyncio.gather(legacy.main(), strategy_loop(), *(v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)))
 
 
 if __name__ == "__main__":
