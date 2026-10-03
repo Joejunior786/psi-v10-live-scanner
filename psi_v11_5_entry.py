@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.33-integrity-sync-risk-recovery"
+VERSION="11.0.5.34-nonblocking-riskmap-final"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -934,6 +934,12 @@ RISK_WS_RETRY_DELAY_S = 0.18
 _risk_tf_stats = {"cache_hit":0,"ws_ok":0,"ws_retry_ok":0,"rest_ok":0,"fail":0}
 
 async def _risk_fetch_race(client, symbol, interval, limit):
+    """Secondary REST fallback for RiskMap with a hard wall-clock budget.
+
+    Only the two best hosts are raced. RiskMap is execution support, so it must
+    never monopolise REST/klines capacity or block the main scanner while a
+    remote host is slow.
+    """
     global _risk_last_ok, _risk_last_fail
     symbol=str(symbol); interval=str(interval); limit=int(limit)
     key=(symbol,interval,limit)
@@ -948,25 +954,25 @@ async def _risk_fetch_race(client, symbol, interval, limit):
     preferred=_rest_good_host.get(route_key)
     if preferred in hosts:
         hosts=[preferred]+[h for h in hosts if h!=preferred]
-    elif symbol:
+    elif symbol and hosts:
         offset=(sum(ord(ch) for ch in symbol)+sum(ord(ch) for ch in interval))%len(hosts)
         hosts=hosts[offset:]+hosts[:offset]
 
     healthy=[h for h in hosts if _rest_host_bad_until.get((route_key,h),0)<=now]
-    ordered=healthy+[h for h in hosts if h not in healthy]
+    ordered=(healthy+[h for h in hosts if h not in healthy])[:2]
     global_gate,lane_gate=_rest_gates("/api/v3/klines")
     last_exc=None
 
     async def one(host):
         g=l=r=False
         try:
-            await asyncio.wait_for(_rest_risk_kline_gate.acquire(),timeout=2.0);r=True
-            await asyncio.wait_for(global_gate.acquire(),timeout=2.0);g=True
-            await asyncio.wait_for(lane_gate.acquire(),timeout=2.0);l=True
+            await asyncio.wait_for(_rest_risk_kline_gate.acquire(),timeout=.55);r=True
+            await asyncio.wait_for(global_gate.acquire(),timeout=.55);g=True
+            await asyncio.wait_for(lane_gate.acquire(),timeout=.55);l=True
             async with client.get(
                 f"{host}/api/v3/klines",
                 params={"symbol":symbol,"interval":interval,"limit":limit},
-                timeout=aiohttp.ClientTimeout(total=4.8,connect=1.6),
+                timeout=aiohttp.ClientTimeout(total=2.2,connect=.75),
             ) as response:
                 body=await response.text()
                 if response.status!=200:
@@ -980,22 +986,17 @@ async def _risk_fetch_race(client, symbol, interval, limit):
             if g: global_gate.release()
             if r: _rest_risk_kline_gate.release()
 
-    for round_idx in range(0,len(ordered),2):
-        pair=ordered[round_idx:round_idx+2]
-        tasks=[asyncio.create_task(one(host)) for host in pair]
+    tasks=[asyncio.create_task(one(host)) for host in ordered]
+    try:
         try:
-            for fut in asyncio.as_completed(tasks):
+            for fut in asyncio.as_completed(tasks,timeout=3.0):
                 try:
                     host,payload=await fut
-                    for t in tasks:
-                        if not t.done(): t.cancel()
-                    await asyncio.gather(*tasks,return_exceptions=True)
                     _rest_good_host[route_key]=host
                     _rest_host_bad_until.pop((route_key,host),None)
                     _rest_stats["ok"]+=1
                     _rest_stats["risk_ok"]+=1
                     _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
-                    if round_idx>0: _rest_stats["failover"]+=1
                     _risk_last_ok=time.time()
                     app.rest_connected=True
                     app.last_error=None
@@ -1006,36 +1007,37 @@ async def _risk_fetch_race(client, symbol, interval, limit):
                     raise
                 except Exception as exc:
                     last_exc=exc
-            for host in pair:
-                _rest_stats["attempt_fail"]+=1
-                _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
-                _rest_host_bad_until[(route_key,host)]=time.time()+12.0
-        finally:
-            for t in tasks:
-                if not t.done(): t.cancel()
-            await asyncio.gather(*tasks,return_exceptions=True)
+        except asyncio.TimeoutError as exc:
+            last_exc=exc
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        if tasks:
+            try:
+                await asyncio.wait(tasks,timeout=.20)
+            except Exception:
+                pass
 
+    for host in ordered:
+        _rest_stats["attempt_fail"]+=1
+        _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
+        _rest_host_bad_until[(route_key,host)]=time.time()+10.0
     _rest_stats["fail"]+=1
     _rest_stats["risk_fail"]+=1
     _risk_last_fail=time.time()
     app.rest_connected=False
     app.last_error=f"RISK_RACE_FAIL {symbol} {interval} {limit}: {type(last_exc).__name__}: {last_exc}"
     _risk_tf_stats["fail"]+=1
-    print(
-        f"Ψ-REST FAIL lane=risk_race:{symbol}:{interval} "
-        f"params={{'symbol':'{symbol}','interval':'{interval}','limit':{limit}}} "
-        f"err={type(last_exc).__name__}:{last_exc}",
-        flush=True,
-    )
     return []
 
-async def _risk_load_klines(client, symbol, interval, limit):
-    """Fast bounded risk-plan candle loader.
 
-    Risk-map builds previously chained multiple WS waits and a multi-host REST
-    walk, allowing one symbol to consume the full 75s outer timeout. A risk
-    timeframe now gets one short WS attempt followed by a bounded REST race.
-    Three timeframes are still fetched concurrently by the RiskMap builder.
+async def _risk_load_klines(client, symbol, interval, limit):
+    """Non-blocking RiskMap candle loader.
+
+    When Binance WS-API is healthy, RiskMap uses two short WS attempts and
+    fails fast on a bad symbol/timeframe instead of falling into slow REST.
+    REST is used only when WS-API is actually unavailable.
     """
     global _risk_last_ok
     symbol=str(symbol); interval=str(interval); limit=int(limit)
@@ -1045,28 +1047,42 @@ async def _risk_load_klines(client, symbol, interval, limit):
         _risk_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    try:
-        rows=await asyncio.wait_for(
-            binance_ws_api_klines(
-                symbol,interval,limit,
-                wait_ready=0.5,
-                response_timeout=1.8,
-            ),
-            timeout=2.6,
-        )
-    except asyncio.TimeoutError:
-        rows=None
-    if isinstance(rows,list) and rows:
-        _risk_tf_cache[key]=(time.time(),rows)
-        _risk_last_ok=time.time()
-        _ws_api_stats["risk_ok"]+=1
-        _risk_tf_stats["ws_ok"]+=1
-        return rows
+    ws_live=bool(_ws_api_ready is not None and _ws_api_ready.is_set())
+    attempts=RISK_WS_ATTEMPTS if ws_live else 1
+    for attempt in range(max(1,attempts)):
+        try:
+            rows=await asyncio.wait_for(
+                binance_ws_api_klines(
+                    symbol,interval,limit,
+                    wait_ready=.35,
+                    response_timeout=1.4,
+                ),
+                timeout=2.15,
+            )
+        except asyncio.TimeoutError:
+            rows=None
+        if isinstance(rows,list) and rows:
+            _risk_tf_cache[key]=(time.time(),rows)
+            _risk_last_ok=time.time()
+            _ws_api_stats["risk_ok"]+=1
+            if attempt==0:
+                _risk_tf_stats["ws_ok"]+=1
+            else:
+                _risk_tf_stats["ws_retry_ok"]+=1
+            return rows
+        if attempt+1<attempts:
+            await asyncio.sleep(.08)
+
+    # If WS is still healthy, do not burn REST budget for a symbol/timeframe
+    # that just failed twice. The next scheduler pass retries it.
+    if _ws_api_ready is not None and _ws_api_ready.is_set():
+        _risk_tf_stats["fail"]+=1
+        return []
 
     try:
         rows=await asyncio.wait_for(
             _risk_fetch_race(client, symbol, interval, limit),
-            timeout=4.8,
+            timeout=3.4,
         )
     except asyncio.TimeoutError:
         _risk_tf_stats["fail"]+=1
@@ -2606,7 +2622,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.33] Ψ INTEGRITY SYNC + RISK RECOVERY active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. Risk-map candle fetches are bounded to prevent build starvation.",flush=True)
+    print("[v11.0.5.34] Ψ NON-BLOCKING RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses two short WS attempts while WS is healthy and a hard two-host REST fallback only when WS is down, eliminating slow-symbol scheduler starvation.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
