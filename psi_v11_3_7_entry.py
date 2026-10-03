@@ -5,8 +5,11 @@ import psi_v11_3_6_entry as base
 
 app,q,scanner=base.app,base.q,base.scanner
 VERSION='11.0.3.9-event-tape-monster-radar'
-SHARDS=4
+SHARDS=8
 WINDOW=35.0
+WS_HEARTBEAT=20.0
+WS_RECEIVE_TIMEOUT=45.0
+WS_RECONNECT_MAX_DELAY=8.0
 MAX_EVENTS=3000
 trade_events=defaultdict(lambda:deque(maxlen=MAX_EVENTS))
 bbo={}
@@ -51,23 +54,67 @@ def tape_metric(sym):
     return {'ready':ready,'age_ms':age,'book_age_ms':bage,'score':round(score,2),'buy_ratio_1s':buy1,'buy_ratio_5s':buy5,'cvd_1s':cvd1,'cvd_5s':cvd5,'cvd_accel':cvd1-cvd5,'notional_accel_1s':notional_accel,'trade_count_accel_1s':count_accel,'avg_trade_shift_1s':avg_shift,'price_velocity_1s_pct':pv1,'price_velocity_5s_pct':pv5,'spread_bps':spread,'bbo_imbalance':imb,'trades_1s':c1,'trades_5s':c5,'notional_1s':n1,'notional_5s':n5,'notional_15s':n15,'notional_30s':n30}
 
 async def _shard_loop(idx):
+    host_cursor=idx
+    reconnects=0
     while True:
+        key=f'shard_{idx}_up'
+        tape_stats[key]=0
         try:
             while getattr(app,'session',None) is None or not list(getattr(q,'universe',[]) or []):
                 await asyncio.sleep(.25)
+
+            # Keep each connection deliberately small. The previous 4-shard
+            # layout put ~200 streams on a single combined URL, which made one
+            # failed handshake remove roughly a quarter of live tape coverage.
             syms=sorted(list(q.universe))[idx::SHARDS]
             streams=[]
             for s in syms:
-                l=s.lower();streams.extend([f'{l}@aggTrade',f'{l}@bookTicker'])
-            url=f"{app.WS_BASE}/stream?streams={'/'.join(streams)}"
-            async with app.session.ws_connect(url,heartbeat=None,receive_timeout=90,max_msg_size=0) as ws:
-                tape_stats[f'shard_{idx}_up']=1;tape_stats['connects']+=1
-                print(f'Ψ-MONSTER-TAPE shard={idx+1}/{SHARDS} connected symbols={len(syms)} streams={len(streams)}',flush=True)
+                l=s.lower()
+                streams.extend([f'{l}@aggTrade',f'{l}@bookTicker'])
+            if not streams:
+                await asyncio.sleep(1.0)
+                continue
+
+            bases=[]
+            for raw in (
+                str(getattr(app,'WS_BASE','') or '').rstrip('/'),
+                'wss://data-stream.binance.vision',
+                'wss://stream.binance.com:9443',
+                'wss://stream.binance.com:443',
+            ):
+                if raw and raw not in bases:
+                    bases.append(raw)
+
+            base_url=bases[host_cursor % len(bases)]
+            url=f"{base_url}/stream?streams={'/'.join(streams)}"
+            tape_stats[f'shard_{idx}_host_idx']=host_cursor % len(bases)
+
+            async with app.session.ws_connect(
+                url,
+                heartbeat=WS_HEARTBEAT,
+                receive_timeout=WS_RECEIVE_TIMEOUT,
+                max_msg_size=0,
+                timeout=20,
+            ) as ws:
+                tape_stats[key]=1
+                tape_stats['connects']+=1
+                tape_stats[f'shard_{idx}_last_connect_ms']=int(time.time()*1000)
+                print(
+                    f'Ψ-MONSTER-TAPE shard={idx+1}/{SHARDS} connected '
+                    f'symbols={len(syms)} streams={len(streams)} host={base_url}',
+                    flush=True,
+                )
+
                 async for msg in ws:
                     if msg.type==aiohttp.WSMsgType.TEXT:
-                        try:p=json.loads(msg.data)
-                        except Exception:continue
-                        stream=str(p.get('stream') or '');d=p.get('data') or {}; now=time.time()
+                        tape_stats[f'shard_{idx}_last_msg_ms']=int(time.time()*1000)
+                        try:
+                            p=json.loads(msg.data)
+                        except Exception:
+                            continue
+                        stream=str(p.get('stream') or '')
+                        d=p.get('data') or {}
+                        now=time.time()
                         sym=str(d.get('s') or stream.split('@')[0]).upper()
                         if stream.endswith('@aggTrade'):
                             price=f(d.get('p'));qty=f(d.get('q'))
@@ -77,12 +124,31 @@ async def _shard_loop(idx):
                         elif stream.endswith('@bookTicker'):
                             bbo[sym]={'t':now,'bid':f(d.get('b')),'bq':f(d.get('B')),'ask':f(d.get('a')),'aq':f(d.get('A'))}
                             tape_stats['books']+=1
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):break
-        except asyncio.CancelledError:raise
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError(f'websocket_{msg.type.name.lower()}')
+
+                # A clean iterator exit is still a disconnect and must not
+                # leave the shard marked healthy.
+                raise RuntimeError('websocket_stream_ended')
+
+        except asyncio.CancelledError:
+            tape_stats[key]=0
+            raise
         except Exception as e:
-            tape_stats['errors']+=1;tape_stats[f'shard_{idx}_up']=0
-            print(f'Ψ-MONSTER-TAPE shard={idx+1} error={type(e).__name__}:{e}',flush=True)
-        await asyncio.sleep(2)
+            tape_stats['errors']+=1
+            tape_stats[key]=0
+            reconnects+=1
+            tape_stats[f'shard_{idx}_reconnects']=reconnects
+            print(
+                f'Ψ-MONSTER-TAPE shard={idx+1}/{SHARDS} error={type(e).__name__}:{e}',
+                flush=True,
+            )
+            host_cursor+=1
+        finally:
+            tape_stats[key]=0
+
+        await asyncio.sleep(min(WS_RECONNECT_MAX_DELAY,1.0+min(reconnects,7)))
+
 
 _old_cheap=base.cheap
 def cheap_v2(sym,row,now):
