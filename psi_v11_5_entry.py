@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.85-hard-budget-trade-chain"
+VERSION="11.0.5.86-liveness-aware-micro-core"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -170,8 +170,13 @@ _micro_rest_stats={
 
 MICRO_FALLBACK_CORE_SIZE=max(1,min(int(os.getenv("PSI_MICRO_FALLBACK_CORE","2")),8))
 MICRO_FALLBACK_CORE_HOLD_S=max(90.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_HOLD","180")))
+MICRO_FALLBACK_CORE_MIN_HOLD_S=max(20.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_MIN_HOLD","45")))
+MICRO_FALLBACK_CORE_STARVE_S=max(15.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_STARVE","30")))
+MICRO_FALLBACK_CORE_REPLACE_MULT=max(1.5,float(os.getenv("PSI_MICRO_FALLBACK_CORE_REPLACE_MULT","3.0")))
+MICRO_FALLBACK_CORE_REPLACE_MIN_QV=max(1000000.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_REPLACE_MIN_QV","5000000")))
 _micro_fallback_core=[]
 _micro_fallback_core_since=0.0
+_micro_fallback_core_rotations=0
 
 _strict_trade_cursor=0
 _strict_depth_cursor=0
@@ -4255,11 +4260,25 @@ async def ws_api_discovery_fallback_loop():
 
 
 def _micro_fallback_core_symbols():
-    global _micro_fallback_core,_micro_fallback_core_since
+    global _micro_fallback_core,_micro_fallback_core_since,_micro_fallback_core_rotations
     universe_set=set(getattr(q,"universe_set",set()) or set(getattr(q,"universe",[]) or []))
     selected=[s for s in list(getattr(app,"selected_micro_symbols",[]) or []) if s in universe_set]
     selected_set=set(selected)
     now=time.time()
+
+    def qv(sym):
+        try:
+            meta=(getattr(app,"symbol_meta",{}) or {}).get(sym) or {}
+            v=f(meta.get("quote_volume_24h"))
+            if v>0:
+                return v
+        except Exception:
+            pass
+        try:
+            row=extrest.ext_cache.get(sym) or {}
+            return max(0.0,f(row.get("quoteVolume") or row.get("quote_volume") or row.get("q")))
+        except Exception:
+            return 0.0
 
     current=[s for s in _micro_fallback_core if s in selected_set]
     required=min(MICRO_FALLBACK_CORE_SIZE,len(selected))
@@ -4267,14 +4286,9 @@ def _micro_fallback_core_symbols():
         _micro_fallback_core=[]
         _micro_fallback_core_since=now
         return []
-    if len(current)>=required and now-_micro_fallback_core_since<MICRO_FALLBACK_CORE_HOLD_S:
-        _micro_fallback_core=current[:required]
-        return list(_micro_fallback_core)
 
     # Build a priority pool from the live board/hot set, but rank scarce
-    # strict-micro capacity by verified 24h quote liquidity. Cold-start board
-    # ordering can otherwise select thin backfill names before meaningful
-    # ranking data exists.
+    # strict-micro capacity by verified 24h quote liquidity.
     priority=set()
     try:
         for row in list(base.latest.get("_board") or []):
@@ -4292,20 +4306,6 @@ def _micro_fallback_core_symbols():
     except Exception:
         pass
 
-    def qv(sym):
-        try:
-            meta=(getattr(app,"symbol_meta",{}) or {}).get(sym) or {}
-            v=f(meta.get("quote_volume_24h"))
-            if v>0:
-                return v
-        except Exception:
-            pass
-        try:
-            row=extrest.ext_cache.get(sym) or {}
-            return max(0.0,f(row.get("quoteVolume") or row.get("quote_volume") or row.get("q")))
-        except Exception:
-            return 0.0
-
     primary=sorted(
         [s for s in selected if s in priority],
         key=lambda s:(qv(s),s),
@@ -4318,12 +4318,76 @@ def _micro_fallback_core_symbols():
     )
     ranked=primary+fallback
 
+    # Preserve continuity while the core is healthy. After a minimum dwell,
+    # allow an early replacement only for a genuinely trade-starved symbol and
+    # only when an already-selected alternative has materially higher verified
+    # quote liquidity. This prevents thin cold-start names from monopolising
+    # both strict slots for the full 180-second hold.
+    core_age=max(0.0,now-_micro_fallback_core_since)
+    if len(current)>=required and core_age<MICRO_FALLBACK_CORE_HOLD_S:
+        current=current[:required]
+        if core_age<MICRO_FALLBACK_CORE_MIN_HOLD_S:
+            _micro_fallback_core=current
+            return list(_micro_fallback_core)
+
+        now_ms=int(now*1000)
+        starved=[]
+        for sym in current:
+            try:
+                ms=int((getattr(app,"micro_state",{}) or {}).get(sym,{}).get("last_trade_ms",0) or 0)
+            except Exception:
+                ms=0
+            age_s=((now_ms-ms)/1000.0) if ms>0 else 999999.0
+            if age_s>MICRO_FALLBACK_CORE_STARVE_S:
+                starved.append((sym,age_s,qv(sym)))
+
+        if starved:
+            candidates=[s for s in ranked if s not in current]
+            new_core=list(current)
+            used=set(new_core)
+            replacements=[]
+            for old,age_s,old_qv in sorted(starved,key=lambda x:(x[2],x[0])):
+                threshold=max(
+                    MICRO_FALLBACK_CORE_REPLACE_MIN_QV,
+                    max(0.0,old_qv)*MICRO_FALLBACK_CORE_REPLACE_MULT,
+                )
+                repl=next(
+                    (s for s in candidates if s not in used and qv(s)>=threshold),
+                    None,
+                )
+                if repl is None:
+                    continue
+                try:
+                    pos=new_core.index(old)
+                except ValueError:
+                    continue
+                new_core[pos]=repl
+                used.discard(old);used.add(repl)
+                replacements.append((old,repl,round(age_s,1),round(old_qv,0),round(qv(repl),0)))
+
+            if replacements:
+                _micro_fallback_core=new_core[:required]
+                _micro_fallback_core_since=now
+                _micro_fallback_core_rotations+=1
+                print(
+                    f"Ψ-WSAPI MICRO-CORE-ROTATE reason=TRADE_STARVATION "
+                    f"rotations={_micro_fallback_core_rotations} replacements={replacements} "
+                    f"symbols={[(s,round(qv(s),0)) for s in _micro_fallback_core]}",
+                    flush=True,
+                )
+                return list(_micro_fallback_core)
+
+        _micro_fallback_core=current
+        return list(_micro_fallback_core)
+
     _micro_fallback_core=ranked[:required]
     _micro_fallback_core_since=now
     if _micro_fallback_core:
         print(
             f"Ψ-WSAPI MICRO-CORE size={len(_micro_fallback_core)} "
             f"hold={MICRO_FALLBACK_CORE_HOLD_S:.0f}s "
+            f"minHold={MICRO_FALLBACK_CORE_MIN_HOLD_S:.0f}s "
+            f"starve={MICRO_FALLBACK_CORE_STARVE_S:.0f}s "
             f"symbols={[(s,round(qv(s),0)) for s in _micro_fallback_core]}",
             flush=True,
         )
@@ -4852,7 +4916,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.85] Ψ HARD-BUDGET TRADE CHAIN active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.86] Ψ LIVENESS-AWARE MICRO CORE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
