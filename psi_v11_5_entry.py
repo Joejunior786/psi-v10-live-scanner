@@ -1265,11 +1265,11 @@ def _live_pullback_exhaustion(sym,ca):
     cur=vals[-1]; hi=max(vals); lo=min(vals)
     depth=((hi-cur)/hi*100) if hi>0 else 0.0
     rebound=((cur-lo)/lo*100) if lo>0 else 0.0
-    buy=f(ca.get("buy1s"),.5); cvd=f(ca.get("cvd1s")); tape=f(ca.get("eventTape"))
+    buy=f(ca.get("buy1s"),.5); cvd=f(ca.get("cvd1s")); tape_score=f(ca.get("eventTape"))
     layers=int(f(ca.get("layers"))); bsi=f(ca.get("bsi")); reasons=set(ca.get("reasons") or [])
     structure_ok=layers>=3 or bsi>=52
     pulled=.12<=depth<=5.0
-    buyer_return=(buy>=.58 and cvd>=.10) or ("OFI_POS" in reasons and buy>=.54) or (tape>=65 and buy>=.55)
+    buyer_return=(buy>=.58 and cvd>=.10) or ("OFI_POS" in reasons and buy>=.54) or (tape_score>=65 and buy>=.55)
     reclaim=rebound>=.05
     exhausting=pulled and structure_ok and ((buy>=.52 and cvd>=-.05) or "OFI_POS" in reasons)
     exhausted=pulled and structure_ok and buyer_return and reclaim
