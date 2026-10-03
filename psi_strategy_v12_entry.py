@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.11-transport-circuit-breaker"
+VERSION = "12.1.2-dual-proven-ws-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -47,7 +47,7 @@ PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
 FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 6))
 MAX_INFLIGHT_SYMBOLS = max(10, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "18")), 24))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 12))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(6, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "12")), 18))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -1430,28 +1430,82 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
 
-    # 1) Primary live transport: the scanner's original, proven Binance
-    # Spot WS-API kline loader. It already owns connection lifecycle,
-    # request/future matching, and the production 3-request concurrency gate.
+    # 1) Race two already-proven scanner-owned Binance WS transports:
+    #    - structure/risk WS (3-request gate)
+    #    - market WS (8-request gate)
+    # This avoids overloading either lane and returns on the first valid
+    # Binance kline response. Both transports already have production
+    # connection lifecycle and request/future matching.
     if not isinstance(rows, list) or len(rows) < (DEEP_MIN_ROWS if deep else 55):
-        try:
-            rows = await legacy.binance_ws_api_klines(
-                sym,
-                tf,
-                limit,
-                wait_ready=1.25,
-                response_timeout=10.0 if deep else 8.0,
-                gate_timeout=1.25,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
+        need = DEEP_MIN_ROWS if deep else 55
 
-        if isinstance(rows, list) and len(rows) >= 55:
-            _stats["legacy_ws_ok"] += 1
+        async def structure_ws():
+            try:
+                return await legacy.binance_ws_api_klines(
+                    sym,
+                    tf,
+                    limit,
+                    wait_ready=1.0,
+                    response_timeout=7.0 if deep else 5.0,
+                    gate_timeout=0.9,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None
+
+        async def market_ws():
+            try:
+                fn = getattr(legacy, "market_ws_api_request", None)
+                if not callable(fn):
+                    return None
+                return await fn(
+                    "klines",
+                    {"symbol": str(sym).upper(), "interval": str(tf), "limit": int(limit)},
+                    wait_ready=1.0,
+                    response_timeout=7.0 if deep else 5.0,
+                    gate_timeout=0.9,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None
+
+        tasks = {asyncio.create_task(structure_ws()), asyncio.create_task(market_ws())}
+        winner = None
+        try:
+            deadline = asyncio.get_running_loop().time() + (7.5 if deep else 5.5)
+            while tasks and winner is None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                done, pending = await asyncio.wait(
+                    tasks,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        candidate = task.result()
+                    except Exception:
+                        candidate = None
+                    if isinstance(candidate, list) and len(candidate) >= need:
+                        winner = candidate
+                        break
+                tasks = set(pending)
+            rows = winner
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["dual_ws_ok"] += 1
         else:
-            _stats["legacy_ws_miss"] += 1
+            _stats["dual_ws_miss"] += 1
             rows = None
 
     # 2) Bounded REST fallback. FAST uses the smaller two-host race first;
@@ -1513,7 +1567,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 16.0 if deep else 12.0
+                timeout = 15.0 if deep else 10.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
