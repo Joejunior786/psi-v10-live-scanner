@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.8-balanced-hydration"
+VERSION = "12.0.9-cache-reuse-rest-fallback"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -93,6 +93,13 @@ V12_CACHE_PATH = os.getenv("PSI_V12_CACHE_PATH", "/data/v12_hydration_cache.pkl"
 V12_CACHE_SAVE_SECONDS = max(20.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "30")))
 _last_cache_save = 0.0
 _last_cache_ready = -1
+_v12_fast_rest_gate = None
+V12_FAST_REST_HOSTS = (
+    "https://data-api.binance.vision",
+    "https://api-gcp.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+)
 
 
 def _cache_snapshot_for_disk():
@@ -195,6 +202,165 @@ async def cache_persist_loop():
         except Exception as exc:
             _stats["cache_save_fail"] += 1
             _stats["cache_last_error"] = f"{type(exc).__name__}: {exc}"
+
+
+
+def _v12_rest_gate():
+    global _v12_fast_rest_gate
+    if _v12_fast_rest_gate is None:
+        _v12_fast_rest_gate = asyncio.Semaphore(2)
+    return _v12_fast_rest_gate
+
+
+def _v11_raw_best(sym, tf):
+    if tf not in {"1h", "4h"}:
+        return None, 0.0
+    raw = getattr(legacy, "_structure_raw_cache", {}) or {}
+    if not isinstance(raw, dict):
+        return None, 0.0
+    prefix = f"{sym}|{tf}|"
+    best = None
+    saved = 0.0
+    for key, item in list(raw.items()):
+        if not str(key).startswith(prefix) or not isinstance(item, dict):
+            continue
+        rows = item.get("rows")
+        if isinstance(rows, list) and len(rows) >= 55 and (best is None or len(rows) > len(best)):
+            best = rows
+            saved = f(item.get("saved"))
+    return best, saved
+
+
+def _import_v11_structure_cache():
+    """Reuse V11 persisted Binance 1H/4H history instead of refetching it."""
+    raw = getattr(legacy, "_structure_raw_cache", {}) or {}
+    if not isinstance(raw, dict) or not raw:
+        return 0
+
+    now = time.time()
+    imported = 0
+    seen = set()
+    for key in list(raw.keys()):
+        parts = str(key).split("|")
+        if len(parts) != 3:
+            continue
+        sym, tf, _ = parts
+        if tf not in {"1h", "4h"} or (sym, tf) in seen:
+            continue
+        seen.add((sym, tf))
+        rows, saved = _v11_raw_best(sym, tf)
+        if not isinstance(rows, list) or len(rows) < 55:
+            continue
+
+        # V11 can update the currently-forming candle from its live price path.
+        try:
+            reuse = getattr(legacy, "_reuse_current_candle", None)
+            merged = reuse(rows, sym, tf) if callable(reuse) else None
+        except Exception:
+            merged = None
+        if not isinstance(merged, list):
+            merged = rows
+
+        current = _cache.get(sym, {}).get(tf) or {}
+        current_rows = current.get("rows") or []
+        if len(current_rows) >= len(merged):
+            continue
+
+        snapshot = snap(merged)
+        if snapshot is None:
+            continue
+
+        step = 3600000 if tf == "1h" else 14400000
+        try:
+            current_open = (int(now * 1000) // step) * step
+            is_current = int(merged[-1][0]) == current_open
+        except Exception:
+            is_current = False
+
+        _cache[sym][tf] = {
+            "rows": merged,
+            "snap": snapshot,
+            "updated": now if is_current else (saved if saved > 0 else now - TF_TTL[tf] * 0.75),
+            "depth": "DEEP" if len(merged) >= DEEP_MIN_ROWS else "FAST",
+        }
+        imported += 1
+
+    if imported:
+        _stats["v11_imported"] += imported
+    return imported
+
+
+async def _v12_fast_rest_klines(sym, tf, limit):
+    """Bounded small-packet Binance REST fallback for broad FAST hydration."""
+    if app.session is None:
+        return None
+    gate = _v12_rest_gate()
+    acquired = False
+    try:
+        await asyncio.wait_for(gate.acquire(), timeout=0.6)
+        acquired = True
+    except asyncio.TimeoutError:
+        _stats["fast_rest_defer"] += 1
+        return None
+
+    try:
+        offset = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % len(V12_FAST_REST_HOSTS)
+        hosts = list(V12_FAST_REST_HOSTS[offset:]) + list(V12_FAST_REST_HOSTS[:offset])
+        hosts = hosts[:2]
+
+        async def one(host, endpoint):
+            try:
+                async with app.session.get(
+                    host + endpoint,
+                    params={"symbol": str(sym), "interval": str(tf), "limit": int(limit)},
+                    timeout=legacy.aiohttp.ClientTimeout(total=3.8, connect=1.0),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    payload = await resp.json()
+                    return payload if isinstance(payload, list) and len(payload) >= 55 else None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return None
+
+        tasks = {
+            asyncio.create_task(one(hosts[0], "/api/v3/klines")),
+            asyncio.create_task(one(hosts[1], "/api/v3/uiKlines")),
+        }
+        winner = None
+        deadline = asyncio.get_running_loop().time() + 4.2
+        try:
+            while tasks and winner is None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                done, pending = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        rows = task.result()
+                    except Exception:
+                        rows = None
+                    if isinstance(rows, list) and len(rows) >= 55:
+                        winner = rows
+                        break
+                tasks = set(pending)
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        if winner is not None:
+            _stats["fast_rest_ok"] += 1
+            return winner
+        _stats["fast_rest_fail"] += 1
+        return None
+    finally:
+        if acquired:
+            gate.release()
 
 
 def f(v, d=0.0):
@@ -1128,38 +1294,61 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
+
+    # First choice: reuse V11's persisted Binance 1H/4H history.
+    if tf in {"1h", "4h"}:
+        seed, saved = _v11_raw_best(sym, tf)
+        if isinstance(seed, list) and len(seed) >= 55 and (not deep or len(seed) >= DEEP_MIN_ROWS):
+            rows = seed[-limit:] if limit < len(seed) else list(seed)
+            try:
+                reuse = getattr(legacy, "_reuse_current_candle", None)
+                maybe = reuse(rows, sym, tf) if callable(reuse) else None
+                if isinstance(maybe, list):
+                    rows = maybe
+            except Exception:
+                pass
+            snapshot = snap(rows)
+            if snapshot is not None:
+                step = 3600000 if tf == "1h" else 14400000
+                try:
+                    current_open = (int(time.time() * 1000) // step) * step
+                    is_current = int(rows[-1][0]) == current_open
+                except Exception:
+                    is_current = False
+                _cache[sym][tf] = {
+                    "rows": rows,
+                    "snap": snapshot,
+                    "updated": time.time() if is_current else (saved if saved > 0 else time.time() - TF_TTL[tf] * 0.75),
+                    "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
+                }
+                _stats["fetch_v11_cache_ok"] += 1
+                return True
+
+    base_shard = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
+    shard_order = [base_shard]
+    others = [i for i in range(V12_WS_SHARDS) if i != base_shard]
+    others.sort(key=lambda i: len(_v12_ws_pending[i]))
+    shard_order.extend(others[:2])
+
     rows = None
-    tried = set()
-
-    # Borrow a physical socket from the pool so concurrent requests cannot
-    # collide on the same shard. Retry once on a different shard when needed.
-    for attempt in range(2):
-        shard = await _v12_borrow_shard(timeout=1.5)
-        if shard is None:
-            break
-        try:
-            if shard in tried and len(tried) < V12_WS_SHARDS:
-                _v12_return_shard(shard)
-                shard = await _v12_borrow_shard(timeout=1.0)
-                if shard is None:
-                    break
-            tried.add(shard)
-            timeout = 5.5 if deep else 3.8
-            rows = await v12_ws_klines(
-                sym, tf, limit,
-                shard=shard,
-                response_timeout=timeout,
-            )
-        finally:
-            _v12_return_shard(shard)
-
+    attempts = 0
+    for shard in shard_order:
+        attempts += 1
+        timeout = 6.0 if deep else 4.5
+        rows = await v12_ws_klines(sym, tf, limit, shard=shard, response_timeout=timeout)
         if isinstance(rows, list) and len(rows) >= 55:
-            if attempt > 0:
+            if shard != base_shard:
                 _stats["ws_failover_ok"] += 1
             break
         rows = None
-        if attempt == 0:
-            await asyncio.sleep(0.04)
+        if attempts >= 2:
+            break
+        await asyncio.sleep(0.05)
+
+    # If the broad FAST WS request misses, race two official Binance public
+    # market-data HTTP endpoints. Deep EMA200 history remains cache/WS only.
+    if (not isinstance(rows, list) or len(rows) < 55) and not deep:
+        rows = await _v12_fast_rest_klines(sym, tf, limit)
 
     if isinstance(rows, list) and len(rows) >= 55:
         _stats["fetch_ws_ok"] += 1
@@ -1466,6 +1655,11 @@ async def strategy_loop():
                         _stats["refresh_task_fail"] += 1
                     refresh_tasks.pop(sym, None)
 
+            if _cycle == 0 or _cycle % 4 == 0:
+                imported = _import_v11_structure_cache()
+                if imported:
+                    _stats["v11_import_last"] = imported
+
             active = _priority_symbols(universe)
 
             # Active candidates refresh quickly, but never consume every slot.
@@ -1547,7 +1741,9 @@ async def strategy_loop():
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
                 f"shardPool={_v12_get_shard_pool().qsize()}/{V12_WS_SHARDS} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
-                f"deepOK={_stats.get('fetch_deep_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)} "
+                f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
+                f"v11Bulk={_stats.get('v11_imported',0)} restFast={_stats.get('fast_rest_ok',0)}/{_stats.get('fast_rest_fail',0)} "
+                f"fetchFail={_stats.get('fetch_fail', 0)} "
                 f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
                 f"wsFail={_stats.get('ws_fail', 0)} "
                 f"shardOK={[int(_stats.get(f'ws_shard_{i}_ok', 0)) for i in range(V12_WS_SHARDS)]} "
@@ -1663,7 +1859,7 @@ async def main():
     loaded = await asyncio.to_thread(_load_cache_sync)
     print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
     print(
-        "[v12.0.8] MULTI-SETUP AUTHORITY + BALANCED PERSISTENT HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.9] MULTI-SETUP AUTHORITY + BALANCED PERSISTENT HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
