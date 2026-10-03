@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.35-hard-budget-riskmap-final"
+VERSION="11.0.5.36-hard-budget-riskmap-no-outer-cancel"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -2622,7 +2622,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.35] Ψ HARD-BUDGET RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses two short WS attempts while WS is healthy, a hard two-host REST fallback only when WS is down, and a non-blocking per-symbol candle budget so cancellation cleanup cannot stall the scheduler.",flush=True)
+    print("[v11.0.5.36] Ψ HARD-BUDGET RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses two short WS attempts while WS is healthy, a hard two-host REST fallback only when WS is down, a non-blocking per-symbol candle budget, and no outer wait_for cancellation that can generate false timeouts under event-loop pressure.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
