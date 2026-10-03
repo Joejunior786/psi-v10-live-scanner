@@ -230,13 +230,15 @@ def _ingest_discovery_payload(payload, source):
         s=x.get("s","")
         if s not in universe_set or now-disc_sample_ts.get(s,0)<SAMPLE_SECONDS:
             continue
+        bid=app.safe_float(x.get("b") if x.get("b") is not None else x.get("bidPrice"))
+        ask=app.safe_float(x.get("a") if x.get("a") is not None else x.get("askPrice"))
         p=app.safe_float(x.get("c") if x.get("c") is not None else x.get("lastPrice"))
+        if p<=0 and bid>0 and ask>0:
+            p=(bid+ask)/2.0
         if p<=0:
             continue
         qv=app.safe_float(x.get("q") if x.get("q") is not None else x.get("quoteVolume"))
         cnt=app.safe_float(x.get("n") if x.get("n") is not None else x.get("count"))
-        bid=app.safe_float(x.get("b") if x.get("b") is not None else x.get("bidPrice"))
-        ask=app.safe_float(x.get("a") if x.get("a") is not None else x.get("askPrice"))
         disc[s].append((now,p,qv,cnt,bid,ask)); disc_sample_ts[s]=now; accepted+=1
     if accepted:
         disc_event_ms=int(now*1000); disc_source=source
@@ -256,18 +258,17 @@ async def _discovery_rest_snapshot():
     for host in hosts:
         try:
             async with app.session.get(
-                f"{host}/api/v3/ticker/24hr",
-                params={"type":"MINI"},
-                timeout=aiohttp.ClientTimeout(total=10,connect=2),
+                f"{host}/api/v3/ticker/bookTicker",
+                timeout=aiohttp.ClientTimeout(total=6,connect=2),
             ) as resp:
                 body=await resp.text()
                 if resp.status!=200:
                     raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
                 payload=json.loads(body)
-                accepted=_ingest_discovery_payload(payload,"REST_24HR")
+                accepted=_ingest_discovery_payload(payload,"REST_BOOK_TICKER")
                 disc_rest_ok+=1
                 if accepted:
-                    print(f"Ψ-DISCOVERY FALLBACK source=REST_24HR accepted={accepted}/{len(universe)} host={host}",flush=True)
+                    print(f"Ψ-DISCOVERY FALLBACK source=REST_BOOK_TICKER accepted={accepted}/{len(universe)} host={host}",flush=True)
                 return accepted
         except asyncio.CancelledError:
             raise
