@@ -43,7 +43,7 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "8")), 12))
+FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 8))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
 TF_LIMIT = {"1h": 260, "4h": 260, "1d": 260, "1w": 260}
@@ -817,7 +817,7 @@ async def _fetch_tf(sym, tf):
     if app.session is None:
         return False
     params = {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]}
-    token = legacy._structure_request_ctx.set(True)
+    token = legacy._risk_plan_request_ctx.set(True)
     try:
         rows = await legacy.resilient_api_get(
             app.session,
@@ -833,7 +833,7 @@ async def _fetch_tf(sym, tf):
     except Exception:
         _stats["fetch_fail"] += 1
     finally:
-        legacy._structure_request_ctx.reset(token)
+        legacy._risk_plan_request_ctx.reset(token)
     return False
 
 
