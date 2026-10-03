@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.28-breakout-structural-intelligence"
+VERSION="11.0.5.29-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -1373,11 +1373,51 @@ async def board_loop_v5():
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready=sum(1 for s in list(getattr(q,"universe",[]) or []) if tape.tape_metric(s).get("ready"))
             print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={ready}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON",flush=True)
             move_rows=[]
+            move_syms=set()
             for r in all_rows:
                 mp=_candidate_move_plan(r)
                 sh=mp["shadow"]
                 r["movePlanV11"]=mp
+                r["moveOrigin"]="MONSTER"
                 move_rows.append(r)
+                sym=str(r.get("symbol") or "")
+                if sym: move_syms.add(sym)
+
+            # A valid V10.19.1 risk plan must remain visible even when its
+            # symbol temporarily rotates out of the Monster candidate slice.
+            # This augments the move-plan display only; it does not alter the
+            # Monster board, formal state, layers, or Pinpoint BUY authority.
+            try:
+                now_risk=time.time()
+                max_age=f(getattr(move_engine.riskmap,"SUPPORT_MAX_AGE",95.0),95.0)
+                for sym,ri in list(getattr(move_engine.riskmap,"risk_cache",{}).items()):
+                    sym=str(sym or "")
+                    if not sym or sym in move_syms or not isinstance(ri,dict):
+                        continue
+                    updated=f(ri.get("updated"))
+                    if updated<=0 or now_risk-updated>max_age:
+                        continue
+                    en=f(ri.get("entry_trigger"));st=f(ri.get("stop_loss"))
+                    t1=f(ri.get("tp1"));t2=f(ri.get("tp2"));t3=f(ri.get("tp3"))
+                    if not (en>0 and st>0 and st<en and t1>en and t2>t1 and t3>t2):
+                        continue
+                    qrow=q.latest.get(sym) or {}
+                    rr={
+                        "symbol":sym,
+                        "state":"RISK-PLAN",
+                        "formal":qrow.get("formal_state") or qrow.get("formal") or "NONE",
+                        "pp":qrow.get("pinpoint_entry_status") or "WATCH",
+                        "layers":f(qrow.get("layers"),f(qrow.get("gate_count"))),
+                        "bsi":f(qrow.get("bsi")),
+                        "eventTape":f(qrow.get("event_tape_score")),
+                        "moveOrigin":"RISKMAP",
+                    }
+                    rr["movePlanV11"]=_candidate_move_plan(rr)
+                    move_rows.append(rr)
+                    move_syms.add(sym)
+            except Exception as exc:
+                print(f"Ψ-MONSTER-MOVE-PLAN MERGE_ERROR {type(exc).__name__}: {exc}",flush=True)
+
             print("Ψ-MONSTER-CANDIDATES ALL count="+str(len(all_rows))+" rows="+",".join(f"{r.get('symbol')}:{r.get('state')}:{int(f(r.get('layers')))}/6:UP{f((r.get('movePlanV11') or {}).get('shadow',{}).get('expected_excursion_pct')):.1f}%:MS{f((r.get('movePlanV11') or {}).get('shadow',{}).get('move_score')):.0f}" for r in all_rows),flush=True)
             move_rows.sort(key=lambda r:(bool((r.get("movePlanV11") or {}).get("valid")),int(f(r.get("layers"))),f((r.get("movePlanV11") or {}).get("shadow",{}).get("move_score")),f(r.get("bsi"))),reverse=True)
             print(f"Ψ-MONSTER-MOVE-PLAN BOARD candidates={len(move_rows)} validPlans={sum(bool((r.get('movePlanV11') or {}).get('valid')) for r in move_rows)} model=EMPIRICAL_SHADOW",flush=True)
@@ -1393,7 +1433,7 @@ async def board_loop_v5():
                     f"runner={_fmt_px(mp.get('runner'))} proj5={_fmt_px(sh.get('projection5'))} "
                     f"proj10={_fmt_px(sh.get('projection10'))} proj15={_fmt_px(sh.get('projection15'))} "
                     f"proj20={_fmt_px(sh.get('projection20'))} plan={'VALID' if mp.get('valid') else 'SHADOW_ONLY'} "
-                    f"riskState={mp.get('risk_state')} src={mp.get('source')}",
+                    f"riskState={mp.get('risk_state')} src={mp.get('source')} origin={r.get('moveOrigin','MONSTER')}",
                     flush=True,
                 )
             exrows=[r for r in all_rows if str(r.get("monsterPullbackState")) in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING","PULLBACK_ONLY"}]
