@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.69-anchored-discovery-triple-mesh"
+VERSION="11.0.5.70-rotating-micro-structure-recovery"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -340,7 +340,7 @@ def _ws_api_primitives():
     if _ws_api_send_lock is None:
         _ws_api_send_lock = asyncio.Lock()
     if _ws_api_gate is None:
-        _ws_api_gate = asyncio.Semaphore(6)
+        _ws_api_gate = asyncio.Semaphore(3)
     return _ws_api_ready, _ws_api_send_lock, _ws_api_gate
 
 def _ws_api_fail_pending(reason):
@@ -1058,8 +1058,8 @@ async def _structure_fetch_race(client, symbol, interval, limit):
 
     now=time.time()
     healthy=[h for h in hosts if _rest_host_bad_until.get((route_key,h),0)<=now]
-    ordered=(healthy+[h for h in hosts if h not in healthy])[:4]
-    timeout_s=3.0 if limit<=10 else 4.0
+    ordered=(healthy+[h for h in hosts if h not in healthy])[:2]
+    timeout_s=5.0 if limit<=10 else 8.0
     global_gate,lane_gate=_rest_gates("/api/v3/klines")
 
     async def one(host):
@@ -1238,7 +1238,7 @@ async def _structure_historical_klines(client, symbol, interval, limit):
         return rows
 
     # Normal hydration remains WS-API first with REST host-racing fallback.
-    rows=await binance_ws_api_klines(symbol,interval,limit,wait_ready=2.5,response_timeout=7.0)
+    rows=await binance_ws_api_klines(symbol,interval,limit,wait_ready=2.5,response_timeout=12.0)
     if isinstance(rows,list) and rows:
         _ws_api_stats["structure_ok"]+=1
         return rows
@@ -2501,7 +2501,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = int(os.environ.get("PSI_RECOVERY_BATCH", "4"))
+RECOVERY_BATCH = int(os.environ.get("PSI_RECOVERY_BATCH", "2"))
 WATCHDOG_STRUCTURE_RESCUE_BATCH = int(os.environ.get("PSI_WATCHDOG_STRUCTURE_RESCUE_BATCH", "1"))
 WATCHDOG_STRUCTURE_STALE_RESCUE_BATCH = int(os.environ.get("PSI_WATCHDOG_STRUCTURE_STALE_RESCUE_BATCH", "2"))
 WATCHDOG_STRUCTURE_CRITICAL_BATCH = int(os.environ.get("PSI_WATCHDOG_STRUCTURE_CRITICAL_BATCH", "1"))
@@ -2911,7 +2911,7 @@ async def _hydrate_one(sym, lane="FAST"):
             elif lane=="WATCHDOG":
                 timeout_s=28.0
             else:
-                timeout_s=18.0 if lane=="FAST" else 22.0
+                timeout_s=32.0 if lane=="FAST" else 32.0
             sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=timeout_s)
         finally:
             if rest_token is not None:
@@ -3775,7 +3775,13 @@ async def ws_api_micro_fallback_loop():
                         _ws_market_stats["last_book_ms"]=ms
                         tape.tape_stats["wsapi_last_book_ms"]=ms
 
-            trade_targets=priority[:4]
+            trade_targets=[]
+            if priority:
+                start=_ws_market_trade_cursor%len(priority)
+                take=min(4,len(priority))
+                trade_targets=[priority[(start+i)%len(priority)] for i in range(take)]
+                _ws_market_trade_cursor=(start+take)%len(priority)
+
             async def trade_one(sym):
                 rows=await micro_ws_api_request(
                     "trades.aggregate",{"symbol":sym,"limit":30},
@@ -3825,8 +3831,13 @@ async def ws_api_micro_fallback_loop():
                 if any(isinstance(x,int) and x>0 for x in rs):
                     _ws_market_stats["trade_ok"]+=1
 
-            depth_targets=selected[:4]
-            if depth_targets and now-last_depth>=1.5:
+            depth_targets=[]
+            if selected:
+                start=_ws_market_depth_cursor%len(selected)
+                take=min(10,len(selected))
+                depth_targets=[selected[(start+i)%len(selected)] for i in range(take)]
+                _ws_market_depth_cursor=(start+take)%len(selected)
+            if depth_targets and now-last_depth>=1.0:
                 last_depth=now
                 async def depth_one(sym):
                     row=await micro_ws_api_request(
@@ -4104,7 +4115,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.69] Ψ ANCHORED DISCOVERY TRIPLE WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.70] Ψ ROTATING MICRO + STRUCTURE RECOVERY active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
