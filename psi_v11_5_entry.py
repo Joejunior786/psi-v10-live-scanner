@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.21-breakout-structural-intelligence"
+VERSION="11.0.5.22-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -257,7 +257,7 @@ STRUCTURE_RAW_CACHE_PATH = os.environ.get(
 )
 STRUCTURE_TF_CACHE_S = 180.0
 STRUCTURE_TF_RETRY_DELAY_S = 0.12
-STRUCTURE_TF_ATTEMPTS = 3
+STRUCTURE_TF_ATTEMPTS = 1
 STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
@@ -368,8 +368,8 @@ async def _structure_fetch_race(client, symbol, interval, limit):
 
     now=time.time()
     healthy=[h for h in hosts if _rest_host_bad_until.get((route_key,h),0)<=now]
-    ordered=healthy+[h for h in hosts if h not in healthy]
-    timeout_s=3.8 if limit<=10 else 6.2
+    ordered=(healthy+[h for h in hosts if h not in healthy])[:4]
+    timeout_s=3.2 if limit<=10 else 5.0
     global_gate,lane_gate=_rest_gates("/api/v3/klines")
 
     async def one(host):
@@ -1073,7 +1073,7 @@ async def _hydrate_one(sym, lane="FAST"):
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            timeout_s=20.0 if lane=="FAST" else 30.0
+            timeout_s=15.0 if lane=="FAST" else 24.0
             sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=timeout_s)
         finally:
             _structure_owner_ctx.reset(owner_token)
