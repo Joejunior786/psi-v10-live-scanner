@@ -1,15 +1,15 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.42 — Split Execution Micro Transport + Reliable RiskMap**
+Current integrated production build: **Ψ-V11.0.5.43 — Execution Micro Continuity + Reliable RiskMap**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.42`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.43`
 - Pinpoint remains the sole BUY NOW authority.
-- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.42 build.
+- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.43 build.
 
 ## Live integrity rules
 
@@ -62,16 +62,21 @@ The included `Dockerfile` and `railway.toml` deploy the current V11 entrypoint.
 No Binance API key is required for the public market-data feeds used by this service.
 
 
-## V11.0.5.42 execution-micro transport repair
+## V11.0.5.43 execution-micro transport repair
 
 The four qualified execution-micro shards now rotate across Binance websocket hosts instead of being pinned to a single endpoint. Each shard uses explicit connect/heartbeat/receive deadlines and reports its active host plus last-message age. Trade and book sequence validators are reset cleanly on a shard reconnect so a replayed first frame cannot permanently poison sequence validity. This changes transport reliability only; PRE/BUY thresholds and Pinpoint authority are unchanged.
 
 
-## V11.0.5.42 execution-micro subscription repair
+## V11.0.5.43 execution-micro subscription repair
 
 Qualified execution shards now open a short `/stream` websocket first and then issue Binance's official `SUBSCRIBE` request for each shard's `aggTrade` and `depth20@100ms` streams. Subscription acknowledgements and server-side subscription errors are logged explicitly. Multi-host failover and reconnect sequence resets from V11.0.5.40 remain active. Signal thresholds are unchanged.
 
 
-## V11.0.5.42 split execution-micro transport
+## V11.0.5.43 split execution-micro transport
 
 Qualified aggressive-trade telemetry now reuses the already-stable full-universe Monster aggTrade websocket and forwards the original Binance aggTrade payload into the formal micro engine only for selected micro symbols. The four execution shards are depth20-only. This removes duplicate aggTrade subscriptions, reduces execution-shard stream load, and lets depth reconnect independently without resetting trade sequence continuity. No synthetic order flow is introduced and no PRE/BUY threshold is relaxed.
+
+
+## V11.0.5.43 depth continuity
+
+Depth20 execution shards preserve already-valid book state across membership/rebalance reconnects. Because each incoming depth20 frame is a complete top-20 snapshot and the formal engine already requires very fresh books, there is no need to zero healthy book state during our own reconnect. If the replacement stream fails, freshness expires naturally and execution still fails closed. This prevents pool growth from repeatedly collapsing live-micro readiness.

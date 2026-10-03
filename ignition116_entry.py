@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.3-depth-only-execution-shards"
+VERSION = "10.16.4-depth-continuity-preserved"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -496,7 +496,7 @@ async def _shard_loop(shard_id):
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16.3 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"Ψ-V10.16.4 SHARD{shard_id+1} connecting symbols={len(symbols)} "
                 f"gen={generation} host={base_url} mode=DEPTH_ONLY book=DEPTH20_WS",
                 flush=True,
             )
@@ -513,21 +513,34 @@ async def _shard_loop(shard_id):
                 reconnects = 0
                 _sync_ws_status()
 
+                preserved_books = 0
                 for symbol in symbols:
                     st = app.ensure_micro_state(symbol)
-                    st["book_buffer"].clear()
-                    st["book_snapshot_ready"] = False
-                    st["book_sequence_ok"] = True
-                    st["book_sequence_samples"] = 0
-                    st["book_resyncing"] = False
-                    st["last_book_update_id"] = None
-                    # Trade sequencing is now supplied continuously by the
-                    # full-universe Monster aggTrade bridge, so a depth-shard
-                    # reconnect must not reset or interrupt trade continuity.
+                    # depth20 is a complete top-20 snapshot stream. Preserve
+                    # any already-valid book across a transport reconnect so
+                    # pool expansion/rebalancing does not manufacture a
+                    # MICRO_NOT_READY gap. Existing freshness checks still
+                    # expire the state within seconds if no new snapshot lands.
+                    if (
+                        st.get("book_snapshot_ready")
+                        and st.get("book_sequence_ok")
+                        and int(st.get("book_sequence_samples") or 0) >= 3
+                    ):
+                        preserved_books += 1
+                    else:
+                        st["book_buffer"].clear()
+                        st["book_snapshot_ready"] = False
+                        st["book_sequence_ok"] = True
+                        st["book_sequence_samples"] = 0
+                        st["book_resyncing"] = False
+                        st["last_book_update_id"] = None
+                    # Trade sequencing is supplied continuously by the
+                    # full-universe Monster aggTrade bridge and is never reset
+                    # by a depth-only reconnect.
 
                 print(
-                    f"Ψ-V10.16.3 SHARD{shard_id+1} connected symbols={len(symbols)} "
-                    f"host={base_url} book=REST_FREE_DEPTH20",
+                    f"Ψ-V10.16.4 SHARD{shard_id+1} connected symbols={len(symbols)} "
+                    f"host={base_url} preservedBooks={preserved_books} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
 
@@ -658,7 +671,7 @@ async def _v1016_board_loop():
                 for ts in shard_last_msg_ms
             ]
             print(
-                f"Ψ-V10.16.3 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.4 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
                 f"reconnects={shard_reconnects} generations={shard_generation} "
                 f"hosts={shard_last_host} msgAgeMs={ages}",
