@@ -21,6 +21,9 @@ _rest_agg_last_id=defaultdict(lambda:-1)
 _rest_symbol_cursor=0
 _rest_depth_cursor=0
 _rest_last_book_snapshot=0.0
+_rest_direct_gate=None
+_rest_direct_host_idx=0
+_rest_fallback_announced=False
 
 def f(v,d=0.0):
     try:x=float(v)
@@ -172,6 +175,40 @@ async def _shard_loop(idx):
         await asyncio.sleep(min(WS_RECONNECT_MAX_DELAY,1.0+min(reconnects,7)))
 
 
+async def _direct_rest_json(path, params=None):
+    global _rest_direct_gate,_rest_direct_host_idx
+    if _rest_direct_gate is None:
+        _rest_direct_gate=asyncio.Semaphore(4)
+    hosts=[
+        "https://api.binance.com",
+        "https://data-api.binance.vision",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+    ]
+    last_exc=None
+    async with _rest_direct_gate:
+        start=_rest_direct_host_idx%len(hosts)
+        for off in range(len(hosts)):
+            host=hosts[(start+off)%len(hosts)]
+            try:
+                async with app.session.get(
+                    f"{host}{path}",
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=5,connect=2),
+                ) as resp:
+                    body=await resp.text()
+                    if resp.status!=200:
+                        raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
+                    _rest_direct_host_idx=(start+off)%len(hosts)
+                    return json.loads(body)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_exc=exc
+                continue
+    raise last_exc or RuntimeError("REST fallback exhausted hosts")
+
+
 def _rest_priority_symbols():
     universe=list(getattr(q,'universe',[]) or [])
     u=set(universe)
@@ -193,7 +230,7 @@ def _rest_priority_symbols():
 
 async def _rest_fetch_agg(sym):
     try:
-        rows=await app.api_get(app.session,'/api/v3/aggTrades',{'symbol':sym,'limit':20})
+        rows=await _direct_rest_json('/api/v3/aggTrades',{'symbol':sym,'limit':20})
         if not isinstance(rows,list):
             return 0
         now=time.time();added=0
@@ -232,7 +269,7 @@ async def _rest_fetch_agg(sym):
 
 async def _rest_fetch_depth(sym):
     try:
-        d=await app.api_get(app.session,'/api/v3/depth',{'symbol':sym,'limit':20})
+        d=await _direct_rest_json('/api/v3/depth',{'symbol':sym,'limit':20})
         if not isinstance(d,dict):
             return 0
         try:
@@ -254,7 +291,7 @@ async def _rest_book_snapshot():
     if now-_rest_last_book_snapshot<1.5:
         return 0
     try:
-        rows=await app.api_get(app.session,'/api/v3/ticker/bookTicker')
+        rows=await _direct_rest_json('/api/v3/ticker/bookTicker')
         if not isinstance(rows,list):
             return 0
         universe=set(getattr(q,'universe',[]) or [])
@@ -281,7 +318,7 @@ async def _rest_book_snapshot():
         return 0
 
 async def _rest_fallback_loop():
-    global _rest_symbol_cursor,_rest_depth_cursor
+    global _rest_symbol_cursor,_rest_depth_cursor,_rest_fallback_announced
     while True:
         try:
             await asyncio.sleep(max(.5,REST_FALLBACK_INTERVAL))
@@ -292,7 +329,14 @@ async def _rest_fallback_loop():
                 tape_stats['rest_fallback_active']=0
                 continue
             tape_stats['rest_fallback_active']=1
-            await _rest_book_snapshot()
+            books_now=await _rest_book_snapshot()
+            if books_now and not _rest_fallback_announced:
+                _rest_fallback_announced=True
+                print(
+                    f"Ψ-TAPE FALLBACK LIVE source=BINANCE_REST shards={ups}/{SHARDS} "
+                    f"bookSymbols={books_now} executionGates=UNCHANGED",
+                    flush=True,
+                )
 
             priority=_rest_priority_symbols()
             if not priority:
@@ -321,7 +365,7 @@ async def _rest_fallback_loop():
                 _rest_depth_cursor=(start+len(batch))%len(depth_stale)
                 await asyncio.gather(*(_rest_fetch_depth(s) for s in batch),return_exceptions=True)
 
-            if int(time.time())%15==0:
+            if int(time.time())%15==0 or (tape_stats['rest_trades']>0 and tape_stats['rest_trades']<=20):
                 print(
                     f"Ψ-TAPE FALLBACK active=YES shards={ups}/{SHARDS} restTrades={tape_stats['rest_trades']} "
                     f"restBooks={tape_stats['rest_books']} restDepth={tape_stats['rest_depth_ok']} "
