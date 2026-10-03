@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.74-hybrid-rest-micro-fallback"
+VERSION="11.0.5.75-hybrid-rest-micro-cadence-fix"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -3816,7 +3816,7 @@ async def ws_api_discovery_bbo_loop():
 
     while True:
         try:
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.0)
             ready,_,_=_market_ws_primitives()
             if not ready.is_set():
                 continue
@@ -4131,7 +4131,7 @@ async def ws_api_micro_trade_loop():
     global _ws_market_trade_cursor
     while True:
         try:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.2)
             ready,_,_=_trade_ws_primitives()
             if not ready.is_set():
                 continue
@@ -4525,7 +4525,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.74] Ψ HYBRID REST MICRO FALLBACK active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.75] Ψ HYBRID REST MICRO + CADENCE FIX active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
