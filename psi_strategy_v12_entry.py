@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.7-persistent-full-hydration"
+VERSION = "12.0.8-balanced-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -46,8 +46,8 @@ ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
 FETCH_CONCURRENCY = max(6, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "8")), 8))
-MAX_INFLIGHT_SYMBOLS = max(16, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "32")), 48))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(8, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "16")), 24))
+MAX_INFLIGHT_SYMBOLS = max(8, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "16")), 32))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 16))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -87,9 +87,10 @@ _v12_ws_locks = [None] * V12_WS_SHARDS
 _v12_ws_gates = [None] * V12_WS_SHARDS
 _v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
 _v12_ws_ids = [0] * V12_WS_SHARDS
+_v12_shard_pool = None
 
 V12_CACHE_PATH = os.getenv("PSI_V12_CACHE_PATH", "/data/v12_hydration_cache.pkl")
-V12_CACHE_SAVE_SECONDS = max(30.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "60")))
+V12_CACHE_SAVE_SECONDS = max(20.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "30")))
 _last_cache_save = 0.0
 _last_cache_ready = -1
 
@@ -951,6 +952,35 @@ def build_plan(sym, current, best, setups, s1, s4, sd, sw):
 
 
 
+
+def _v12_get_shard_pool():
+    global _v12_shard_pool
+    if _v12_shard_pool is None:
+        _v12_shard_pool = asyncio.Queue(maxsize=V12_WS_SHARDS)
+        for i in range(V12_WS_SHARDS):
+            _v12_shard_pool.put_nowait(i)
+    return _v12_shard_pool
+
+
+async def _v12_borrow_shard(timeout=1.5):
+    pool = _v12_get_shard_pool()
+    try:
+        return await asyncio.wait_for(pool.get(), timeout=timeout)
+    except asyncio.TimeoutError:
+        _stats["shard_pool_timeout"] += 1
+        return None
+
+
+def _v12_return_shard(shard):
+    if shard is None:
+        return
+    pool = _v12_get_shard_pool()
+    try:
+        pool.put_nowait(int(shard) % V12_WS_SHARDS)
+    except asyncio.QueueFull:
+        _stats["shard_pool_overreturn"] += 1
+
+
 def _v12_ws_primitives(shard):
     shard = int(shard) % V12_WS_SHARDS
     if _v12_ws_ready[shard] is None:
@@ -1098,30 +1128,38 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
-    base_shard = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
-
-    # Prefer the deterministic shard first, then fail over to a different
-    # physical socket. This prevents a single slow shard from pinning one
-    # symbol/timeframe for an entire hydration cycle.
-    shard_order = [base_shard]
-    others = [i for i in range(V12_WS_SHARDS) if i != base_shard]
-    others.sort(key=lambda i: len(_v12_ws_pending[i]))
-    shard_order.extend(others[:2])
-
     rows = None
-    attempts = 0
-    for shard in shard_order:
-        attempts += 1
-        timeout = 6.0 if deep else 4.5
-        rows = await v12_ws_klines(sym, tf, limit, shard=shard, response_timeout=timeout)
+    tried = set()
+
+    # Borrow a physical socket from the pool so concurrent requests cannot
+    # collide on the same shard. Retry once on a different shard when needed.
+    for attempt in range(2):
+        shard = await _v12_borrow_shard(timeout=1.5)
+        if shard is None:
+            break
+        try:
+            if shard in tried and len(tried) < V12_WS_SHARDS:
+                _v12_return_shard(shard)
+                shard = await _v12_borrow_shard(timeout=1.0)
+                if shard is None:
+                    break
+            tried.add(shard)
+            timeout = 5.5 if deep else 3.8
+            rows = await v12_ws_klines(
+                sym, tf, limit,
+                shard=shard,
+                response_timeout=timeout,
+            )
+        finally:
+            _v12_return_shard(shard)
+
         if isinstance(rows, list) and len(rows) >= 55:
-            if shard != base_shard:
+            if attempt > 0:
                 _stats["ws_failover_ok"] += 1
             break
         rows = None
-        if attempts >= 2:
-            break
-        await asyncio.sleep(0.05)
+        if attempt == 0:
+            await asyncio.sleep(0.04)
 
     if isinstance(rows, list) and len(rows) >= 55:
         _stats["fetch_ws_ok"] += 1
@@ -1174,9 +1212,8 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
         await one("1w", deep=weekly_deep)
         return
 
-    core_tfs = ("1h", "4h", "1d")
     needed = []
-    for tf in core_tfs:
+    for tf in ("1h", "4h", "1d"):
         item = _cache.get(sym, {}).get(tf) or {}
         rows = item.get("rows") or []
         if force_deep:
@@ -1188,14 +1225,12 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
             if not item.get("snap") or stale or needs_deep:
                 needed.append(tf)
 
-    if needed:
-        await asyncio.gather(
-            *(one(tf, deep=(force_deep or active)) for tf in needed),
-            return_exceptions=True,
-        )
-        return
+    # Complete each symbol rather than spraying 1/3 snapshots across many
+    # symbols. Eight symbol workers map cleanly to eight physical RPC shards.
+    for tf in needed:
+        await one(tf, deep=(force_deep or active))
 
-    if active:
+    if active and not needed:
         weekly = _cache.get(sym, {}).get("1w") or {}
         weekly_rows = weekly.get("rows") or []
         weekly_needs_deep = len(weekly_rows) < DEEP_MIN_ROWS
@@ -1453,46 +1488,37 @@ async def strategy_loop():
                 if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
                     refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=True))
 
-            # The majority of slots are reserved for fair whole-universe
-            # hydration so 403/403 coverage actually converges.
+            # Reserve a small number of symbol slots for Weekly and EMA200
+            # enrichment before filling the queue with broad bootstrap work.
+            weekly_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=1, deep=False)
+            for sym in weekly_jobs:
+                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
+                    refresh_tasks[sym] = asyncio.create_task(
+                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=False)
+                    )
+
+            deep_jobs = _deep_backfill_symbols(universe, refresh_tasks, limit=1)
+            for sym in deep_jobs:
+                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
+                    refresh_tasks[sym] = asyncio.create_task(
+                        refresh_symbol(sym, sem, force_deep=True)
+                    )
+
+            weekly_deep_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=1, deep=True)
+            for sym in weekly_deep_jobs:
+                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
+                    refresh_tasks[sym] = asyncio.create_task(
+                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=True)
+                    )
+
+            # The remaining slots are dedicated to fair whole-universe core
+            # hydration, with partial symbols completed first.
             bootstrap = _bootstrap_symbols(universe, refresh_tasks)
             for sym in bootstrap:
                 if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
                     break
                 if sym not in refresh_tasks:
                     refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=False))
-
-            # Do not leave Weekly and EMA200 at zero until fast coverage reaches
-            # 403/403. Reserve a small background budget for each from the
-            # beginning, while most capacity continues broad core hydration.
-            weekly_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=2, deep=False)
-            for sym in weekly_jobs:
-                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
-                    break
-                if sym not in refresh_tasks:
-                    refresh_tasks[sym] = asyncio.create_task(
-                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=False)
-                    )
-
-            deep_jobs = _deep_backfill_symbols(universe, refresh_tasks, limit=2)
-            for sym in deep_jobs:
-                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
-                    break
-                if sym not in refresh_tasks:
-                    refresh_tasks[sym] = asyncio.create_task(
-                        refresh_symbol(sym, sem, force_deep=True)
-                    )
-
-            # Once a Weekly fast packet exists, progressively upgrade it to
-            # Weekly EMA/SMA200 depth as spare capacity becomes available.
-            weekly_deep_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=1, deep=True)
-            for sym in weekly_deep_jobs:
-                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
-                    break
-                if sym not in refresh_tasks:
-                    refresh_tasks[sym] = asyncio.create_task(
-                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=True)
-                    )
 
             await asyncio.sleep(0.25)
 
@@ -1519,6 +1545,7 @@ async def strategy_loop():
                 f"mtfReady={ready_now}/{len(universe)} deepMAReady={deep_ready}/{len(universe)} "
                 f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
+                f"shardPool={_v12_get_shard_pool().qsize()}/{V12_WS_SHARDS} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)} "
                 f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
@@ -1636,7 +1663,7 @@ async def main():
     loaded = await asyncio.to_thread(_load_cache_sync)
     print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
     print(
-        "[v12.0.7] MULTI-SETUP AUTHORITY + PERSISTENT FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.8] MULTI-SETUP AUTHORITY + BALANCED PERSISTENT HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
