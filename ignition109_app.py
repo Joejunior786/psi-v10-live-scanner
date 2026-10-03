@@ -408,6 +408,20 @@ async def persistent_rapid_websocket_loop():
         await asyncio.sleep(1)
 
 
+def _radar_rows(limit=10):
+    rows = base.rank(limit=None, triggered_only=False)
+    rows.sort(
+        key=lambda x: (
+            bool(x.get("latent_ignition")),
+            bool(x.get("clustered_ignition")),
+            bool(x.get("trigger")),
+            float(x.get("score", 0)),
+        ),
+        reverse=True,
+    )
+    return rows[:limit]
+
+
 async def health(req):
     c = v7.coverage()
     c["decision_engine"] = {
