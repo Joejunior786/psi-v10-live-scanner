@@ -10,12 +10,12 @@ b17 = base.b17
 q = base.q
 app = base.app
 
-VERSION = "10.19.1-support-liquidity-sweep-riskmap"
-SUPPORT_SAMPLE_SECONDS = 30.0
+VERSION = "10.19.3-fast-riskmap-recovery"
+SUPPORT_SAMPLE_SECONDS = 10.0
 SUPPORT_MAX_SYMBOLS = 8
-SUPPORT_MAX_AGE = 95.0
+SUPPORT_MAX_AGE = 120.0
 SUPPORT_BATCH_PER_CYCLE = 2
-SUPPORT_BUILD_TIMEOUT = 75.0
+SUPPORT_BUILD_TIMEOUT = 22.0
 ENTRY_MAX_DISTANCE_PCT = 3.0
 MAX_PLAN_RISK_PCT = 3.5
 MIN_PLAN_RISK_PCT = 0.20
@@ -300,7 +300,7 @@ async def build_risk_map(sym):
         risk_stats["errors"] += 1
         risk_stats["last_symbol"] = sym
         risk_stats["last_error"] = f"{type(exc).__name__}: {exc}"
-        print(f"Ψ-V10.19.1 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
+        print(f"Ψ-V10.19.3 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
 
 
 async def support_loop():
@@ -314,7 +314,7 @@ async def support_loop():
             risk_stats["timeouts"] += 1
             risk_stats["last_symbol"] = sym
             risk_stats["last_error"] = f"BUILD_TIMEOUT>{SUPPORT_BUILD_TIMEOUT:.0f}s"
-            print(f"Ψ-V10.19.1 RISKMAP_TIMEOUT {sym} timeout={SUPPORT_BUILD_TIMEOUT:.0f}s", flush=True)
+            print(f"Ψ-V10.19.3 RISKMAP_TIMEOUT {sym} timeout={SUPPORT_BUILD_TIMEOUT:.0f}s", flush=True)
 
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
@@ -341,9 +341,9 @@ async def support_loop():
             batch=[syms[(cursor+i)%len(syms)] for i in range(n)]
             cursor=(cursor+n)%max(1,len(syms))
 
-            # Exactly two complete risk-map builds at once, matching the two
-            # reserved background kline lanes. Each symbol fetches 1m/5m/15m
-            # sequentially, so the cycle cannot self-starve.
+            # Exactly two complete risk-map builds at once. The V11.0.5.33
+            # loader fetches 1m/5m/15m concurrently with bounded WS/REST
+            # fallbacks, so failed routes cannot occupy the scheduler for 75s.
             await asyncio.gather(*(one(sym) for sym in batch))
             risk_stats["samples"] += 1
         except asyncio.CancelledError:
@@ -434,7 +434,7 @@ async def print_risk_loop():
             states={}
             for _,x in fresh:
                 st=str(x.get("plan_state") or "WAIT");states[st]=states.get(st,0)+1
-            print(f"Ψ-V10.19.1 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
+            print(f"Ψ-V10.19.3 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
             ranked = sorted(fresh, key=lambda item: (1 if str(item[1].get("sweep_state")) == "SWEEP_RECLAIMED" else 0, f(item[1].get("sweep_score")), f(item[1].get("support1_strength")), -f(item[1].get("support1_distance_pct"), 99)), reverse=True)[:10]
             for i, (sym, x) in enumerate(ranked, 1):
                 risk_text = "-" if x.get("risk_pct") is None else f"{f(x.get('risk_pct')):.3f}%"
@@ -442,7 +442,7 @@ async def print_risk_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"Ψ-V10.19.1 RISKMAP_ERROR {type(e).__name__}: {e}", flush=True)
+            print(f"Ψ-V10.19.3 RISKMAP_ERROR {type(e).__name__}: {e}", flush=True)
 
 
 b17.diag_pool = diag1191
