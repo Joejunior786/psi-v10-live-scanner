@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import os
 import statistics
@@ -57,6 +58,17 @@ _cycle = 0
 _cursor = 0
 _last_board_print = 0.0
 _stats = defaultdict(int)
+
+# Dedicated V12 Binance Spot WS-API connection for historical candles. This
+# prevents legacy recovery/structure traffic from starving the new strategy
+# engines and avoids dependence on Railway REST routing.
+_v12_ws_conn = None
+_v12_ws_ready = None
+_v12_ws_lock = None
+_v12_ws_gate = None
+_v12_ws_pending = {}
+_v12_ws_id = 0
+V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
 
 
 def f(v, d=0.0):
@@ -813,36 +825,147 @@ def build_plan(sym, current, best, setups, s1, s4, sd, sw):
     }
 
 
+
+def _v12_ws_primitives():
+    global _v12_ws_ready, _v12_ws_lock, _v12_ws_gate
+    if _v12_ws_ready is None:
+        _v12_ws_ready = asyncio.Event()
+    if _v12_ws_lock is None:
+        _v12_ws_lock = asyncio.Lock()
+    if _v12_ws_gate is None:
+        _v12_ws_gate = asyncio.Semaphore(6)
+    return _v12_ws_ready, _v12_ws_lock, _v12_ws_gate
+
+
+def _v12_ws_fail_pending(reason):
+    for rid, fut in list(_v12_ws_pending.items()):
+        if fut is not None and not fut.done():
+            try:
+                fut.set_exception(RuntimeError(reason))
+            except Exception:
+                pass
+    _v12_ws_pending.clear()
+
+
+async def v12_ws_rpc_loop():
+    global _v12_ws_conn
+    ready, _, _ = _v12_ws_primitives()
+    while app.session is None:
+        await asyncio.sleep(0.25)
+    while True:
+        ws = None
+        try:
+            async with app.session.ws_connect(
+                V12_WS_API_URL,
+                heartbeat=15,
+                autoping=True,
+                receive_timeout=40,
+            ) as ws:
+                _v12_ws_conn = ws
+                ready.set()
+                _stats["ws_connects"] += 1
+                print(f"Ψ-V12 WS-RPC connected url={V12_WS_API_URL}", flush=True)
+                async for msg in ws:
+                    if msg.type == legacy.aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload = json.loads(msg.data)
+                        except Exception:
+                            continue
+                        rid = str(payload.get("id") or "")
+                        fut = _v12_ws_pending.pop(rid, None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(payload)
+                    elif msg.type in {
+                        legacy.aiohttp.WSMsgType.CLOSED,
+                        legacy.aiohttp.WSMsgType.CLOSE,
+                        legacy.aiohttp.WSMsgType.ERROR,
+                    }:
+                        raise RuntimeError(f"V12 WS RPC closed type={msg.type}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _stats["ws_errors"] += 1
+            _stats["ws_last_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            ready.clear()
+            if _v12_ws_conn is ws:
+                _v12_ws_conn = None
+            _v12_ws_fail_pending("V12 WS RPC reset")
+        await asyncio.sleep(0.75)
+
+
+async def v12_ws_klines(symbol, interval, limit):
+    global _v12_ws_id
+    ready, lock, gate = _v12_ws_primitives()
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+        _stats["ws_unavailable"] += 1
+        return None
+
+    acquired = False
+    rid = None
+    try:
+        await asyncio.wait_for(gate.acquire(), timeout=1.5)
+        acquired = True
+        loop = asyncio.get_running_loop()
+        async with lock:
+            ws = _v12_ws_conn
+            if ws is None or ws.closed:
+                return None
+            _v12_ws_id += 1
+            rid = str(_v12_ws_id)
+            fut = loop.create_future()
+            _v12_ws_pending[rid] = fut
+            await ws.send_json({
+                "id": rid,
+                "method": "klines",
+                "params": {
+                    "symbol": str(symbol).upper(),
+                    "interval": str(interval),
+                    "limit": int(limit),
+                },
+            })
+            _stats["ws_requests"] += 1
+
+        payload = await asyncio.wait_for(fut, timeout=5.0)
+        status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
+        rows = payload.get("result") if isinstance(payload, dict) else None
+        if status == 200 and isinstance(rows, list) and rows:
+            _stats["ws_ok"] += 1
+            return rows
+        _stats["ws_fail"] += 1
+        _stats["ws_last_error"] = f"status={status} payload={str(payload)[:180]}"
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _stats["ws_fail"] += 1
+        _stats["ws_last_error"] = f"{type(exc).__name__}: {exc}"
+        return None
+    finally:
+        if rid is not None:
+            _v12_ws_pending.pop(rid, None)
+        if acquired:
+            gate.release()
+
+
 async def _fetch_tf(sym, tf):
     if app.session is None:
         return False
     params = {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]}
-    rows = None
-
-    # Primary: existing proven Binance Spot WS-API kline RPC.
-    try:
-        rows = await legacy.binance_ws_api_klines(
-            sym, tf, TF_LIMIT[tf],
-            wait_ready=1.5,
-            response_timeout=4.0,
-            gate_timeout=1.2,
-        )
-        if isinstance(rows, list) and len(rows) >= 55:
-            _stats["fetch_ws_ok"] += 1
-    except asyncio.CancelledError:
-        raise
-    except Exception:
+    rows = await v12_ws_klines(sym, tf, TF_LIMIT[tf])
+    if isinstance(rows, list) and len(rows) >= 55:
+        _stats["fetch_ws_ok"] += 1
+    else:
         rows = None
 
-    # Fallback: multi-host REST failover lane. This is deliberately the
-    # risk/priority lane, never the one-at-a-time background candle lane.
-    if not isinstance(rows, list) or len(rows) < 55:
+    if rows is None:
         token = legacy._risk_plan_request_ctx.set(True)
         try:
-            rows = await legacy.resilient_api_get(
-                app.session,
-                "/api/v3/klines",
-                params,
+            rows = await asyncio.wait_for(
+                legacy.resilient_api_get(app.session, "/api/v3/klines", params),
+                timeout=7.0,
             )
             if isinstance(rows, list) and len(rows) >= 55:
                 _stats["fetch_rest_ok"] += 1
@@ -864,13 +987,22 @@ async def _fetch_tf(sym, tf):
 
 async def refresh_symbol(sym, sem):
     now = time.time()
-    async with sem:
-        for tf in ("1h", "4h", "1d", "1w"):
-            item = _cache.get(sym, {}).get(tf) or {}
-            if now - f(item.get("updated")) <= TF_TTL[tf] and item.get("snap"):
-                continue
-            await _fetch_tf(sym, tf)
-            await asyncio.sleep(0.03)
+    stale = []
+    for tf in ("1h", "4h", "1d", "1w"):
+        item = _cache.get(sym, {}).get(tf) or {}
+        if now - f(item.get("updated")) > TF_TTL[tf] or not item.get("snap"):
+            stale.append(tf)
+
+    async def one(tf):
+        async with sem:
+            try:
+                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=13.0)
+            except asyncio.TimeoutError:
+                _stats["fetch_timeout"] += 1
+                return False
+
+    if stale:
+        await asyncio.gather(*(one(tf) for tf in stale), return_exceptions=True)
 
 
 def _priority_symbols(universe):
@@ -1084,7 +1216,7 @@ async def main():
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
-    await asyncio.gather(legacy.main(), strategy_loop())
+    await asyncio.gather(legacy.main(), v12_ws_rpc_loop(), strategy_loop())
 
 
 if __name__ == "__main__":
