@@ -188,38 +188,53 @@ async def _mini_rest_snapshot():
     global radar_mini_connected,mini_rest_ok,mini_rest_fail,mini_source
     if getattr(app,"session",None) is None:
         return 0
+    symbols=list(getattr(q,"universe",[]) or [])
+    if not symbols:
+        return 0
     hosts=[
         "https://api.binance.com",
         "https://data-api.binance.vision",
         "https://api1.binance.com",
         "https://api2.binance.com",
     ]
-    last_exc=None
-    for host in hosts:
-        try:
-            async with app.session.get(
-                f"{host}/api/v3/ticker/24hr",
-                params={"type":"MINI"},
-                timeout=aiohttp.ClientTimeout(total=10,connect=2),
-            ) as resp:
-                body=await resp.text()
-                if resp.status!=200:
-                    raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
-                payload=json.loads(body)
-                n=_mini_ingest(payload,"REST_24HR")
-                if n:
-                    radar_mini_connected=True
-                    mini_rest_ok+=1
-                    print(f"Ψ-V10.7.1 RADAR mini REST fallback live symbols={n} host={host}",flush=True)
-                    return n
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            last_exc=exc
+    total=0
+    # Small symbol batches avoid the oversized all-market 24h response that
+    # times out on Railway while preserving real Binance OHLC/24h telemetry.
+    for offset in range(0,len(symbols),60):
+        batch=symbols[offset:offset+60]
+        payload=None
+        last_exc=None
+        for host in hosts:
+            try:
+                async with app.session.get(
+                    f"{host}/api/v3/ticker/24hr",
+                    params={"symbols":json.dumps(batch,separators=(",",":")),"type":"MINI"},
+                    timeout=aiohttp.ClientTimeout(total=7,connect=2),
+                ) as resp:
+                    body=await resp.text()
+                    if resp.status!=200:
+                        raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
+                    payload=json.loads(body)
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_exc=exc
+                continue
+        if not isinstance(payload,list):
+            mini_rest_fail+=1
+            print(f"RADAR_MINI_REST_BATCH: {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",flush=True)
             continue
-    mini_rest_fail+=1
-    print(f"RADAR_MINI_REST: {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",flush=True)
-    return 0
+        total+=_mini_ingest(payload,"REST_24HR_MINI_BATCH")
+    if total:
+        radar_mini_connected=True
+        mini_source="REST_24HR_MINI_BATCH"
+        mini_rest_ok+=1
+        print(f"Ψ-V10.7.1 RADAR mini REST fallback live symbols={total}/{len(symbols)} source=BATCHED_MINI",flush=True)
+    else:
+        mini_rest_fail+=1
+    return total
+
 
 async def mini_rest_loop():
     while True:
@@ -272,7 +287,7 @@ async def mini_loop():
         finally:
             # Do not mark the feed unavailable when a fresh REST fallback is
             # already maintaining mini_24h.
-            radar_mini_connected=(mini_source=="REST_24HR" and now()-mini_last_message_ts<=8.0)
+            radar_mini_connected=(mini_source.startswith("REST_") and now()-mini_last_message_ts<=8.0)
         await asyncio.sleep(1)
 
 
