@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.49-watchdog-seed-expansion"
+VERSION="11.0.5.50-execution-scope-watchdog"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -2504,6 +2504,50 @@ async def _watchdog_refresh_extension():
     return n
 
 
+def _watchdog_execution_scope(fallback_scope=None):
+    """Stable Watchdog health population: actual execution symbols first.
+
+    Recovery/discovery may rotate across 80 symbols, but health should reflect
+    the symbols that can currently reach Pinpoint execution. Per-symbol
+    structure freshness remains mandatory regardless of Watchdog status.
+    """
+    out=[];seen=set()
+    universe_set=set(getattr(q,"universe_set",set()) or set())
+    def add(sym):
+        sym=str(sym or "")
+        if sym and sym in universe_set and sym not in seen:
+            seen.add(sym);out.append(sym)
+
+    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+        add(sym)
+
+    # Include formal execution-near candidates even if continuity has not yet
+    # migrated them into selected_micro_symbols.
+    ranked=[]
+    for sym,row in list(getattr(q,"latest",{}).items()):
+        if sym not in universe_set or not isinstance(row,dict):
+            continue
+        state=str(row.get("formal_state") or row.get("state") or "")
+        pstate=str(row.get("pinpoint_state") or "")
+        rank=(
+            4 if state=="BUY NOW" else
+            3 if state=="PRE-IGNITION" else
+            2 if state=="EARLY OPPORTUNITY" else
+            1 if pstate in {"BUY NOW","PINPOINT ARMED","SETUP READY"} else 0
+        )
+        if rank:
+            ranked.append((rank,f(row.get("score")),str(sym)))
+    for _,_,sym in sorted(ranked,reverse=True):
+        add(sym)
+
+    # During cold start only, give Watchdog a small stable fallback rather than
+    # the entire rotating 80-symbol discovery scope.
+    if not out and fallback_scope:
+        for sym in list(fallback_scope)[:16]:
+            add(sym)
+    return out
+
+
 def _watchdog_structure_priority(scope):
     """Execution-first stale/missing structure rescue order."""
     out=[];seen=set()
@@ -2624,14 +2668,20 @@ async def watchdog_loop():
             total=len(scope)
             ever_cov=sum(1 for s in scope if _structure_age_recovery(s)<999000)
             fresh_cov=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+
+            exec_scope=_watchdog_execution_scope(scope)
+            exec_total=len(exec_scope)
+            exec_ever=sum(1 for s in exec_scope if _structure_age_recovery(s)<999000)
+            exec_fresh=sum(1 for s in exec_scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+
             pool=len(getattr(app,"selected_micro_symbols",[]) or [])
             pin=_watchdog_pinpoint_count()
             shards=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS))
             ext_age=(now-f(extrest.ext_last_refresh,0.0)) if f(extrest.ext_last_refresh,0.0)>0 else 999999.0
             startup_age=now-_watchdog_started
 
-            if ever_cov>_watchdog_last_ever_cov:
-                _watchdog_last_ever_cov=ever_cov
+            if exec_ever>_watchdog_last_ever_cov:
+                _watchdog_last_ever_cov=exec_ever
                 _watchdog_last_cov_progress=now
             if pool>_watchdog_last_pool:
                 _watchdog_last_pool=pool
@@ -2657,23 +2707,27 @@ async def watchdog_loop():
             # hydrate execution-priority symbols over an independent multi-host
             # REST route. This can also bootstrap a limited number of missing
             # raw seeds and never changes signal thresholds.
-            structure_critical=fresh_cov<min(total,WATCHDOG_STRUCTURE_CRITICAL_FRESH)
+            required_exec_fresh=min(exec_total,16) if exec_total>0 else min(total,16)
+            structure_critical=exec_fresh<min(required_exec_fresh,WATCHDOG_STRUCTURE_CRITICAL_FRESH)
             structure_stalled=now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
             if (
                 startup_age>WATCHDOG_STARTUP_GRACE_S
-                and fresh_cov<min(total,(16 if pool==0 else 32))
+                and required_exec_fresh>0
+                and exec_fresh<required_exec_fresh
                 and (structure_critical or structure_stalled)
                 and now-_watchdog_last_structure_rescue>=WATCHDOG_STRUCTURE_RESCUE_COOLDOWN_S
             ):
                 try:
-                    before_fresh=fresh_cov
-                    before_ever=ever_cov
-                    rescue=await _watchdog_structure_rescue(scope,fresh_cov)
+                    before_exec_fresh=exec_fresh
+                    before_exec_ever=exec_ever
+                    rescue=await _watchdog_structure_rescue(exec_scope,exec_fresh)
                     fresh_cov=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
                     ever_cov=sum(1 for s in scope if _structure_age_recovery(s)<999000)
-                    if fresh_cov>before_fresh or ever_cov>before_ever:
+                    exec_fresh=sum(1 for s in exec_scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+                    exec_ever=sum(1 for s in exec_scope if _structure_age_recovery(s)<999000)
+                    if exec_fresh>before_exec_fresh or exec_ever>before_exec_ever:
                         _watchdog_last_cov_progress=now
-                        _watchdog_last_ever_cov=max(_watchdog_last_ever_cov,ever_cov)
+                        _watchdog_last_ever_cov=max(_watchdog_last_ever_cov,exec_ever)
                     watchdog_stats["structure_kicks"]+=1
                     watchdog_stats["actions"]+=1
                     actions.append(f"STRUCTURE_RESCUE:{rescue.get('ok',0)}/{rescue.get('attempted',0)}")
@@ -2728,8 +2782,12 @@ async def watchdog_loop():
                     print(f"Ψ-WATCHDOG ERROR SHARD_ASSIGN {type(exc).__name__}: {exc}",flush=True)
 
             ext_live=ext_age<=WATCHDOG_EXT_STALE_S
-            min_fresh=min(total,16)
-            structure_ready=(startup_age<=WATCHDOG_STARTUP_GRACE_S or fresh_cov>=min_fresh)
+            min_fresh=required_exec_fresh
+            structure_ready=(
+                startup_age<=WATCHDOG_STARTUP_GRACE_S
+                or required_exec_fresh==0
+                or exec_fresh>=required_exec_fresh
+            )
             rest_recent_ok=(_rest_last_fail<=0 or now-_rest_last_fail>60.0)
             continuity_ok=(startup_age<=WATCHDOG_STARTUP_GRACE_S or pool>0)
             shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
@@ -2776,7 +2834,8 @@ async def watchdog_loop():
             reason="OK" if healthy else ",".join(health_reasons)
             print(
                 f"Ψ-WATCHDOG status={status} reason={reason} cycle={watchdog_stats['cycles']} "
-                f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
+                f"structureFreshExec={exec_fresh}/{exec_total} structureEverExec={exec_ever}/{exec_total} "
+                f"structureFreshScope={fresh_cov}/{total} structureEverScope={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} liveMicro={live_micro}/{pool} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wdSeedOK={recovery_stats['rescue_ok']} wdSeedFail={recovery_stats['rescue_fail']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
@@ -2795,7 +2854,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.49] Ψ WATCHDOG SEED EXPANSION + DEPTH-FRAME EXECUTION active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog now reports the failing subsystem explicitly and expands structure coverage by bootstrapping missing execution-priority raw seeds through the proven adaptive WS-API→REST loader; ordinary FAST recovery then keeps those symbols fresh. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.50] Ψ EXECUTION-SCOPE WATCHDOG + SEED EXPANSION active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog now separates execution structure health from the rotating discovery/recovery scope. It bootstraps missing execution-priority raw seeds through the proven adaptive WS-API→REST loader, while ordinary FAST recovery keeps them fresh. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
