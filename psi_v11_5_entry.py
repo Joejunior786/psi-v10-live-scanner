@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.89-depth-failover-chain"
+VERSION="11.0.5.90-parallel-trade-failover-race"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -168,6 +168,7 @@ _micro_rest_stats={
     "trade_micro_ws_ok":0,"trade_micro_ws_fail":0,
     "depth_micro_ws_ok":0,"depth_micro_ws_fail":0,
     "trade_budget_timeout":0,"depth_budget_timeout":0,
+    "trade_race_ws_win":0,"trade_race_rest_win":0,"trade_race_fail":0,
     "rest_race_ok":0,"rest_race_fail":0,
 }
 
@@ -4522,35 +4523,84 @@ async def ws_api_micro_trade_loop():
                         response_timeout=7.0,gate_timeout=2.0,
                     )
 
-                # Secondary: independent shared micro WS-API. It returns the
-                # same verified Binance aggregate-trade schema and still flows
-                # through app.process_agg_trade(), preserving all sequence and
-                # freshness requirements.
+                # Failover race: after the dedicated trade lane fails,
+                # run the independent shared WS-API and rotating REST race in
+                # parallel. The first valid Binance aggregate-trade payload
+                # wins. Both sources still flow through process_agg_trade(),
+                # preserving every existing sequence/freshness execution gate.
                 if not isinstance(rows,list):
-                    rows=await micro_ws_api_request(
-                        "trades.aggregate",{"symbol":sym,"limit":20},
-                        response_timeout=6.0,gate_timeout=1.5,
-                    )
-                    if isinstance(rows,list):
-                        _micro_rest_stats["trade_micro_ws_ok"]+=1
-                    else:
-                        _micro_rest_stats["trade_micro_ws_fail"]+=1
-
-                # Tertiary: bounded Binance public REST.
-                if not isinstance(rows,list):
-                    try:
-                        rows=await asyncio.wait_for(
-                            micro_rest_get(
-                                "/api/v3/aggTrades",
-                                {"symbol":sym,"limit":20},
-                                "trade",
-                                total_timeout=3.5,
-                            ),
-                            timeout=8.0,
+                    async def _shared_trade():
+                        out=await micro_ws_api_request(
+                            "trades.aggregate",{"symbol":sym,"limit":20},
+                            response_timeout=4.5,gate_timeout=1.0,
                         )
-                    except asyncio.TimeoutError:
+                        return "MICRO_WS",out
+
+                    async def _rest_trade():
+                        out=await micro_rest_get(
+                            "/api/v3/aggTrades",
+                            {"symbol":sym,"limit":20},
+                            "trade",
+                            total_timeout=3.3,
+                        )
+                        return "REST_RACE",out
+
+                    tasks={
+                        asyncio.create_task(_shared_trade()),
+                        asyncio.create_task(_rest_trade()),
+                    }
+                    winner_source="-"
+                    deadline=asyncio.get_running_loop().time()+5.0
+                    try:
+                        while tasks and not isinstance(rows,list):
+                            remaining=max(0.0,deadline-asyncio.get_running_loop().time())
+                            if remaining<=0:
+                                break
+                            done,pending=await asyncio.wait(
+                                tasks,
+                                timeout=remaining,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if not done:
+                                tasks=set(pending)
+                                break
+                            tasks=set(pending)
+                            for task in done:
+                                try:
+                                    src,out=task.result()
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    src,out="-",None
+                                if src=="MICRO_WS":
+                                    if isinstance(out,list):
+                                        _micro_rest_stats["trade_micro_ws_ok"]+=1
+                                    else:
+                                        _micro_rest_stats["trade_micro_ws_fail"]+=1
+                                if isinstance(out,list):
+                                    rows=out
+                                    winner_source=src
+                                    break
+                    finally:
+                        # Do not block the hydration loop while a losing HTTP/
+                        # WS operation tears down; cancel and consume it later.
+                        for task in tasks:
+                            task.cancel()
+                            def _consume_done(t):
+                                try:
+                                    t.exception()
+                                except (asyncio.CancelledError,Exception):
+                                    pass
+                            task.add_done_callback(_consume_done)
+
+                    if isinstance(rows,list):
+                        if winner_source=="MICRO_WS":
+                            _micro_rest_stats["trade_race_ws_win"]+=1
+                        elif winner_source=="REST_RACE":
+                            _micro_rest_stats["trade_race_rest_win"]+=1
+                    else:
+                        _micro_rest_stats["trade_race_fail"]+=1
                         _micro_rest_stats["trade_budget_timeout"]+=1
-                        rows=None
                 if not isinstance(rows,list):
                     return 0
                 last=int(tape._rest_agg_last_id.get(sym,-1))
@@ -4745,6 +4795,7 @@ async def ws_api_micro_log_loop():
                 f"depthWSreq={_depth_ws_stats['requests']} depthOKws={_depth_ws_stats['ok']} "
                 f"depthFail={_depth_ws_stats['fail']} depthTO={_depth_ws_stats['timeouts']} "
                 f"microTradeFB={_micro_rest_stats['trade_micro_ws_ok']}/{_micro_rest_stats['trade_micro_ws_fail']} "
+                f"tradeRace={_micro_rest_stats['trade_race_ws_win']}/{_micro_rest_stats['trade_race_rest_win']}/{_micro_rest_stats['trade_race_fail']} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -5002,7 +5053,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.89] Ψ DEPTH FAILOVER CHAIN active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.90] Ψ PARALLEL TRADE FAILOVER RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
