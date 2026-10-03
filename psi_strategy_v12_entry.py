@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.3-fast-fail-hydration"
+VERSION = "12.1.4-daily-rest-race"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1430,12 +1430,9 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
 
-    # 1) Race two already-proven scanner-owned Binance WS transports:
-    #    - structure/risk WS (3-request gate)
-    #    - market WS (8-request gate)
-    # This avoids overloading either lane and returns on the first valid
-    # Binance kline response. Both transports already have production
-    # connection lifecycle and request/future matching.
+    # 1) Race proven Binance transports. FAST Daily/Weekly adds the bounded
+    # REST lane to the two scanner-owned WS lanes and accepts the first valid
+    # packet. This directly targets the remaining hydration bottleneck: Daily.
     if not isinstance(rows, list) or len(rows) < (DEEP_MIN_ROWS if deep else 55):
         need = DEEP_MIN_ROWS if deep else 55
 
@@ -1445,9 +1442,9 @@ async def _fetch_tf(sym, tf, deep=False):
                     sym,
                     tf,
                     limit,
-                    wait_ready=1.0,
-                    response_timeout=5.5 if deep else 3.2,
-                    gate_timeout=0.9,
+                    wait_ready=0.65,
+                    response_timeout=5.0 if deep else 2.8,
+                    gate_timeout=0.45,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1462,19 +1459,32 @@ async def _fetch_tf(sym, tf, deep=False):
                 return await fn(
                     "klines",
                     {"symbol": str(sym).upper(), "interval": str(tf), "limit": int(limit)},
-                    wait_ready=1.0,
-                    response_timeout=5.5 if deep else 3.2,
-                    gate_timeout=0.9,
+                    wait_ready=0.65,
+                    response_timeout=5.0 if deep else 2.8,
+                    gate_timeout=0.45,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 return None
 
-        tasks = {asyncio.create_task(structure_ws()), asyncio.create_task(market_ws())}
+        async def fast_rest():
+            if deep or tf not in {"1d", "1w"}:
+                return None
+            _stats["daily_rest_race_attempts"] += 1
+            return await _v12_fast_rest_klines(sym, tf, limit)
+
+        tasks = {
+            asyncio.create_task(structure_ws()),
+            asyncio.create_task(market_ws()),
+        }
+        rest_raced = (not deep and tf in {"1d", "1w"})
+        if rest_raced:
+            tasks.add(asyncio.create_task(fast_rest()))
+
         winner = None
         try:
-            deadline = asyncio.get_running_loop().time() + (5.8 if deep else 3.5)
+            deadline = asyncio.get_running_loop().time() + (5.4 if deep else 3.6)
             while tasks and winner is None:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -1503,9 +1513,11 @@ async def _fetch_tf(sym, tf, deep=False):
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         if isinstance(rows, list) and len(rows) >= need:
-            _stats["dual_ws_ok"] += 1
+            _stats["multi_transport_ok"] += 1
+            if rest_raced:
+                _stats["daily_race_ok"] += 1
         else:
-            _stats["dual_ws_miss"] += 1
+            _stats["multi_transport_miss"] += 1
             rows = None
 
     # 2) Bounded REST fallback. FAST uses the smaller two-host race first;
@@ -1514,6 +1526,8 @@ async def _fetch_tf(sym, tf, deep=False):
     if rows is None:
         try:
             if deep:
+                rows = await v12_rest_klines(sym, tf, limit)
+            elif tf in {"1d", "1w"}:
                 rows = await v12_rest_klines(sym, tf, limit)
             else:
                 rows = await _v12_fast_rest_klines(sym, tf, limit)
@@ -1984,8 +1998,10 @@ async def strategy_loop():
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
-                f"fetchTO={_stats.get('fetch_timeout',0)} dualWS={_stats.get('dual_ws_ok',0)}/"
-                f"{_stats.get('dual_ws_miss',0)} structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
+                f"fetchTO={_stats.get('fetch_timeout',0)} multiTransport={_stats.get('multi_transport_ok',0)}/"
+                f"{_stats.get('multi_transport_miss',0)} dailyRace={_stats.get('daily_race_ok',0)}/"
+                f"{_stats.get('daily_rest_race_attempts',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
+                f"{_stats.get('fast_rest_fail',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)} structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
                 f"structTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
                 f"marketOK={getattr(legacy,'_market_ws_stats',{}).get('ok',0)} "
                 f"marketTO={getattr(legacy,'_market_ws_stats',{}).get('timeouts',0)} "
@@ -2105,7 +2121,7 @@ async def main():
     # repeatedly deferring behind legacy structure requests.
     legacy._ws_api_gate = asyncio.Semaphore(6)
     print(
-        "[v12.1.3] MULTI-SETUP AUTHORITY + FAST-FAIL FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.1.4] MULTI-SETUP AUTHORITY + DAILY REST RACE active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
