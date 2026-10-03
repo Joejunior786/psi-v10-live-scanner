@@ -3,7 +3,7 @@ from collections import Counter, defaultdict, deque
 import aiohttp
 import app
 
-VERSION="10.4-rolling-hunter"
+VERSION="10.4.1-resilient-discovery-heartbeat"
 QUALIFIER_STATES=("BUY NOW","PRE-IGNITION")
 QUALIFIER_TARGET=max(1,min(int(os.getenv("QUALIFIER_TARGET","10")),10))
 QUALIFIER_POLICY="BUY_PRE_ONLY_NO_PADDING_NO_THRESHOLD_RELAXATION"
@@ -288,11 +288,17 @@ async def _discovery_rest_snapshot():
                         continue
                     mid=(bid+ask)/2.0
                     meta=app.symbol_meta.get(s,{}) if isinstance(getattr(app,"symbol_meta",None),dict) else {}
+                    prev=disc.get(s)
+                    # bookTicker has no 24h volume/trade count. Carry forward
+                    # the last verified values instead of injecting zeros that
+                    # would create false volume/count acceleration.
+                    prev_q=app.safe_float(prev[-1][2]) if prev else app.safe_float(meta.get("quote_volume_24h"))
+                    prev_n=app.safe_float(prev[-1][3]) if prev else 0.0
                     payload.append({
                         "s":s,
                         "c":mid,
-                        "q":app.safe_float(meta.get("quote_volume_24h")),
-                        "n":0.0,
+                        "q":prev_q,
+                        "n":prev_n,
                         "b":bid,
                         "a":ask,
                     })
@@ -321,7 +327,10 @@ async def _discovery_rest_snapshot():
 async def discovery_rest_loop():
     while True:
         try:
-            await asyncio.sleep(5)
+            # Keep the full-universe price/spread heartbeat just slower
+            # than the configured discovery sample cadence. Weight is tiny for
+            # all-symbol bookTicker and this gives every symbol fair freshness.
+            await asyncio.sleep(max(2.2,SAMPLE_SECONDS+0.2))
             stale=(not disc_ws) or (ms()-disc_event_ms>8000)
             if stale:
                 await _discovery_rest_snapshot()
