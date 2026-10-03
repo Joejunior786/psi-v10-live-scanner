@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.25-breakout-structural-intelligence"
+VERSION="11.0.5.26-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -384,8 +384,11 @@ def _raw_seed_count(symbol):
         if isinstance((_structure_raw_cache.get(_raw_key(symbol,interval,limit)) or {}).get("rows"),list)
     )
 
-def _structure_symbol_gate(symbol):
-    key=str(symbol)
+def _structure_symbol_gate(symbol, interval=None):
+    # Lock only identical symbol/timeframe refreshes. 1h/4h/15m for the same
+    # symbol must run concurrently because app.load_structure() requires all
+    # three mandatory timeframes in one bounded build.
+    key=(str(symbol),str(interval or "*"))
     gate=_structure_symbol_gates.get(key)
     if gate is None:
         gate=asyncio.Semaphore(1)
@@ -526,7 +529,7 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
             _structure_tf_stats["bar_reuse"]+=1
             return reusable
 
-    async with _structure_symbol_gate(symbol):
+    async with _structure_symbol_gate(symbol,interval):
         cached=_structure_tf_cache.get(key)
         if cached and time.time()-float(cached[0])<=STRUCTURE_TF_CACHE_S:
             reusable=_reuse_current_candle(cached[1],symbol,interval)
