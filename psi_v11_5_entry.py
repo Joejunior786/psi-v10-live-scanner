@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.22-breakout-structural-intelligence"
+VERSION="11.0.5.23-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -261,7 +261,7 @@ STRUCTURE_TF_ATTEMPTS = 1
 STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
-    "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,
+    "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"bar_reuse":0,
 }
 
 def _raw_key(symbol, interval, limit):
@@ -272,6 +272,52 @@ def _interval_ms(interval):
 
 def _minimum_structure_rows(interval):
     return 205 if str(interval) in {"1h","4h"} else 22
+
+def _current_interval_open_ms(interval, now_ms=None):
+    step=_interval_ms(interval)
+    if step<=0:
+        return 0
+    now_ms=int(now_ms or time.time()*1000)
+    return (now_ms//step)*step
+
+def _live_binance_price(symbol):
+    try:
+        row=extrest.ext_cache.get(str(symbol)) or {}
+        px=float(row.get("last") or 0.0)
+        if math.isfinite(px) and px>0:
+            return px
+    except Exception:
+        pass
+    try:
+        row=q.latest.get(str(symbol)) or {}
+        px=float(row.get("price") or 0.0)
+        if math.isfinite(px) and px>0:
+            return px
+    except Exception:
+        pass
+    return 0.0
+
+def _reuse_current_candle(rows, symbol, interval):
+    if not isinstance(rows,list) or len(rows)<_minimum_structure_rows(interval):
+        return None
+    try:
+        last_open=int(rows[-1][0])
+    except Exception:
+        return None
+    if last_open!=_current_interval_open_ms(interval):
+        return None
+    out=list(rows)
+    last=list(out[-1])
+    px=_live_binance_price(symbol)
+    if px>0 and len(last)>=7:
+        try:
+            last[2]=str(max(float(last[2]),px))
+            last[3]=str(min(float(last[3]),px))
+            last[4]=str(px)
+        except Exception:
+            last[4]=str(px)
+        out[-1]=last
+    return out
 
 def _bootstrap_structure_limit(interval, requested):
     if str(interval) in {"1h","4h"} and int(requested)>=205:
@@ -448,20 +494,31 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
     now=time.time()
     cached=_structure_tf_cache.get(key)
     if cached and now-float(cached[0])<=STRUCTURE_TF_CACHE_S:
-        _structure_tf_stats["cache_hit"]+=1
-        return cached[1]
+        reusable=_reuse_current_candle(cached[1],symbol,interval)
+        if reusable is not None:
+            _structure_tf_stats["cache_hit"]+=1
+            _structure_tf_stats["bar_reuse"]+=1
+            return reusable
 
     raw_key=_raw_key(symbol,interval,limit)
     raw_entry=_structure_raw_cache.get(raw_key) or {}
     seed=raw_entry.get("rows") if isinstance(raw_entry,dict) else None
     if isinstance(seed,list) and seed:
         _structure_tf_stats["raw_hit"]+=1
+        reusable=_reuse_current_candle(seed,symbol,interval)
+        if reusable is not None:
+            _structure_tf_cache[key]=(time.time(),reusable)
+            _structure_tf_stats["bar_reuse"]+=1
+            return reusable
 
     async with _structure_symbol_gate(symbol):
         cached=_structure_tf_cache.get(key)
         if cached and time.time()-float(cached[0])<=STRUCTURE_TF_CACHE_S:
-            _structure_tf_stats["cache_hit"]+=1
-            return cached[1]
+            reusable=_reuse_current_candle(cached[1],symbol,interval)
+            if reusable is not None:
+                _structure_tf_stats["cache_hit"]+=1
+                _structure_tf_stats["bar_reuse"]+=1
+                return reusable
 
         raw_entry=_structure_raw_cache.get(raw_key) or {}
         seed=raw_entry.get("rows") if isinstance(raw_entry,dict) else None
@@ -1152,7 +1209,7 @@ async def structure_recovery_loop():
                 f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"structHosts={sorted({str(_rest_good_host.get('structure_klines:'+s,'-')).replace('https://','') for s in batch})} "
                 f"tfCache={_structure_tf_stats['cache_hit']} rawHit={_structure_tf_stats['raw_hit']} "
-                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} "
+                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} reuse={_structure_tf_stats['bar_reuse']} "
                 f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
             )
