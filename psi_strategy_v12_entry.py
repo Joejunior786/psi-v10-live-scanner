@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.8-syntax-fixed-merged-hydration"
+VERSION = "12.1.9-stable-dedicated-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1417,7 +1417,7 @@ async def _fetch_tf(sym, tf, deep=False):
     need = DEEP_MIN_ROWS if deep else 55
     rows = None
 
-    # 0) Zero-request reuse from the verified V11 1H/4H structure cache.
+    # 0) Reuse verified V11 1H/4H history at zero request cost.
     if tf in {"1h", "4h"}:
         reused, saved = _v11_raw_best(sym, tf)
         if isinstance(reused, list) and len(reused) >= need:
@@ -1429,94 +1429,63 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
 
-    async def dedicated_fetch():
+    # 1) Primary: isolated V12 Binance WS. This exact lane previously returned
+    # 12/12 successful FAST packets with zero misses.
+    if not isinstance(rows, list) or len(rows) < need:
         try:
-            out = await v12_ws_klines(
+            rows = await v12_ws_klines(
                 sym,
                 tf,
                 limit,
                 shard=0,
-                response_timeout=6.0 if deep else 4.0,
+                response_timeout=5.0 if deep else 3.2,
             )
-            if isinstance(out, list) and len(out) >= need:
-                _stats["dedicated_ws_ok"] += 1
-                return out
-            _stats["dedicated_ws_miss"] += 1
-            return None
         except asyncio.CancelledError:
             raise
         except Exception:
-            _stats["dedicated_ws_miss"] += 1
-            return None
-
-    async def rest_fetch():
-        try:
-            if deep:
-                return await v12_rest_klines(sym, tf, limit)
-            return await _v12_fast_rest_klines(sym, tf, limit)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return None
-
-    # 1) Daily FAST hydration is the dominant missing piece once 1H/4H cache
-    # reuse is available. Race the isolated V12 WS lane against Binance REST
-    # and accept the first valid packet.
-    if (not isinstance(rows, list) or len(rows) < need) and tf == "1d" and not deep:
-        tasks = {
-            asyncio.create_task(dedicated_fetch()): "ws",
-            asyncio.create_task(rest_fetch()): "rest",
-        }
-        winner = None
-        winner_lane = None
-        try:
-            deadline = asyncio.get_running_loop().time() + 4.6
-            pending = set(tasks.keys())
-            while pending and winner is None:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                done, pending = await asyncio.wait(
-                    pending,
-                    timeout=remaining,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    break
-                for task in done:
-                    try:
-                        candidate = task.result()
-                    except Exception:
-                        candidate = None
-                    if isinstance(candidate, list) and len(candidate) >= need:
-                        winner = candidate
-                        winner_lane = tasks.get(task)
-                        break
-            rows = winner
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks.keys(), return_exceptions=True)
-
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["daily_race_ok"] += 1
-            _stats[f"daily_{winner_lane}_win"] += 1
-        else:
-            _stats["daily_race_miss"] += 1
             rows = None
 
-    # 2) All other missing packets use the dedicated V12 socket first. It is
-    # isolated from discovery/execution and already proved 12/12 successful in
-    # production. REST is only the bounded backup.
-    if not isinstance(rows, list) or len(rows) < need:
-        rows = await dedicated_fetch()
-        if rows is None:
-            rows = await rest_fetch()
-            if isinstance(rows, list) and len(rows) >= need:
-                _stats["fetch_rest_ok"] += 1
-            else:
-                rows = None
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["dedicated_ws_ok"] += 1
+        else:
+            _stats["dedicated_ws_miss"] += 1
+            rows = None
+
+    # 2) Short shared-WS fallback only.
+    if rows is None:
+        try:
+            rows = await legacy.binance_ws_api_klines(
+                sym,
+                tf,
+                limit,
+                wait_ready=0.65,
+                response_timeout=3.5 if deep else 2.0,
+                gate_timeout=0.50,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["shared_ws_fallback_ok"] += 1
+        else:
+            _stats["shared_ws_fallback_miss"] += 1
+            rows = None
+
+    # 3) REST is DEEP-only. FAST misses return immediately so fair rotation
+    # cannot be pinned by unreachable REST hosts.
+    if rows is None and deep:
+        try:
+            rows = await v12_rest_klines(sym, tf, limit)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["fetch_rest_ok"] += 1
+        else:
+            rows = None
 
     if isinstance(rows, list) and len(rows) >= need:
         snapshot = snap(rows)
@@ -1557,7 +1526,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 10.0 if deep else 7.5
+                timeout = 10.0 if deep else 6.2
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1586,14 +1555,10 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
             if not item.get("snap") or stale or needs_deep:
                 needed.append(tf)
 
-    # Complete the symbol's missing core timeframes together. The global
-    # FETCH_CONCURRENCY semaphore still caps Binance load at six requests, so
-    # this improves completion latency without increasing total concurrency.
-    if needed:
-        await asyncio.gather(
-            *(one(tf, deep=(force_deep or active)) for tf in needed),
-            return_exceptions=True,
-        )
+    # Complete one symbol deterministically. With the dedicated WS this avoids
+    # scattering successful packets across many 1/3 and 2/3 partial symbols.
+    for tf in needed:
+        await one(tf, deep=(force_deep or active))
 
     if active and not needed:
         weekly = _cache.get(sym, {}).get("1w") or {}
@@ -1980,11 +1945,8 @@ async def strategy_loop():
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
                 f"fetchTO={_stats.get('fetch_timeout',0)} dedicatedWS={_stats.get('dedicated_ws_ok',0)}/"
                 f"{_stats.get('dedicated_ws_miss',0)} rawWS={_stats.get('ws_ok',0)}/"
-                f"{_stats.get('ws_fail',0)} dailyRace={_stats.get('daily_race_ok',0)}/"
-                f"{_stats.get('daily_race_miss',0)} dailyWS={_stats.get('daily_ws_win',0)} "
-                f"dailyREST={_stats.get('daily_rest_win',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
-                f"{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
-                f"fetchRestOK={_stats.get('fetch_rest_ok',0)}",
+                f"{_stats.get('ws_fail',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
+                f"{_stats.get('shared_ws_fallback_miss',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)}",
                 flush=True,
             )
 
@@ -2097,7 +2059,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.8] MULTI-SETUP AUTHORITY + DEDICATED WS + DAILY PARALLEL HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.1.9] MULTI-SETUP AUTHORITY + STABLE DEDICATED HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
