@@ -12,7 +12,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.0-multi-setup-authority"
+VERSION = "12.0.1-hydration-fix"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -44,11 +44,21 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 6))
+FETCH_CONCURRENCY = max(6, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "12")), 16))
+MAX_INFLIGHT_SYMBOLS = max(24, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "48")), 80))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(8, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "24")), 48))
+ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
-TF_LIMIT = {"1h": 260, "4h": 260, "1d": 260, "1w": 260}
-TF_TTL = {"1h": 75.0, "4h": 180.0, "1d": 600.0, "1w": 1800.0}
+# 210 candles are enough for EMA/SMA200 + previous-value calculation while
+# reducing payload size versus the old 260-candle hydration.
+TF_LIMIT = {"1h": 210, "4h": 210, "1d": 210, "1w": 210}
+
+# Structural cache accumulates across the entire 403-symbol universe. Active
+# candidates refresh much faster, but broad coverage is never destroyed just
+# because an hourly candle cache is older than 75 seconds.
+TF_TTL = {"1h": 1800.0, "4h": 7200.0, "1d": 21600.0, "1w": 86400.0}
+ACTIVE_TF_TTL = {"1h": 90.0, "4h": 300.0, "1d": 900.0, "1w": 3600.0}
 STATE_RANK = {"BUY": 3, "ARMED": 2, "WATCH": 1}
 STATE_EMOJI = {"BUY": "🟢", "ARMED": "🟠", "WATCH": "🟡"}
 
@@ -833,7 +843,7 @@ def _v12_ws_primitives():
     if _v12_ws_lock is None:
         _v12_ws_lock = asyncio.Lock()
     if _v12_ws_gate is None:
-        _v12_ws_gate = asyncio.Semaphore(6)
+        _v12_ws_gate = asyncio.Semaphore(12)
     return _v12_ws_ready, _v12_ws_lock, _v12_ws_gate
 
 
@@ -953,76 +963,75 @@ async def v12_ws_klines(symbol, interval, limit):
 async def _fetch_tf(sym, tf):
     if app.session is None:
         return False
-    params = {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]}
-    rows = await v12_ws_klines(sym, tf, TF_LIMIT[tf])
-    if isinstance(rows, list) and len(rows) >= 55:
-        _stats["fetch_ws_ok"] += 1
-    else:
+
+    rows = None
+    # Dedicated V12 WS-RPC is the authoritative hydration transport. Retry once
+    # on the same socket; do not fall into the slow Railway REST timeout path,
+    # which previously held a hydration permit for ~7 seconds per miss.
+    for attempt in range(2):
+        rows = await v12_ws_klines(sym, tf, TF_LIMIT[tf])
+        if isinstance(rows, list) and len(rows) >= 55:
+            _stats["fetch_ws_ok"] += 1
+            break
         rows = None
-
-    if rows is None:
-        token = legacy._risk_plan_request_ctx.set(True)
-        try:
-            rows = await asyncio.wait_for(
-                legacy.resilient_api_get(app.session, "/api/v3/klines", params),
-                timeout=7.0,
-            )
-            if isinstance(rows, list) and len(rows) >= 55:
-                _stats["fetch_rest_ok"] += 1
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
-        finally:
-            legacy._risk_plan_request_ctx.reset(token)
+        if attempt == 0:
+            await asyncio.sleep(0.12)
 
     if isinstance(rows, list) and len(rows) >= 55:
-        _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
-        _stats["fetch_ok"] += 1
-        return True
+        snapshot = snap(rows)
+        if snapshot is not None:
+            _cache[sym][tf] = {"rows": rows, "snap": snapshot, "updated": time.time()}
+            _stats["fetch_ok"] += 1
+            return True
+        _stats["fetch_short_history"] += 1
+        return False
 
     _stats["fetch_fail"] += 1
     return False
 
 
-async def refresh_symbol(sym, sem):
+async def refresh_symbol(sym, sem, active=False):
     now = time.time()
+    ttl = ACTIVE_TF_TTL if active else TF_TTL
     core_tfs = ("1h", "4h", "1d")
     core_stale = []
+
     for tf in core_tfs:
         item = _cache.get(sym, {}).get(tf) or {}
-        if now - f(item.get("updated")) > TF_TTL[tf] or not item.get("snap"):
+        if now - f(item.get("updated")) > ttl[tf] or not item.get("snap"):
             core_stale.append(tf)
 
     async def one(tf):
         async with sem:
             try:
-                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=13.0)
+                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=11.0)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
 
-    # Core signal timeframes always receive priority. Weekly is requested only
-    # after this symbol has usable 1H/4H/Daily snapshots, so Weekly enrichment
-    # can never delay the base BUY/ARMED/WATCH board.
+    # Fetch the three core timeframes together. Once present they remain valid
+    # for structural qualification long enough for coverage to accumulate.
     if core_stale:
         await asyncio.gather(*(one(tf) for tf in core_stale), return_exceptions=True)
         return
 
+    # Weekly enrichment is lower priority and never blocks initial 1H/4H/1D
+    # coverage. Active symbols receive fresher Weekly refreshes.
     weekly = _cache.get(sym, {}).get("1w") or {}
-    if now - f(weekly.get("updated")) > TF_TTL["1w"] or not weekly.get("snap"):
+    if now - f(weekly.get("updated")) > ttl["1w"] or not weekly.get("snap"):
         await one("1w")
 
 
 def _priority_symbols(universe):
-    global _cursor
     out = []
     seen = set()
+    universe_set = set(universe)
 
     def add(s):
         s = str(s or "")
-        if s and s in universe and s not in seen:
-            seen.add(s); out.append(s)
+        if s and s in universe_set and s not in seen:
+            seen.add(s)
+            out.append(s)
 
     legacy_rows = list(base.latest.get("_all_candidates") or [])
     legacy_rows.sort(key=lambda r: (
@@ -1031,20 +1040,56 @@ def _priority_symbols(universe):
         f(r.get("early")),
         f(r.get("eventTape")),
     ), reverse=True)
-    for r in legacy_rows[:PRIORITY_SLOTS]:
+
+    for r in legacy_rows:
         add(r.get("symbol"))
+        if len(out) >= ACTIVE_SYMBOLS_PER_CYCLE:
+            break
 
-    # Keep current execution/discovery symbols fresh.
-    for s in list(getattr(app, "selected_micro_symbols", []) or [])[:PRIORITY_SLOTS]:
+    for s in list(getattr(app, "selected_micro_symbols", []) or []):
         add(s)
+        if len(out) >= ACTIVE_SYMBOLS_PER_CYCLE:
+            break
 
-    # Fair rotating coverage: every eligible symbol receives a turn.
-    if universe:
+    return out[:ACTIVE_SYMBOLS_PER_CYCLE]
+
+
+def _bootstrap_symbols(universe, refresh_tasks):
+    """Fairly select never-ready/core-stale symbols across the whole universe."""
+    global _cursor
+    out = []
+    n = len(universe)
+    if not n:
+        return out
+
+    attempts = 0
+    while len(out) < BOOTSTRAP_SYMBOLS_PER_CYCLE and attempts < n * 2:
+        sym = universe[_cursor % n]
+        _cursor = (_cursor + 1) % n
+        attempts += 1
+        if sym in refresh_tasks:
+            continue
+
+        c = _cache.get(sym) or {}
+        core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+        if not core_ready:
+            out.append(sym)
+
+    # Once core coverage is complete, the same fair cursor enriches Weekly.
+    if not out:
         attempts = 0
-        while len(out) < PRIORITY_SLOTS + ROTATION_SLOTS and attempts < len(universe) * 2:
-            add(universe[_cursor % len(universe)])
-            _cursor = (_cursor + 1) % len(universe)
+        while len(out) < BOOTSTRAP_SYMBOLS_PER_CYCLE and attempts < n * 2:
+            sym = universe[_cursor % n]
+            _cursor = (_cursor + 1) % n
             attempts += 1
+            if sym in refresh_tasks:
+                continue
+            c = _cache.get(sym) or {}
+            core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+            weekly_ready = bool((c.get("1w") or {}).get("snap"))
+            if core_ready and not weekly_ready:
+                out.append(sym)
+
     return out
 
 
@@ -1123,7 +1168,8 @@ async def strategy_loop():
                 await asyncio.sleep(2.0)
                 continue
 
-            # Retire completed refreshes without blocking the signal board.
+            # Retire completed work first so permits and symbol slots are
+            # immediately reusable.
             for sym, task in list(refresh_tasks.items()):
                 if task.done():
                     try:
@@ -1134,17 +1180,27 @@ async def strategy_loop():
                         _stats["refresh_task_fail"] += 1
                     refresh_tasks.pop(sym, None)
 
-            # Prioritise strong discovery candidates while rotating fairly
-            # through the complete universe. A symbol already hydrating is not
-            # duplicated.
-            chosen = _priority_symbols(universe)
-            for sym in chosen:
-                if sym not in refresh_tasks:
-                    refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem))
+            active = _priority_symbols(universe)
 
-            # Give newly scheduled work a short opportunity to land, then
-            # publish from every symbol already carrying usable MTF data.
-            await asyncio.sleep(0.35)
+            # Active candidates refresh quickly, but never consume every slot.
+            active_budget = min(
+                len(active),
+                max(0, min(ACTIVE_SYMBOLS_PER_CYCLE, MAX_INFLIGHT_SYMBOLS // 4))
+            )
+            for sym in active[:active_budget]:
+                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
+                    refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=True))
+
+            # The majority of slots are reserved for fair whole-universe
+            # hydration so 403/403 coverage actually converges.
+            bootstrap = _bootstrap_symbols(universe, refresh_tasks)
+            for sym in bootstrap:
+                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                    break
+                if sym not in refresh_tasks:
+                    refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=False))
+
+            await asyncio.sleep(0.25)
 
             ready_now = sum(
                 all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
@@ -1154,11 +1210,14 @@ async def strategy_loop():
                 bool((_cache.get(s, {}).get("1w") or {}).get("snap"))
                 for s in universe
             )
+
             print(
-                f"Ψ-V12 REFRESH cycle={_cycle + 1} selected={len(chosen)} "
+                f"Ψ-V12 REFRESH cycle={_cycle + 1} active={len(active)} bootstrap={len(bootstrap)} "
                 f"mtfReady={ready_now}/{len(universe)} weeklyReady={weekly_ready}/{len(universe)} "
-                f"inFlight={len(refresh_tasks)} fetchOK={_stats.get('fetch_ok', 0)} "
-                f"fetchFail={_stats.get('fetch_fail', 0)} wsOK={_stats.get('ws_ok', 0)}",
+                f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
+                f"fetchOK={_stats.get('fetch_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)} "
+                f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
+                f"wsFail={_stats.get('ws_fail', 0)}",
                 flush=True,
             )
 
@@ -1166,7 +1225,11 @@ async def strategy_loop():
             now = time.time()
             for sym in universe:
                 c = _cache.get(sym) or {}
-                if now - f((c.get("1h") or {}).get("updated")) > max(300.0, TF_TTL["1h"] * 4):
+                # Qualification requires structurally usable core snapshots.
+                # Active-candidate freshness is handled by the fast tier above.
+                if not all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d")):
+                    continue
+                if now - f((c.get("1h") or {}).get("updated")) > TF_TTL["1h"]:
                     continue
                 try:
                     row = evaluate_symbol(sym)
@@ -1180,6 +1243,8 @@ async def strategy_loop():
             _cycle += 1
             _stats["cycles"] = _cycle
             _stats["refresh_inflight"] = len(refresh_tasks)
+            _stats["mtf_ready"] = ready_now
+            _stats["weekly_ready"] = weekly_ready
             print_board(force=True)
 
         except asyncio.CancelledError:
@@ -1190,7 +1255,7 @@ async def strategy_loop():
             _stats["loop_fail"] += 1
             print(f"Ψ-V12 LOOP_ERROR {type(exc).__name__}: {exc}", flush=True)
 
-        await asyncio.sleep(LOOP_SECONDS)
+        await asyncio.sleep(5.0)
 
 
 async def v12_scan(req):
@@ -1249,7 +1314,7 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     print(
-        "[v12.0.0] MULTI-SETUP AUTHORITY active — legacy BUY/PRE authority disabled; "
+        "[v12.0.1] MULTI-SETUP AUTHORITY + FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
