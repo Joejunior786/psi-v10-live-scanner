@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.76-lean-strict-micro-core"
+VERSION="11.0.5.77-liquidity-ranked-micro-core"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -151,7 +151,7 @@ _micro_rest_stats={
 }
 
 MICRO_FALLBACK_CORE_SIZE=max(1,min(int(os.getenv("PSI_MICRO_FALLBACK_CORE","2")),8))
-MICRO_FALLBACK_CORE_HOLD_S=max(45.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_HOLD","90")))
+MICRO_FALLBACK_CORE_HOLD_S=max(90.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_HOLD","180")))
 _micro_fallback_core=[]
 _micro_fallback_core_since=0.0
 
@@ -4050,29 +4050,60 @@ def _micro_fallback_core_symbols():
         _micro_fallback_core=current[:required]
         return list(_micro_fallback_core)
 
-    ranked=[];seen=set()
-    def add(sym):
-        sym=str(sym or "")
-        if sym in selected_set and sym not in seen:
-            seen.add(sym);ranked.append(sym)
+    # Build a priority pool from the live board/hot set, but rank scarce
+    # strict-micro capacity by verified 24h quote liquidity. Cold-start board
+    # ordering can otherwise select thin backfill names before meaningful
+    # ranking data exists.
+    priority=set()
     try:
         for row in list(base.latest.get("_board") or []):
-            if isinstance(row,dict): add(row.get("symbol"))
+            if isinstance(row,dict):
+                sym=str(row.get("symbol") or "")
+                if sym in selected_set:
+                    priority.add(sym)
     except Exception:
         pass
     try:
-        for _,sym in qualifier_core.hot(24): add(sym)
+        for _,sym in qualifier_core.hot(24):
+            sym=str(sym or "")
+            if sym in selected_set:
+                priority.add(sym)
     except Exception:
         pass
-    for sym in current: add(sym)
-    for sym in selected: add(sym)
+
+    def qv(sym):
+        try:
+            meta=(getattr(app,"symbol_meta",{}) or {}).get(sym) or {}
+            v=f(meta.get("quote_volume_24h"))
+            if v>0:
+                return v
+        except Exception:
+            pass
+        try:
+            row=extrest.ext_cache.get(sym) or {}
+            return max(0.0,f(row.get("quoteVolume") or row.get("quote_volume") or row.get("q")))
+        except Exception:
+            return 0.0
+
+    primary=sorted(
+        [s for s in selected if s in priority],
+        key=lambda s:(qv(s),s),
+        reverse=True,
+    )
+    fallback=sorted(
+        [s for s in selected if s not in priority],
+        key=lambda s:(qv(s),s),
+        reverse=True,
+    )
+    ranked=primary+fallback
 
     _micro_fallback_core=ranked[:required]
     _micro_fallback_core_since=now
     if _micro_fallback_core:
         print(
             f"Ψ-WSAPI MICRO-CORE size={len(_micro_fallback_core)} "
-            f"hold={MICRO_FALLBACK_CORE_HOLD_S:.0f}s symbols={_micro_fallback_core}",
+            f"hold={MICRO_FALLBACK_CORE_HOLD_S:.0f}s "
+            f"symbols={[(s,round(qv(s),0)) for s in _micro_fallback_core]}",
             flush=True,
         )
     return list(_micro_fallback_core)
@@ -4525,7 +4556,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.76] Ψ LEAN STRICT MICRO CORE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.77] Ψ LIQUIDITY-RANKED STRICT MICRO CORE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
