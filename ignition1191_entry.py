@@ -10,18 +10,19 @@ b17 = base.b17
 q = base.q
 app = base.app
 
-VERSION = "10.19.4-nonblocking-riskmap"
+VERSION = "10.19.5-hard-budget-riskmap"
 SUPPORT_SAMPLE_SECONDS = 10.0
 SUPPORT_MAX_SYMBOLS = 8
 SUPPORT_MAX_AGE = 120.0
 SUPPORT_BATCH_PER_CYCLE = 2
-SUPPORT_BUILD_TIMEOUT = 10.0
+SUPPORT_BUILD_TIMEOUT = 6.0
+RISK_FETCH_BUDGET = 4.5
 ENTRY_MAX_DISTANCE_PCT = 3.0
 MAX_PLAN_RISK_PCT = 3.5
 MIN_PLAN_RISK_PCT = 0.20
 
 risk_cache = {}
-risk_stats = {"samples": 0, "errors": 0, "timeouts": 0, "empty": 0, "sweep_reclaimed": 0, "sweep_risk": 0, "support_lost": 0, "plans": 0, "last_error": "", "last_symbol": ""}
+risk_stats = {"samples": 0, "errors": 0, "timeouts": 0, "empty": 0, "partial": 0, "sweep_reclaimed": 0, "sweep_risk": 0, "support_lost": 0, "plans": 0, "last_error": "", "last_symbol": ""}
 priority_symbols_provider = None
 
 _old_main = scanner.v7.main
@@ -266,11 +267,38 @@ async def build_risk_map(sym):
         return
     try:
         fetch = getattr(app, "load_risk_klines", app.load_klines)
-        rows1, rows5, rows15 = await asyncio.gather(
-            fetch(app.session, sym, "1m", 64),
-            fetch(app.session, sym, "5m", 72),
-            fetch(app.session, sym, "15m", 52),
+        jobs = {
+            "1m": asyncio.create_task(fetch(app.session, sym, "1m", 64)),
+            "5m": asyncio.create_task(fetch(app.session, sym, "5m", 72)),
+            "15m": asyncio.create_task(fetch(app.session, sym, "15m", 52)),
+        }
+        done, pending = await asyncio.wait(
+            set(jobs.values()),
+            timeout=RISK_FETCH_BUDGET,
+            return_when=asyncio.ALL_COMPLETED,
         )
+        if pending:
+            risk_stats["partial"] += 1
+            for task in pending:
+                task.cancel()
+                # Do not await cancellation here. Some aiohttp/WS cancellation
+                # paths can outlive their requested timeout; the RiskMap
+                # scheduler must remain hard-bounded.
+                task.add_done_callback(lambda t: t.exception() if (not t.cancelled() and t.exception() is not None) else None)
+
+        results = {}
+        for name, task in jobs.items():
+            if task not in done:
+                results[name] = []
+                continue
+            try:
+                results[name] = task.result() or []
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                results[name] = []
+
+        rows1, rows5, rows15 = results["1m"], results["5m"], results["15m"]
         c1, c5, c15 = candle_rows(rows1), candle_rows(rows5), candle_rows(rows15)
         if len(c5) < 20:
             risk_stats["empty"] += 1
@@ -300,7 +328,7 @@ async def build_risk_map(sym):
         risk_stats["errors"] += 1
         risk_stats["last_symbol"] = sym
         risk_stats["last_error"] = f"{type(exc).__name__}: {exc}"
-        print(f"Ψ-V10.19.4 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
+        print(f"Ψ-V10.19.5 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
 
 
 async def support_loop():
@@ -314,7 +342,7 @@ async def support_loop():
             risk_stats["timeouts"] += 1
             risk_stats["last_symbol"] = sym
             risk_stats["last_error"] = f"BUILD_TIMEOUT>{SUPPORT_BUILD_TIMEOUT:.0f}s"
-            print(f"Ψ-V10.19.4 RISKMAP_TIMEOUT {sym} timeout={SUPPORT_BUILD_TIMEOUT:.0f}s", flush=True)
+            print(f"Ψ-V10.19.5 RISKMAP_TIMEOUT {sym} timeout={SUPPORT_BUILD_TIMEOUT:.0f}s", flush=True)
 
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
@@ -440,7 +468,7 @@ async def print_risk_loop():
             states={}
             for _,x in fresh:
                 st=str(x.get("plan_state") or "WAIT");states[st]=states.get(st,0)+1
-            print(f"Ψ-V10.19.4 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
+            print(f"Ψ-V10.19.5 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
             ranked = sorted(fresh, key=lambda item: (1 if str(item[1].get("sweep_state")) == "SWEEP_RECLAIMED" else 0, f(item[1].get("sweep_score")), f(item[1].get("support1_strength")), -f(item[1].get("support1_distance_pct"), 99)), reverse=True)[:10]
             for i, (sym, x) in enumerate(ranked, 1):
                 risk_text = "-" if x.get("risk_pct") is None else f"{f(x.get('risk_pct')):.3f}%"
@@ -448,7 +476,7 @@ async def print_risk_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"Ψ-V10.19.4 RISKMAP_ERROR {type(e).__name__}: {e}", flush=True)
+            print(f"Ψ-V10.19.5 RISKMAP_ERROR {type(e).__name__}: {e}", flush=True)
 
 
 b17.diag_pool = diag1191
