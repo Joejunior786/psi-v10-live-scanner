@@ -12,7 +12,7 @@ app = base.app
 
 VERSION = "10.19.1-support-liquidity-sweep-riskmap"
 SUPPORT_SAMPLE_SECONDS = 30.0
-SUPPORT_MAX_SYMBOLS = 16
+SUPPORT_MAX_SYMBOLS = 8
 SUPPORT_MAX_AGE = 95.0
 ENTRY_MAX_DISTANCE_PCT = 3.0
 MAX_PLAN_RISK_PCT = 3.5
@@ -262,7 +262,9 @@ async def build_risk_map(sym):
     if app.session is None:
         return
     try:
-        rows1, rows5, rows15 = await asyncio.gather(app.load_klines(app.session, sym, "1m", 64), app.load_klines(app.session, sym, "5m", 72), app.load_klines(app.session, sym, "15m", 52))
+        rows1 = await app.load_klines(app.session, sym, "1m", 64)
+        rows5 = await app.load_klines(app.session, sym, "5m", 72)
+        rows15 = await app.load_klines(app.session, sym, "15m", 52)
         c1, c5, c15 = candle_rows(rows1), candle_rows(rows5), candle_rows(rows15)
         if len(c5) < 20:
             return
@@ -290,7 +292,7 @@ async def build_risk_map(sym):
 
 
 async def support_loop():
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(2)
     async def one(sym):
         async with sem:
             await build_risk_map(sym)

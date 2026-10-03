@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.4-breakout-structural-intelligence"
+VERSION="11.0.5.5-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -40,9 +40,9 @@ def _rest_gates(path):
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(4)
+        _rest_kline_gate = asyncio.Semaphore(5)
     if _rest_bg_kline_gate is None:
-        _rest_bg_kline_gate = asyncio.Semaphore(1)
+        _rest_bg_kline_gate = asyncio.Semaphore(2)
     if _rest_depth_gate is None:
         _rest_depth_gate = asyncio.Semaphore(1)
     p=str(path)
@@ -150,7 +150,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=4(structure=3+background=1) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=5(structure=3+background=2) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 

@@ -4,7 +4,7 @@ import ignition1191_entry as base
 
 scanner, b17, q, app = base.scanner, base.b17, base.q, base.app
 VERSION = "10.19.2-trend-pullback-monitor"
-TREND_EVERY, TREND_BATCH, TREND_AGE = 45.0, 40, 16 * 60.0
+TREND_EVERY, TREND_BATCH, TREND_AGE = 45.0, 24, 16 * 60.0
 PB_EVERY, PB_MAX, PB_AGE = 15.0, 24, 90.0
 ARM_STREAK, MIN_DEPTH, MAX_DEPTH = 2, 0.35, 8.0
 LAYERS = ("ACTIVITY_LAYER","FLOW_LAYER","ORDER_BOOK_LAYER","VWAP_LAYER","MA_STRUCTURE_LAYER","ANTI_CHASE_OR_RUNNER_LAYER")
@@ -106,13 +106,14 @@ def trend_eval(sym,c1,c4):
 
 async def fetch_trend(sym):
     try:
-        r1,r4=await asyncio.gather(app.load_klines(app.session,sym,"1h",230),app.load_klines(app.session,sym,"4h",230))
+        r1=await app.load_klines(app.session,sym,"1h",230)
+        r4=await app.load_klines(app.session,sym,"4h",230)
         x=trend_eval(sym,candles(r1),candles(r4)); x.update(symbol=sym,updated=time.time()); trend_cache[sym]=x
     except asyncio.CancelledError: raise
     except Exception: stats["errors"]+=1
 
 async def trend_loop():
-    sem=asyncio.Semaphore(8)
+    sem=asyncio.Semaphore(2)
     async def one(s):
         async with sem: await fetch_trend(s)
     while True:
@@ -199,7 +200,8 @@ async def fetch_pb(sym):
     tm=trend_cache.get(sym) or {}
     if time.time()-f(tm.get("updated"))>TREND_AGE or str(tm.get("trend_state")) not in {"UPTREND","TREND-WEAK"}:return
     try:
-        r5,r15=await asyncio.gather(app.load_klines(app.session,sym,"5m",84),app.load_klines(app.session,sym,"15m",84))
+        r5=await app.load_klines(app.session,sym,"5m",84)
+        r15=await app.load_klines(app.session,sym,"15m",84)
         x=pb_eval(sym,tm,candles(r5),candles(r15)); x.update(symbol=sym,updated=time.time(),trend_state=tm.get("trend_state"),trend_score=tm.get("trend_score")); pb_cache[sym]=x
     except asyncio.CancelledError: raise
     except Exception: stats["errors"]+=1
@@ -220,7 +222,7 @@ def pb_symbols():
     return out[:PB_MAX]
 
 async def pb_loop():
-    sem=asyncio.Semaphore(8)
+    sem=asyncio.Semaphore(2)
     async def one(s):
         async with sem: await fetch_pb(s)
     while True:
