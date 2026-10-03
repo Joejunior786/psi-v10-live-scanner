@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.71-verified-feed-scheduler"
+VERSION="11.0.5.72-batched-bbo-discovery"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -3586,33 +3586,47 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def ws_api_discovery_bbo_loop():
-    """Fast full-universe price/spread heartbeat over Binance WS-API.
+    """Fast bounded price/spread discovery heartbeat over Binance WS-API.
 
-    ticker.book is much smaller than all-symbol 24h ticker data. It keeps the
-    qualifier's price/spread history fresh for every eligible symbol while the
-    heavier 24h MINI telemetry rotates independently for volume/count and
-    extension analysis.
+    The no-symbol all-market ticker.book call times out on this Railway route.
+    100-symbol arrays are already proven reliable, so rotate bounded BBO
+    batches independently of the heavier 24h MINI lane.
     """
+    cursor=0
     last_log=0.0
     ok_count=0
     fail_count=0
+    rounds=0
+
     while True:
         try:
-            await asyncio.sleep(2.2)
+            await asyncio.sleep(1.0)
             ready,_,_=_market_ws_primitives()
             if not ready.is_set():
                 continue
             universe=list(getattr(q,"universe",[]) or [])
             if not universe:
+                cursor=0
                 continue
             universe_set=set(universe)
+            n=len(universe)
+            if cursor>=n:
+                cursor=0
+            start_idx=cursor
+            end_idx=min(n,start_idx+100)
+            batch=universe[start_idx:end_idx]
+            cursor=end_idx
+            if cursor>=n:
+                cursor=0
+                rounds+=1
 
             rows=await market_ws_api_request(
-                "ticker.book",{},
-                response_timeout=5.0,gate_timeout=.75,
+                "ticker.book",{"symbols":batch},
+                response_timeout=4.5,gate_timeout=1.0,
             )
             if isinstance(rows,dict):
                 rows=[rows]
+
             accepted=0
             if isinstance(rows,list):
                 stamp=time.time()
@@ -3623,7 +3637,7 @@ async def ws_api_discovery_bbo_loop():
                     sym=str(d.get("symbol") or "")
                     if sym not in universe_set:
                         continue
-                    bid=f(d.get("bidPrice")); ask=f(d.get("askPrice"))
+                    bid=f(d.get("bidPrice"));ask=f(d.get("askPrice"))
                     if bid<=0 or ask<=0:
                         continue
                     prev=qualifier_core.disc.get(sym)
@@ -3642,22 +3656,24 @@ async def ws_api_discovery_bbo_loop():
                         pass
                 if payload:
                     accepted=qualifier_core._ingest_discovery_payload(
-                        payload,"WS_API_BOOK_TICKER_ALL"
+                        payload,"WS_API_BOOK_TICKER_BATCH"
                     )
                     tape.tape_stats["wsapi_discovery_bbo_rows"]+=accepted
+
             if accepted:
                 ok_count+=1
             else:
                 fail_count+=1
 
             now=time.time()
-            if now-last_log>=8.0:
+            if now-last_log>=6.0:
                 last_log=now
                 ready_count=sum(len(qualifier_core.disc.get(s,()))>=4 for s in universe)
                 seen=sum(len(qualifier_core.disc.get(s,()))>=1 for s in universe)
                 print(
-                    f"Ψ-WSAPI DISCOVERY-BBO accepted={accepted}/{len(universe)} "
+                    f"Ψ-WSAPI DISCOVERY-BBO accepted={accepted}/{len(batch)} "
                     f"seen={seen}/{len(universe)} discReady={ready_count}/{len(universe)} "
+                    f"rounds={rounds} cursor={cursor}/{len(universe)} "
                     f"ok={ok_count} fail={fail_count}",
                     flush=True,
                 )
@@ -3666,6 +3682,7 @@ async def ws_api_discovery_bbo_loop():
         except Exception as exc:
             fail_count+=1
             print(f"Ψ-WSAPI DISCOVERY-BBO ERROR {type(exc).__name__}: {exc}",flush=True)
+
 
 
 async def ws_api_discovery_fallback_loop():
@@ -4273,7 +4290,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.71] Ψ VERIFIED FEED SCHEDULER active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.72] Ψ BATCHED BBO DISCOVERY active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
