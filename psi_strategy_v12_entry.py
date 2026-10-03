@@ -987,11 +987,12 @@ async def _fetch_tf(sym, tf):
 
 async def refresh_symbol(sym, sem):
     now = time.time()
-    stale = []
-    for tf in ("1h", "4h", "1d", "1w"):
+    core_tfs = ("1h", "4h", "1d")
+    core_stale = []
+    for tf in core_tfs:
         item = _cache.get(sym, {}).get(tf) or {}
         if now - f(item.get("updated")) > TF_TTL[tf] or not item.get("snap"):
-            stale.append(tf)
+            core_stale.append(tf)
 
     async def one(tf):
         async with sem:
@@ -1001,8 +1002,16 @@ async def refresh_symbol(sym, sem):
                 _stats["fetch_timeout"] += 1
                 return False
 
-    if stale:
-        await asyncio.gather(*(one(tf) for tf in stale), return_exceptions=True)
+    # Core signal timeframes always receive priority. Weekly is requested only
+    # after this symbol has usable 1H/4H/Daily snapshots, so Weekly enrichment
+    # can never delay the base BUY/ARMED/WATCH board.
+    if core_stale:
+        await asyncio.gather(*(one(tf) for tf in core_stale), return_exceptions=True)
+        return
+
+    weekly = _cache.get(sym, {}).get("1w") or {}
+    if now - f(weekly.get("updated")) > TF_TTL["1w"] or not weekly.get("snap"):
+        await one("1w")
 
 
 def _priority_symbols(universe):
