@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.36-hard-budget-riskmap-no-outer-cancel"
+VERSION="11.0.5.37-rest-first-riskmap-final"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -1033,11 +1033,14 @@ async def _risk_fetch_race(client, symbol, interval, limit):
 
 
 async def _risk_load_klines(client, symbol, interval, limit):
-    """Non-blocking RiskMap candle loader.
+    """Bounded REST-first RiskMap candle loader.
 
-    When Binance WS-API is healthy, RiskMap uses two short WS attempts and
-    fails fast on a bad symbol/timeframe instead of falling into slow REST.
-    REST is used only when WS-API is actually unavailable.
+    A connected WS-API socket is not proof that an individual kline request
+    will complete under load. RiskMap therefore races Binance public REST
+    hosts first, which are already proven by the structure lane, then uses one
+    short WS-API attempt as fallback. This fits inside the 4.5s per-symbol
+    hard budget and prevents a healthy-but-busy WS socket from yielding empty
+    risk plans forever.
     """
     global _risk_last_ok
     symbol=str(symbol); interval=str(interval); limit=int(limit)
@@ -1047,17 +1050,27 @@ async def _risk_load_klines(client, symbol, interval, limit):
         _risk_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    ws_live=bool(_ws_api_ready is not None and _ws_api_ready.is_set())
-    attempts=RISK_WS_ATTEMPTS if ws_live else 1
-    for attempt in range(max(1,attempts)):
+    # Primary path: two-host Binance REST race, hard-bounded internally.
+    try:
+        rows=await _risk_fetch_race(client, symbol, interval, limit)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        rows=None
+    if isinstance(rows,list) and rows:
+        return rows
+
+    # Secondary path: one short WS-API request. Do not retry repeatedly here;
+    # the RiskMap scheduler will revisit the symbol on the next cycle.
+    if _ws_api_ready is not None and _ws_api_ready.is_set():
         try:
             rows=await asyncio.wait_for(
                 binance_ws_api_klines(
                     symbol,interval,limit,
-                    wait_ready=.35,
-                    response_timeout=1.4,
+                    wait_ready=.20,
+                    response_timeout=1.0,
                 ),
-                timeout=2.15,
+                timeout=1.45,
             )
         except asyncio.TimeoutError:
             rows=None
@@ -1065,29 +1078,11 @@ async def _risk_load_klines(client, symbol, interval, limit):
             _risk_tf_cache[key]=(time.time(),rows)
             _risk_last_ok=time.time()
             _ws_api_stats["risk_ok"]+=1
-            if attempt==0:
-                _risk_tf_stats["ws_ok"]+=1
-            else:
-                _risk_tf_stats["ws_retry_ok"]+=1
+            _risk_tf_stats["ws_ok"]+=1
             return rows
-        if attempt+1<attempts:
-            await asyncio.sleep(.08)
 
-    # If WS is still healthy, do not burn REST budget for a symbol/timeframe
-    # that just failed twice. The next scheduler pass retries it.
-    if _ws_api_ready is not None and _ws_api_ready.is_set():
-        _risk_tf_stats["fail"]+=1
-        return []
-
-    try:
-        rows=await asyncio.wait_for(
-            _risk_fetch_race(client, symbol, interval, limit),
-            timeout=3.4,
-        )
-    except asyncio.TimeoutError:
-        _risk_tf_stats["fail"]+=1
-        return []
-    return rows if isinstance(rows,list) else []
+    _risk_tf_stats["fail"]+=1
+    return []
 
 # V10.19.1 resolves this attribute at call time. Risk-plan candles use their
 # own bounded host races and cannot be crowded out by structure/background work.
@@ -2622,7 +2617,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.36] Ψ HARD-BUDGET RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses two short WS attempts while WS is healthy, a hard two-host REST fallback only when WS is down, a non-blocking per-symbol candle budget, and no outer wait_for cancellation that can generate false timeouts under event-loop pressure.",flush=True)
+    print("[v11.0.5.37] Ψ REST-FIRST RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses a hard two-host Binance REST race first, one short WS-API fallback, a non-blocking per-symbol candle budget, and no outer wait_for cancellation. A connected-but-busy WS socket can no longer starve risk plans.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
