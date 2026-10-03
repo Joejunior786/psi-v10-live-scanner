@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.5-stable-depth-rebalance"
+VERSION = "10.16.6-connection-aware-depth-dwell"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -28,6 +28,7 @@ MICRO_SHARDS = 4
 MICRO_SHARD_SIZE = 20
 SHARD_POLL_SECONDS = 0.5
 SHARD_REBALANCE_MIN_DWELL_SECONDS = 12.0
+SHARD_DISCONNECTED_SETTLE_SECONDS = 30.0
 EXEC_WS_HEARTBEAT = 20.0
 EXEC_WS_RECEIVE_TIMEOUT = 90.0
 EXEC_WS_CONNECT_TIMEOUT = 20.0
@@ -54,6 +55,8 @@ shard_current_symbols = [[] for _ in range(MICRO_SHARDS)]
 shard_host_cursor = [i for i in range(MICRO_SHARDS)]
 shard_last_host = ["" for _ in range(MICRO_SHARDS)]
 shard_last_msg_ms = [0 for _ in range(MICRO_SHARDS)]
+shard_last_connect = [0.0 for _ in range(MICRO_SHARDS)]
+shard_last_disconnect = [0.0 for _ in range(MICRO_SHARDS)]
 
 board_stats = {
     "prints": 0,
@@ -414,8 +417,23 @@ def _assign_shards():
     # collected enough snapshots manufactures MICRO_NOT_READY gaps.
     now = time.time()
     if any(shard_current_symbols):
+        # Do not mutate membership while an assigned shard is still settling
+        # from a failed/ongoing handshake. Repeated transport failures keep
+        # the current execution pool stable rather than creating churn.
+        for shard_id, members in enumerate(shard_current_symbols):
+            if not members or shard_connected[shard_id]:
+                continue
+            ref = max(shard_last_change[shard_id], shard_last_disconnect[shard_id])
+            if ref > 0 and now - ref < SHARD_DISCONNECTED_SETTLE_SECONDS:
+                return set()
+
+        # Protect the actual post-connect warm-up window. The previous debounce
+        # started at assignment time, so a 20s handshake could consume the
+        # entire dwell before the socket had received a single depth frame.
         latest_change = max(shard_last_change) if shard_last_change else 0.0
-        if latest_change > 0 and now - latest_change < SHARD_REBALANCE_MIN_DWELL_SECONDS:
+        latest_connect = max(shard_last_connect) if shard_last_connect else 0.0
+        latest_event = max(latest_change, latest_connect)
+        if latest_event > 0 and now - latest_event < SHARD_REBALANCE_MIN_DWELL_SECONDS:
             return set()
 
     selected = list(dict.fromkeys(app.selected_micro_symbols))[: MICRO_SHARDS * MICRO_SHARD_SIZE]
@@ -509,7 +527,7 @@ async def _shard_loop(shard_id):
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16.5 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"Ψ-V10.16.6 SHARD{shard_id+1} connecting symbols={len(symbols)} "
                 f"gen={generation} host={base_url} mode=DEPTH_ONLY book=DEPTH20_WS",
                 flush=True,
             )
@@ -522,6 +540,7 @@ async def _shard_loop(shard_id):
             ) as ws:
                 shard_connected[shard_id] = True
                 shard_last_host[shard_id] = base_url
+                shard_last_connect[shard_id] = time.time()
                 shard_last_msg_ms[shard_id] = int(time.time() * 1000)
                 reconnects = 0
                 _sync_ws_status()
@@ -552,7 +571,7 @@ async def _shard_loop(shard_id):
                     # by a depth-only reconnect.
 
                 print(
-                    f"Ψ-V10.16.5 SHARD{shard_id+1} connected symbols={len(symbols)} "
+                    f"Ψ-V10.16.6 SHARD{shard_id+1} connected symbols={len(symbols)} "
                     f"host={base_url} preservedBooks={preserved_books} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
@@ -599,6 +618,8 @@ async def _shard_loop(shard_id):
             print(app.last_error, flush=True)
             shard_host_cursor[shard_id] += 1
         finally:
+            if shard_connected[shard_id]:
+                shard_last_disconnect[shard_id] = time.time()
             shard_connected[shard_id] = False
             _sync_ws_status()
 
@@ -684,7 +705,7 @@ async def _v1016_board_loop():
                 for ts in shard_last_msg_ms
             ]
             print(
-                f"Ψ-V10.16.5 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.6 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
                 f"reconnects={shard_reconnects} generations={shard_generation} "
                 f"hosts={shard_last_host} msgAgeMs={ages}",
