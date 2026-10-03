@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.3-phase-syntax-fixed"
+VERSION = "12.2.4-always-fast-fallback"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1497,10 +1497,12 @@ async def _fetch_tf(sym, tf, deep=False):
         else:
             _stats["dedicated_circuit_skip"] += 1
 
-    # 2) When the dedicated circuit is open, race the proven shared WS against
-    # bounded Binance REST. Accept any non-empty official history; genuinely
-    # young listings are stored as history-capped instead of retried forever.
-    if rows is None and (not deep) and _ws_circuit_open():
+    # 2) FAST fallback after ANY dedicated miss: race the proven shared WS
+    # against bounded Binance REST. The race is hard-bounded, so a temporarily
+    # unavailable/reconnecting dedicated socket cannot waste a hydration slot.
+    # Accept any non-empty official history; genuinely young listings are
+    # stored as history-capped instead of retried forever.
+    if rows is None and (not deep):
         async def shared_fast():
             try:
                 return await legacy.binance_ws_api_klines(
@@ -2276,7 +2278,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.3] MULTI-SETUP AUTHORITY + PHASE-SYNTAX FIXED active — legacy BUY/PRE authority disabled; "
+        "[v12.2.4] MULTI-SETUP AUTHORITY + ALWAYS-FAST-FALLBACK active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
