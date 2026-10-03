@@ -80,6 +80,17 @@ _stats = defaultdict(int)
 # prevents legacy recovery/structure traffic from starving the new strategy
 # engines and avoids dependence on Railway REST routing.
 V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
+V12_REST_HOSTS = tuple(
+    h.strip().rstrip("/")
+    for h in os.getenv(
+        "PSI_V12_REST_HOSTS",
+        "https://api1.binance.com,https://api2.binance.com,https://api3.binance.com,"
+        "https://api4.binance.com,https://api-gcp.binance.com,https://api.binance.com,"
+        "https://data-api.binance.vision"
+    ).split(",")
+    if h.strip()
+)
+_v12_rest_cursor = 0
 V12_WS_SHARDS = max(4, min(int(os.getenv("PSI_V12_WS_SHARDS", "8")), 8))
 _v12_ws_conns = [None] * V12_WS_SHARDS
 _v12_ws_ready = [None] * V12_WS_SHARDS
@@ -1147,6 +1158,76 @@ def _v12_return_shard(shard):
         _stats["shard_pool_overreturn"] += 1
 
 
+
+async def _v12_rest_one(host, symbol, interval, limit):
+    try:
+        timeout = legacy.aiohttp.ClientTimeout(total=3.2, connect=1.2, sock_read=2.4)
+        async with app.session.get(
+            host + "/api/v3/klines",
+            params={"symbol": str(symbol).upper(), "interval": str(interval), "limit": int(limit)},
+            timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                _stats[f"rest_status_{resp.status}"] += 1
+                return None
+            rows = await resp.json()
+            if isinstance(rows, list) and len(rows) >= 55:
+                _stats["rest_host_ok"] += 1
+                return rows
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _stats["rest_host_fail"] += 1
+    return None
+
+
+async def v12_rest_klines(symbol, interval, limit):
+    global _v12_rest_cursor
+    if app.session is None or not V12_REST_HOSTS:
+        return None
+
+    n = len(V12_REST_HOSTS)
+    # Race three official Binance front doors. This is materially faster than
+    # serially waiting on a degraded host and remains within the same Binance
+    # market-data source.
+    hosts = []
+    for _ in range(min(3, n)):
+        host = V12_REST_HOSTS[_v12_rest_cursor % n]
+        _v12_rest_cursor = (_v12_rest_cursor + 1) % n
+        if host not in hosts:
+            hosts.append(host)
+
+    tasks = [asyncio.create_task(_v12_rest_one(h, symbol, interval, limit)) for h in hosts]
+    try:
+        deadline = time.monotonic() + 3.5
+        pending = set(tasks)
+        while pending and time.monotonic() < deadline:
+            timeout = max(0.05, deadline - time.monotonic())
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for task in done:
+                try:
+                    rows = task.result()
+                except Exception:
+                    rows = None
+                if isinstance(rows, list) and len(rows) >= 55:
+                    _stats["rest_race_ok"] += 1
+                    for p in pending:
+                        p.cancel()
+                    return rows
+        _stats["rest_race_fail"] += 1
+        return None
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+
 def _v12_ws_primitives(shard):
     shard = int(shard) % V12_WS_SHARDS
     if _v12_ws_ready[shard] is None:
@@ -1281,6 +1362,14 @@ async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.
         _stats["ws_fail"] += 1
         _stats[f"ws_shard_{shard}_fail"] += 1
         _stats["ws_last_error"] = f"shard={shard} {type(exc).__name__}: {exc}"
+        if isinstance(exc, asyncio.TimeoutError):
+            _stats["ws_timeout_recycles"] += 1
+            ws = _v12_ws_conns[shard]
+            if ws is not None and not ws.closed:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
         return None
     finally:
         if rid is not None:
@@ -1294,64 +1383,44 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
-
-    # First choice: reuse V11's persisted Binance 1H/4H history.
-    if tf in {"1h", "4h"}:
-        seed, saved = _v11_raw_best(sym, tf)
-        if isinstance(seed, list) and len(seed) >= 55 and (not deep or len(seed) >= DEEP_MIN_ROWS):
-            rows = seed[-limit:] if limit < len(seed) else list(seed)
-            try:
-                reuse = getattr(legacy, "_reuse_current_candle", None)
-                maybe = reuse(rows, sym, tf) if callable(reuse) else None
-                if isinstance(maybe, list):
-                    rows = maybe
-            except Exception:
-                pass
-            snapshot = snap(rows)
-            if snapshot is not None:
-                step = 3600000 if tf == "1h" else 14400000
-                try:
-                    current_open = (int(time.time() * 1000) // step) * step
-                    is_current = int(rows[-1][0]) == current_open
-                except Exception:
-                    is_current = False
-                _cache[sym][tf] = {
-                    "rows": rows,
-                    "snap": snapshot,
-                    "updated": time.time() if is_current else (saved if saved > 0 else time.time() - TF_TTL[tf] * 0.75),
-                    "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
-                }
-                _stats["fetch_v11_cache_ok"] += 1
-                return True
-
-    base_shard = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
-    shard_order = [base_shard]
-    others = [i for i in range(V12_WS_SHARDS) if i != base_shard]
-    others.sort(key=lambda i: len(_v12_ws_pending[i]))
-    shard_order.extend(others[:2])
-
     rows = None
-    attempts = 0
-    for shard in shard_order:
-        attempts += 1
-        timeout = 6.0 if deep else 4.5
-        rows = await v12_ws_klines(sym, tf, limit, shard=shard, response_timeout=timeout)
-        if isinstance(rows, list) and len(rows) >= 55:
-            if shard != base_shard:
-                _stats["ws_failover_ok"] += 1
-            break
-        rows = None
-        if attempts >= 2:
-            break
-        await asyncio.sleep(0.05)
 
-    # If the broad FAST WS request misses, race two official Binance public
-    # market-data HTTP endpoints. Deep EMA200 history remains cache/WS only.
-    if (not isinstance(rows, list) or len(rows) < 55) and not deep:
-        rows = await _v12_fast_rest_klines(sym, tf, limit)
+    # 1) Low-overhead WS-API attempt on an exclusively borrowed shard.
+    shard = await _v12_borrow_shard(timeout=1.2)
+    if shard is not None:
+        try:
+            rows = await v12_ws_klines(
+                sym, tf, limit,
+                shard=shard,
+                response_timeout=5.0 if deep else 3.5,
+            )
+        finally:
+            _v12_return_shard(shard)
+
+    # 2) If the WS path stalls, race official Binance REST front doors.
+    if not isinstance(rows, list) or len(rows) < 55:
+        rows = await v12_rest_klines(sym, tf, limit)
+        if isinstance(rows, list) and len(rows) >= 55:
+            _stats["fetch_rest_ok"] += 1
+
+    # 3) One final WS attempt can succeed after the timed-out socket has been
+    # recycled by v12_ws_klines.
+    if not isinstance(rows, list) or len(rows) < 55:
+        shard = await _v12_borrow_shard(timeout=1.0)
+        if shard is not None:
+            try:
+                rows = await v12_ws_klines(
+                    sym, tf, limit,
+                    shard=shard,
+                    response_timeout=4.5 if deep else 3.0,
+                )
+                if isinstance(rows, list) and len(rows) >= 55:
+                    _stats["ws_failover_ok"] += 1
+            finally:
+                _v12_return_shard(shard)
 
     if isinstance(rows, list) and len(rows) >= 55:
-        _stats["fetch_ws_ok"] += 1
+        _stats["fetch_ws_or_rest_ok"] += 1
         snapshot = snap(rows)
         if snapshot is not None:
             current = _cache.get(sym, {}).get(tf) or {}
@@ -1385,7 +1454,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 14.0 if deep else 11.0
+                timeout = 18.0 if deep else 14.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1745,6 +1814,8 @@ async def strategy_loop():
                 f"v11Bulk={_stats.get('v11_imported',0)} restFast={_stats.get('fast_rest_ok',0)}/{_stats.get('fast_rest_fail',0)} "
                 f"fetchFail={_stats.get('fetch_fail', 0)} "
                 f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
+                f"restOK={_stats.get('rest_race_ok', 0)} restFail={_stats.get('rest_race_fail', 0)} "
+                f"wsRecycle={_stats.get('ws_timeout_recycles', 0)} "
                 f"wsFail={_stats.get('ws_fail', 0)} "
                 f"shardOK={[int(_stats.get(f'ws_shard_{i}_ok', 0)) for i in range(V12_WS_SHARDS)]} "
                 f"shardFail={[int(_stats.get(f'ws_shard_{i}_fail', 0)) for i in range(V12_WS_SHARDS)]} "
