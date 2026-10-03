@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.81-nonblocking-timeout-recycle"
+VERSION="11.0.5.82-explicit-reader-recycle"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -138,6 +138,7 @@ _trade_ws_send_lock=None
 _trade_ws_gate=None
 _trade_ws_pending={}
 _trade_ws_id=0
+_trade_ws_recycle=None
 _trade_ws_stats={
     "connects":0,"reconnects":0,"requests":0,"ok":0,"fail":0,"timeouts":0,
     "unavailable":0,"defer":0,"last_error":"",
@@ -152,6 +153,7 @@ _depth_ws_send_lock=None
 _depth_ws_gate=None
 _depth_ws_pending={}
 _depth_ws_id=0
+_depth_ws_recycle=None
 _depth_ws_stats={
     "connects":0,"reconnects":0,"requests":0,"ok":0,"fail":0,"timeouts":0,
     "unavailable":0,"defer":0,"last_error":"",
@@ -917,6 +919,13 @@ def _trade_ws_primitives():
     return _trade_ws_ready,_trade_ws_send_lock,_trade_ws_gate
 
 
+def _trade_ws_recycle_event():
+    global _trade_ws_recycle
+    if _trade_ws_recycle is None:
+        _trade_ws_recycle=asyncio.Event()
+    return _trade_ws_recycle
+
+
 def _trade_ws_fail_pending(reason):
     for rid,fut in list(_trade_ws_pending.items()):
         if fut is not None and not fut.done():
@@ -930,6 +939,7 @@ def _trade_ws_fail_pending(reason):
 async def trade_ws_api_loop():
     global _trade_ws_conn
     ready,_,_=_trade_ws_primitives()
+    recycle=_trade_ws_recycle_event()
     first=True
     while getattr(app,"session",None) is None or getattr(app.session,"closed",True):
         await asyncio.sleep(.25)
@@ -939,10 +949,11 @@ async def trade_ws_api_loop():
             async with app.session.ws_connect(
                 WS_API_URL,
                 heartbeat=25,
-                receive_timeout=90,
+                receive_timeout=None,
                 max_msg_size=0,
             ) as ws:
                 _trade_ws_conn=ws
+                recycle.clear()
                 ready.set()
                 _trade_ws_stats["connects"]+=1
                 if not first:
@@ -950,7 +961,14 @@ async def trade_ws_api_loop():
                 first=False
                 print(f"Ψ-TRADE-WS-API connected url={WS_API_URL}",flush=True)
 
-                async for msg in ws:
+                while True:
+                    if recycle.is_set():
+                        print("Ψ-TRADE-WS-API recycle requested",flush=True)
+                        break
+                    try:
+                        msg=await asyncio.wait_for(ws.receive(),timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
                     if msg.type==aiohttp.WSMsgType.TEXT:
                         try:
                             payload=json.loads(msg.data)
@@ -976,6 +994,7 @@ async def trade_ws_api_loop():
         finally:
             ready.clear()
             _trade_ws_conn=None
+            recycle.clear()
             _trade_ws_fail_pending("Trade WS API connection reset")
         await asyncio.sleep(.6)
 
@@ -1032,11 +1051,7 @@ async def trade_ws_api_request(method, params=None, wait_ready=2.0, response_tim
         # trade transport; formal micro/BUY gates remain unchanged.
         try:
             ready.clear()
-            ws=_trade_ws_conn
-            if ws is not None and not ws.closed:
-                # Never await close from the request coroutine: aiohttp close
-                # can wait on the reader loop and stall fallback/recovery.
-                asyncio.create_task(ws.close())
+            _trade_ws_recycle_event().set()
         except Exception:
             pass
         return None
@@ -1065,6 +1080,13 @@ def _depth_ws_primitives():
     return _depth_ws_ready,_depth_ws_send_lock,_depth_ws_gate
 
 
+def _depth_ws_recycle_event():
+    global _depth_ws_recycle
+    if _depth_ws_recycle is None:
+        _depth_ws_recycle=asyncio.Event()
+    return _depth_ws_recycle
+
+
 def _depth_ws_fail_pending(reason):
     for rid,fut in list(_depth_ws_pending.items()):
         if fut is not None and not fut.done():
@@ -1078,6 +1100,7 @@ def _depth_ws_fail_pending(reason):
 async def depth_ws_api_loop():
     global _depth_ws_conn
     ready,_,_=_depth_ws_primitives()
+    recycle=_depth_ws_recycle_event()
     first=True
     while getattr(app,"session",None) is None or getattr(app.session,"closed",True):
         await asyncio.sleep(.25)
@@ -1087,10 +1110,11 @@ async def depth_ws_api_loop():
             async with app.session.ws_connect(
                 WS_API_URL,
                 heartbeat=25,
-                receive_timeout=90,
+                receive_timeout=None,
                 max_msg_size=0,
             ) as ws:
                 _depth_ws_conn=ws
+                recycle.clear()
                 ready.set()
                 _depth_ws_stats["connects"]+=1
                 if not first:
@@ -1098,7 +1122,14 @@ async def depth_ws_api_loop():
                 first=False
                 print(f"Ψ-DEPTH-WS-API connected url={WS_API_URL}",flush=True)
 
-                async for msg in ws:
+                while True:
+                    if recycle.is_set():
+                        print("Ψ-DEPTH-WS-API recycle requested",flush=True)
+                        break
+                    try:
+                        msg=await asyncio.wait_for(ws.receive(),timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
                     if msg.type==aiohttp.WSMsgType.TEXT:
                         try:
                             payload=json.loads(msg.data)
@@ -1124,6 +1155,7 @@ async def depth_ws_api_loop():
         finally:
             ready.clear()
             _depth_ws_conn=None
+            recycle.clear()
             _depth_ws_fail_pending("Depth WS API connection reset")
         await asyncio.sleep(.6)
 
@@ -1179,9 +1211,7 @@ async def depth_ws_api_request(method, params=None, wait_ready=2.0, response_tim
         # next sequence-critical snapshot down a socket that just timed out.
         try:
             ready.clear()
-            ws=_depth_ws_conn
-            if ws is not None and not ws.closed:
-                asyncio.create_task(ws.close())
+            _depth_ws_recycle_event().set()
         except Exception:
             pass
         return None
@@ -4778,7 +4808,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.81] Ψ NONBLOCKING TIMEOUT RECYCLE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.82] Ψ EXPLICIT READER RECYCLE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
