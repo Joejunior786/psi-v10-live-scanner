@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.27-breakout-structural-intelligence"
+VERSION="11.0.5.28-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -39,6 +39,18 @@ _rest_stats = {"ok":0,"fail":0,"attempt_fail":0,"failover":0,"host_ok":{},"host_
 _rest_last_fail = 0.0
 _risk_last_ok = 0.0
 _risk_last_fail = 0.0
+
+WS_API_URL = "wss://ws-api.binance.com:443/ws-api/v3"
+_ws_api_conn = None
+_ws_api_ready = None
+_ws_api_send_lock = None
+_ws_api_gate = None
+_ws_api_pending = {}
+_ws_api_id = 0
+_ws_api_stats = {
+    "connects":0,"reconnects":0,"sent":0,"ok":0,"fail":0,"timeouts":0,
+    "unavailable":0,"defer":0,"structure_ok":0,"risk_ok":0,"last_error":"",
+}
 
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_structure_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
@@ -242,6 +254,143 @@ async def resilient_api_get(client, path, params=None):
 
 # Replace the shared module-level REST function before any scanner loop starts.
 app.api_get = resilient_api_get
+
+def _ws_api_primitives():
+    global _ws_api_ready, _ws_api_send_lock, _ws_api_gate
+    if _ws_api_ready is None:
+        _ws_api_ready = asyncio.Event()
+    if _ws_api_send_lock is None:
+        _ws_api_send_lock = asyncio.Lock()
+    if _ws_api_gate is None:
+        _ws_api_gate = asyncio.Semaphore(4)
+    return _ws_api_ready, _ws_api_send_lock, _ws_api_gate
+
+def _ws_api_fail_pending(reason):
+    for rid,fut in list(_ws_api_pending.items()):
+        if fut is not None and not fut.done():
+            try:
+                fut.set_exception(RuntimeError(reason))
+            except Exception:
+                pass
+    _ws_api_pending.clear()
+
+async def binance_ws_api_loop():
+    global _ws_api_conn
+    ready,_,_ = _ws_api_primitives()
+
+    while app.session is None or getattr(app.session,"closed",True):
+        await asyncio.sleep(.25)
+
+    first=True
+    while True:
+        try:
+            async with app.session.ws_connect(
+                WS_API_URL,
+                heartbeat=25,
+                receive_timeout=90,
+                max_msg_size=0,
+            ) as ws:
+                _ws_api_conn=ws
+                ready.set()
+                _ws_api_stats["connects"]+=1
+                if not first:
+                    _ws_api_stats["reconnects"]+=1
+                first=False
+                print(f"Ψ-WS-API connected url={WS_API_URL}",flush=True)
+
+                async for msg in ws:
+                    if msg.type==aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload=json.loads(msg.data)
+                        except Exception:
+                            continue
+                        rid=str(payload.get("id") or "")
+                        if not rid:
+                            continue
+                        fut=_ws_api_pending.pop(rid,None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(payload)
+                    elif msg.type in {aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.CLOSE,aiohttp.WSMsgType.ERROR}:
+                        raise RuntimeError(f"Binance WS API closed type={msg.type}")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _ws_api_stats["fail"]+=1
+            _ws_api_stats["last_error"]=f"{type(exc).__name__}: {exc}"
+            print(f"Ψ-WS-API ERROR {type(exc).__name__}: {exc}",flush=True)
+        finally:
+            ready.clear()
+            _ws_api_conn=None
+            _ws_api_fail_pending("Binance WS API connection reset")
+        await asyncio.sleep(1.5)
+
+async def binance_ws_api_klines(symbol, interval, limit, wait_ready=3.0, response_timeout=8.0):
+    global _ws_api_id
+    ready,send_lock,gate=_ws_api_primitives()
+    symbol=str(symbol).upper(); interval=str(interval); limit=int(limit)
+
+    try:
+        await asyncio.wait_for(ready.wait(),timeout=wait_ready)
+    except asyncio.TimeoutError:
+        _ws_api_stats["unavailable"]+=1
+        return None
+
+    acquired=False
+    rid=None
+    fut=None
+    try:
+        try:
+            await asyncio.wait_for(gate.acquire(),timeout=2.5)
+            acquired=True
+        except asyncio.TimeoutError:
+            _ws_api_stats["defer"]+=1
+            return None
+
+        loop=asyncio.get_running_loop()
+        async with send_lock:
+            ws=_ws_api_conn
+            if ws is None or ws.closed:
+                _ws_api_stats["unavailable"]+=1
+                return None
+            _ws_api_id+=1
+            rid=str(_ws_api_id)
+            fut=loop.create_future()
+            _ws_api_pending[rid]=fut
+            await ws.send_json({
+                "id":rid,
+                "method":"klines",
+                "params":{"symbol":symbol,"interval":interval,"limit":limit},
+            })
+            _ws_api_stats["sent"]+=1
+
+        payload=await asyncio.wait_for(fut,timeout=response_timeout)
+        status=int(payload.get("status") or 0) if isinstance(payload,dict) else 0
+        rows=payload.get("result") if isinstance(payload,dict) else None
+        if status==200 and isinstance(rows,list) and rows:
+            _ws_api_stats["ok"]+=1
+            return rows
+
+        _ws_api_stats["fail"]+=1
+        _ws_api_stats["last_error"]=f"status={status} payload={str(payload)[:220]}"
+        return None
+
+    except asyncio.TimeoutError:
+        _ws_api_stats["timeouts"]+=1
+        _ws_api_stats["fail"]+=1
+        _ws_api_stats["last_error"]=f"timeout {symbol} {interval} {limit}"
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _ws_api_stats["fail"]+=1
+        _ws_api_stats["last_error"]=f"{type(exc).__name__}: {exc}"
+        return None
+    finally:
+        if rid is not None:
+            _ws_api_pending.pop(rid,None)
+        if acquired:
+            gate.release()
 
 # Structure-timeframe resilience. A structure build needs 1h + 4h + 15m.
 # Cache only successful short-lived payloads, so if one sibling timeframe fails
@@ -603,6 +752,15 @@ async def structure_kline_ws_loop():
             print(f"Ψ-STRUCTURE-WS ERROR {type(exc).__name__}: {exc}",flush=True)
             await asyncio.sleep(2.0)
 
+async def _structure_historical_klines(client, symbol, interval, limit):
+    # Prefer Binance's official request/response WebSocket API for historical
+    # klines. REST host-racing is retained strictly as a bounded fallback.
+    rows=await binance_ws_api_klines(symbol,interval,limit,wait_ready=2.5,response_timeout=7.0)
+    if isinstance(rows,list) and rows:
+        _ws_api_stats["structure_ok"]+=1
+        return rows
+    return await _structure_fetch_race(client,symbol,interval,limit)
+
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
     global _structure_raw_dirty
     if not _structure_request_ctx.get():
@@ -683,7 +841,7 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
 
         rows=None
         for attempt in range(STRUCTURE_TF_ATTEMPTS):
-            rows=await _structure_fetch_race(client, symbol, interval, request_limit)
+            rows=await _structure_historical_klines(client, symbol, interval, request_limit)
             if isinstance(rows,list) and rows:
                 if attempt==0:
                     _structure_tf_stats["fetch_ok"]+=1
@@ -709,7 +867,7 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
             # An old/incomplete persisted series is never promoted as live structure.
             if incremental:
                 full_limit=_bootstrap_structure_limit(interval,limit)
-                full=await _structure_fetch_race(client,symbol,interval,full_limit)
+                full=await _structure_historical_klines(client,symbol,interval,full_limit)
                 if isinstance(full,list) and full:
                     merged=_merge_kline_rows([],full,limit)
                     incremental=False
@@ -834,6 +992,20 @@ async def _risk_fetch_race(client, symbol, interval, limit):
     return []
 
 async def _risk_load_klines(client, symbol, interval, limit):
+    global _risk_last_ok
+    symbol=str(symbol); interval=str(interval); limit=int(limit)
+    key=(symbol,interval,limit)
+    cached=_risk_tf_cache.get(key)
+    if cached and time.time()-float(cached[0])<=RISK_TF_CACHE_S:
+        return cached[1]
+
+    rows=await binance_ws_api_klines(symbol,interval,limit,wait_ready=2.5,response_timeout=7.0)
+    if isinstance(rows,list) and rows:
+        _risk_tf_cache[key]=(time.time(),rows)
+        _risk_last_ok=time.time()
+        _ws_api_stats["risk_ok"]+=1
+        return rows
+
     return await _risk_fetch_race(client, symbol, interval, limit)
 
 # V10.19.1 resolves this attribute at call time. Risk-plan candles use their
@@ -1538,7 +1710,7 @@ async def structure_recovery_loop():
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} "
                 f"rawLoad={_structure_tf_stats['raw_load']} rawSave={_structure_tf_stats['raw_save']} "
-                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} wsRefresh={_structure_tf_stats['ws_refresh']} wsSubs={_structure_ws_stats['subscribed']} "
+                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} wsRefresh={_structure_tf_stats['ws_refresh']} wsSubs={_structure_ws_stats['subscribed']} wsApiStruct={_ws_api_stats['structure_ok']} "
                 f"structRoutes={sum(1 for k in _rest_good_host if str(k).startswith('structure_klines:'))}",
                 flush=True,
             )
@@ -1770,7 +1942,7 @@ async def watchdog_loop():
                 f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wsRisk={_ws_api_stats['risk_ok']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )
@@ -1782,6 +1954,6 @@ async def watchdog_loop():
 
 async def main():
     print("[v11.0.5.1] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
-    await asyncio.gather(rescue.main(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
