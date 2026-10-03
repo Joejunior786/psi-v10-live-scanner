@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.60-permanent-feed-failover"
+VERSION="11.0.5.61-top-level-feed-failover"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -3113,13 +3113,107 @@ async def watchdog_loop():
             watchdog_stats["errors"]+=1
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
+async def independent_market_feed_fallback_loop():
+    """Top-level failover owner for discovery + extension telemetry.
+
+    Runs independently of historical nested discovery tasks. Uses only verified
+    Binance REST payloads and never bypasses formal BUY/Pinpoint safety gates.
+    """
+    last_disc_log=0.0
+    last_ext_log=0.0
+    while True:
+        try:
+            await asyncio.sleep(2.0)
+            if getattr(app,"session",None) is None:
+                continue
+            now=time.time()
+
+            # 1) Full-universe discovery: /ticker/bookTicker is small, fast and
+            # already proven reachable from this Railway runtime.
+            disc_age=(now-f(getattr(qualifier_core,"disc_event_ms",0),0)/1000.0) if f(getattr(qualifier_core,"disc_event_ms",0),0)>0 else 999999.0
+            if disc_age>4.0:
+                try:
+                    payload=await tape._direct_rest_json("/api/v3/ticker/bookTicker")
+                    accepted=qualifier_core._ingest_discovery_payload(payload,"REST_BOOK_TICKER_TOPLEVEL")
+                    if accepted and now-last_disc_log>10:
+                        last_disc_log=now
+                        print(
+                            f"Ψ-TOPLEVEL DISCOVERY FALLBACK live accepted={accepted}/{len(getattr(qualifier_core,'universe',[]) or [])} "
+                            f"source=BINANCE_REST_BOOK_TICKER",
+                            flush=True,
+                        )
+                except Exception as exc:
+                    if now-last_disc_log>15:
+                        last_disc_log=now
+                        print(f"Ψ-TOPLEVEL DISCOVERY FALLBACK_ERROR {type(exc).__name__}: {exc}",flush=True)
+
+            # 2) Extension/anti-chase telemetry: fetch only symbols that can
+            # matter now, in small MINI batches. This avoids the giant all-market
+            # 24h payload that timed out in Railway.
+            try:
+                btc_status=extrest._rest_status("BTCUSDT")
+            except Exception:
+                btc_status={}
+            if str(btc_status.get("status") or "")!="LIVE":
+                universe=set(getattr(qualifier_core,"universe",[]) or [])
+                syms=[];seen=set()
+                def add(sym):
+                    sym=str(sym or "")
+                    if sym and sym in universe and sym not in seen:
+                        seen.add(sym);syms.append(sym)
+                add("BTCUSDT");add("ETHUSDT")
+                for sym in list(getattr(app,"selected_micro_symbols",[]) or []): add(sym)
+                try:
+                    for _,sym in qualifier_core.hot(64): add(sym)
+                except Exception:
+                    pass
+                try:
+                    for row in list(base.latest.get("_all_candidates") or [])[:64]: add(row.get("symbol"))
+                except Exception:
+                    pass
+                total=0
+                for off in range(0,len(syms),30):
+                    batch=syms[off:off+30]
+                    if not batch: continue
+                    try:
+                        payload=await tape._direct_rest_json(
+                            "/api/v3/ticker/24hr",
+                            {"symbols":json.dumps(batch,separators=(",",":")),"type":"MINI"},
+                        )
+                        if isinstance(payload,list):
+                            total+=extrest.v71._mini_ingest(payload,"REST_24HR_MINI_TOPLEVEL")
+                    except Exception:
+                        continue
+                if total:
+                    extrest.v71.radar_mini_connected=True
+                    extrest.v71.mini_source="REST_24HR_MINI_TOPLEVEL"
+                    try:
+                        synced=extrest.sync_extension_from_ws()
+                    except Exception:
+                        synced=0
+                    if now-last_ext_log>10:
+                        last_ext_log=now
+                        print(
+                            f"Ψ-TOPLEVEL EXTENSION FALLBACK live symbols={total} synced={synced} "
+                            f"source=BINANCE_REST_MINI_BATCH",
+                            flush=True,
+                        )
+                elif now-last_ext_log>15:
+                    last_ext_log=now
+                    print("Ψ-TOPLEVEL EXTENSION FALLBACK_WAIT no_verified_batch_yet",flush=True)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Ψ-TOPLEVEL FEED FALLBACK_ERROR {type(exc).__name__}: {exc}",flush=True)
+
 async def main():
     # Expose one integrated runtime version even though historical feature
     # modules keep their own lineage versions.
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.60] Ψ PERMANENT FEED-FAILOVER + NON-BLOCKING EXECUTION-SCOPE WATCHDOG active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
+    print("[v11.0.5.61] Ψ TOP-LEVEL FEED-FAILOVER + NON-BLOCKING EXECUTION-SCOPE WATCHDOG active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), independent_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
