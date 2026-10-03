@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.1-adaptive-history-fixed"
+VERSION = "12.2.2-history-phase-resolution"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1813,13 +1813,20 @@ def _deep_backfill_symbols(universe, refresh_tasks, limit=2):
         if sym in refresh_tasks:
             continue
         c = _cache.get(sym) or {}
-        core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+        core_resolved = all(
+            bool((c.get(tf) or {}).get("snap"))
+            or (
+                bool((c.get(tf) or {}).get("history_capped"))
+                and bool((c.get(tf) or {}).get("rows"))
+            )
+            for tf in ("1h", "4h", "1d")
+        )
         core_deep = all(
             len(((c.get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
             or bool((c.get(tf) or {}).get("history_capped"))
             for tf in ("1h", "4h", "1d")
         )
-        if core_ready and not core_deep:
+        if core_resolved and not core_deep:
             out.append(sym)
             if len(out) >= limit:
                 break
@@ -1832,8 +1839,15 @@ def _weekly_backfill_symbols(universe, refresh_tasks, limit=2, deep=False):
         if sym in refresh_tasks:
             continue
         c = _cache.get(sym) or {}
-        core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
-        if not core_ready:
+        core_resolved = all(
+            bool((c.get(tf) or {}).get("snap"))
+            or (
+                bool((c.get(tf) or {}).get("history_capped"))
+                and bool((c.get(tf) or {}).get("rows"))
+            )
+            for tf in ("1h", "4h", "1d")
+        )
+        if not core_resolved:
             continue
         weekly = c.get("1w") or {}
         rows = weekly.get("rows") or []
@@ -2262,7 +2276,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.1] MULTI-SETUP AUTHORITY + ADAPTIVE HISTORY + CIRCUIT RACE active — legacy BUY/PRE authority disabled; "
+        "[v12.2.2] MULTI-SETUP AUTHORITY + HISTORY-PHASE RESOLUTION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
