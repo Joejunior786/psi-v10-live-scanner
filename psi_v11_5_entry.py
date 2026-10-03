@@ -3,6 +3,7 @@ import aiohttp
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
 import psi_v11_3_1_entry as continuity_guard
+import psi_v11_3_2_entry as move_engine
 import stable10_app as stable_core
 import target10_app as target_core
 import qualifier_app as qualifier_core
@@ -14,6 +15,7 @@ VERSION="11.0.5.3-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
+    "https://api-gcp.binance.com",
     "https://data-api.binance.vision",
     "https://api1.binance.com",
     "https://api2.binance.com",
@@ -30,13 +32,14 @@ _structure_active = 0
 _rest_good_host = {}
 _rest_host_bad_until = {}
 _rest_stats = {"ok":0,"fail":0,"attempt_fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0}
+_rest_last_fail = 0.0
 
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(8)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(3)
+        _rest_kline_gate = asyncio.Semaphore(4)
     if _rest_bg_kline_gate is None:
         _rest_bg_kline_gate = asyncio.Semaphore(1)
     if _rest_depth_gate is None:
@@ -64,7 +67,7 @@ async def resilient_api_get(client, path, params=None):
     route_key = "structure_klines" if is_structure else ("background_klines" if lane=="klines" else lane)
 
     if lane=="klines":
-        timeout_s,max_hosts=(4.5,4) if is_structure else (3.0,2)
+        timeout_s,max_hosts=(9.5,3) if is_structure else (5.5,3)
     elif lane=="depth":
         timeout_s,max_hosts=3.5,2
     elif lane=="ticker24":
@@ -74,17 +77,15 @@ async def resilient_api_get(client, path, params=None):
 
     global_gate,lane_gate=_rest_gates(p)
 
-    # Optional candle enrichments never compete with structural hydration.
-    # Deferral is normal control flow, not a REST failure and must not poison
-    # endpoint health/circuit-breaker state.
-    if lane=="klines" and not is_structure:
-        if _structure_active>0 or _rest_bg_kline_gate.locked():
-            return []
+    # Background risk-map/pullback candles have one reserved lane. They may
+    # run alongside the three structure requests, but cannot fan out enough to
+    # starve structural hydration.
 
     preferred=_rest_good_host.get(route_key)
     if lane in {"klines","depth","ticker24"}:
         base_hosts=[
             "https://data-api.binance.vision",
+            "https://api-gcp.binance.com",
             "https://api.binance.com",
             "https://api1.binance.com",
             "https://api2.binance.com",
@@ -124,22 +125,18 @@ async def resilient_api_get(client, path, params=None):
         try:
             if lane_gate is not None:
                 if lane=="klines" and not is_structure:
-                    if _structure_active>0 or _rest_bg_kline_gate.locked():
-                        return []
                     try:
-                        await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=.25)
+                        await asyncio.wait_for(_rest_bg_kline_gate.acquire(),timeout=6.0)
                     except asyncio.TimeoutError:
                         return []
                     bg_acquired=True
-                    if _structure_active>0:
-                        return []
                     try:
-                        await asyncio.wait_for(lane_gate.acquire(),timeout=.75)
+                        await asyncio.wait_for(lane_gate.acquire(),timeout=6.0)
                     except asyncio.TimeoutError:
                         return []
                     lane_acquired=True
                 else:
-                    await asyncio.wait_for(lane_gate.acquire(),timeout=2.0)
+                    await asyncio.wait_for(lane_gate.acquire(),timeout=3.0)
                     lane_acquired=True
 
             payload=await _request_once(host)
@@ -152,7 +149,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=3 depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=4(structure=3+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -181,7 +178,9 @@ async def resilient_api_get(client, path, params=None):
             if bg_acquired:
                 _rest_bg_kline_gate.release()
 
+    global _rest_last_fail
     _rest_stats["fail"]+=1
+    _rest_last_fail=time.time()
     app.rest_connected=False
     app.last_error=f"REST_FAILOVER_FAIL {p}: {type(last_exc).__name__}: {last_exc}"
     try:
@@ -405,6 +404,58 @@ def scan_v5():
     return out[:BOARD_ROWS]
 base.scan=scan_v5
 
+def _fmt_px(v):
+    x=f(v)
+    if x<=0:return "-"
+    if x>=1000:return f"{x:.2f}"
+    if x>=1:return f"{x:.6f}".rstrip("0").rstrip(".")
+    if x>=.01:return f"{x:.7f}".rstrip("0").rstrip(".")
+    return f"{x:.10f}".rstrip("0").rstrip(".")
+
+def _candidate_move_plan(r):
+    sym=str(r.get("symbol") or "")
+    row=q.latest.get(sym) or {}
+    current=base.px(sym,row)
+    conditional=f(row.get("breakout_entry_trigger"),f(row.get("entry_trigger")))
+    ref_entry=conditional if conditional>0 else current
+    shadow=move_engine.expected_move_shadow(sym,ref_entry)
+
+    plans=[]
+    try:
+        ri=move_engine.riskmap.risk_intel(sym)
+        if isinstance(ri,dict):
+            en=f(ri.get("entry_trigger"));st=f(ri.get("stop_loss"))
+            if en>0 and st>0 and st<en:
+                plans.append((f(ri.get("updated")), "RISKMAP", ri))
+    except Exception: pass
+    try:
+        pb=move_engine.pullback.pb_intel(sym)
+        if isinstance(pb,dict):
+            en=f(pb.get("entry"));st=f(pb.get("stop"))
+            if en>0 and st>0 and st<en:
+                plans.append((f(pb.get("updated")), "PULLBACK", pb))
+    except Exception: pass
+
+    source="SHADOW_ONLY";plan={}
+    if plans:
+        _,source,plan=max(plans,key=lambda z:z[0])
+    entry=f(plan.get("entry_trigger"),f(plan.get("entry"),conditional))
+    stop=f(plan.get("stop_loss"),f(plan.get("stop")))
+    tp1=f(plan.get("tp1"));tp2=f(plan.get("tp2"));tp3=f(plan.get("tp3"))
+    runner=f(plan.get("runner_reference"))
+    valid=entry>0 and stop>0 and stop<entry and tp1>entry and tp2>tp1 and tp3>tp2
+    return {
+        "source":source,
+        "valid":valid,
+        "entry":entry if entry>0 else conditional,
+        "stop":stop if valid else 0.0,
+        "tp1":tp1 if valid else 0.0,
+        "tp2":tp2 if valid else 0.0,
+        "tp3":tp3 if valid else 0.0,
+        "runner":runner if valid and runner>tp3 else 0.0,
+        "shadow":shadow,
+    }
+
 def _bsi_learning():
     src=[x for x in base.resolved if isinstance(x,dict) and isinstance(x.get("features"),dict) and "bsi_n" in x["features"]]
     if not src:return {"status":"WARMING","n":0}
@@ -417,7 +468,29 @@ async def board_loop_v5():
         try:
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready=sum(1 for s in list(getattr(q,"universe",[]) or []) if tape.tape_metric(s).get("ready"))
             print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={ready}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON",flush=True)
-            print("Ψ-MONSTER-CANDIDATES ALL count="+str(len(all_rows))+" rows="+",".join(f"{r.get('symbol')}:{r.get('state')}:{int(f(r.get('layers')))}/6" for r in all_rows),flush=True)
+            move_rows=[]
+            for r in all_rows:
+                mp=_candidate_move_plan(r)
+                sh=mp["shadow"]
+                r["movePlanV11"]=mp
+                move_rows.append(r)
+            print("Ψ-MONSTER-CANDIDATES ALL count="+str(len(all_rows))+" rows="+",".join(f"{r.get('symbol')}:{r.get('state')}:{int(f(r.get('layers')))}/6:UP{f((r.get('movePlanV11') or {}).get('shadow',{}).get('expected_excursion_pct')):.1f}%:MS{f((r.get('movePlanV11') or {}).get('shadow',{}).get('move_score')):.0f}" for r in all_rows),flush=True)
+            move_rows.sort(key=lambda r:(bool((r.get("movePlanV11") or {}).get("valid")),int(f(r.get("layers"))),f((r.get("movePlanV11") or {}).get("shadow",{}).get("move_score")),f(r.get("bsi"))),reverse=True)
+            print(f"Ψ-MONSTER-MOVE-PLAN BOARD candidates={len(move_rows)} validPlans={sum(bool((r.get('movePlanV11') or {}).get('valid')) for r in move_rows)} model=EMPIRICAL_SHADOW",flush=True)
+            for j,r in enumerate(move_rows[:20],1):
+                mp=r.get("movePlanV11") or {};sh=mp.get("shadow") or {}
+                print(
+                    f"MP{j:02d}. {r.get('symbol'):<14} data={str(sh.get('data_status') or 'NO_DATA'):<14} "
+                    f"moveScore={f(sh.get('move_score')):5.1f}/100 expUp={f(sh.get('expected_excursion_pct')):5.2f}% "
+                    f"P5={100*f(sh.get('p5')):4.1f}% P10={100*f(sh.get('p10')):4.1f}% "
+                    f"P15={100*f(sh.get('p15')):4.1f}% P20={100*f(sh.get('p20')):4.1f}% "
+                    f"entry={_fmt_px(mp.get('entry'))} stop={_fmt_px(mp.get('stop'))} "
+                    f"tp1={_fmt_px(mp.get('tp1'))} tp2={_fmt_px(mp.get('tp2'))} tp3={_fmt_px(mp.get('tp3'))} "
+                    f"runner={_fmt_px(mp.get('runner'))} proj5={_fmt_px(sh.get('projection5'))} "
+                    f"proj10={_fmt_px(sh.get('projection10'))} proj15={_fmt_px(sh.get('projection15'))} "
+                    f"proj20={_fmt_px(sh.get('projection20'))} plan={'VALID' if mp.get('valid') else 'SHADOW_ONLY'} src={mp.get('source')}",
+                    flush=True,
+                )
             exrows=[r for r in all_rows if str(r.get("monsterPullbackState")) in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING","PULLBACK_ONLY"}]
             exrows.sort(key=lambda r:(2 if r.get("monsterPullbackState")=="PULLBACK_EXHAUSTED" else 1 if r.get("monsterPullbackState")=="SELL_PRESSURE_EXHAUSTING" else 0,f(r.get("monsterExhaustionScore")),f(r.get("bsi"))),reverse=True)
             print(f"Ψ-MONSTER-PULLBACK-EXHAUSTION BOARD candidates={len(exrows)} exhausted={sum(r.get('monsterPullbackState')=='PULLBACK_EXHAUSTED' for r in exrows)} exhausting={sum(r.get('monsterPullbackState')=='SELL_PRESSURE_EXHAUSTING' for r in exrows)}",flush=True)
@@ -425,7 +498,7 @@ async def board_loop_v5():
                 print(f"PX{j:02d}. {r.get('symbol'):<14} state={r.get('monsterPullbackState'):<24} score={f(r.get('monsterExhaustionScore')):5.1f} depth={f(r.get('monsterPullbackDepth')):5.2f}% rebound={f(r.get('monsterPullbackRebound')):5.2f}% BSI={f(r.get('bsi')):5.1f} layers={int(f(r.get('layers')))}/6 tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} formal={r.get('formal')} pp={r.get('pp')}",flush=True)
             for i,r in enumerate(rows,1):
                 ds="-" if r.get("dist") is None else f"{f(r.get('dist')):+.2f}%";age=f(r.get("peak20Age"),999999);mem="-" if age>rescue.MEMORY_WINDOW_S else f"{100*f(r.get('peakShP20_120')):.1f}%/{age:.0f}s"
-                print(f"MR{i:02d}. {r['symbol']:<14} state={str(r.get('state')):<17} BSI={f(r.get('bsi')):5.1f} {str(r.get('bsiState')):<19} FB={f(r.get('falseBreakRisk')):4.0f} comp={f(r.get('bsiCompression')):4.0f} tests={f(r.get('bsiTests')):4.0f} retest={f(r.get('bsiRetest')):4.0f} trend={f(r.get('bsiTrend')):4.0f} EARLY={f(r.get('early')):5.1f} DNA={f(r.get('dna')):5.1f} retain={f(r.get('retentionScore')):5.1f} rapid={f(r.get('rapid')):6.1f}/{f(r.get('peak')):6.1f} tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} event={f(r.get('event')):4.0f} vac={f(r.get('vac')):4.0f} pB15={100*f(r.get('pb15')):4.1f}% shP20={100*f(r.get('sp20')):4.1f}% mem20={mem} layers={int(f(r.get('layers')))}/6 dist={ds} formal={r.get('formal')} pp={r.get('pp')} why={(r.get('reasons') or [])[:10]}",flush=True)
+                print(f"MR{i:02d}. {r['symbol']:<14} state={str(r.get('state')):<17} BSI={f(r.get('bsi')):5.1f} {str(r.get('bsiState')):<19} FB={f(r.get('falseBreakRisk')):4.0f} comp={f(r.get('bsiCompression')):4.0f} tests={f(r.get('bsiTests')):4.0f} retest={f(r.get('bsiRetest')):4.0f} trend={f(r.get('bsiTrend')):4.0f} EARLY={f(r.get('early')):5.1f} DNA={f(r.get('dna')):5.1f} retain={f(r.get('retentionScore')):5.1f} rapid={f(r.get('rapid')):6.1f}/{f(r.get('peak')):6.1f} tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} event={f(r.get('event')):4.0f} vac={f(r.get('vac')):4.0f} pB15={100*f(r.get('pb15')):4.1f}% shP20={100*f(r.get('sp20')):4.1f}% mem20={mem} layers={int(f(r.get('layers')))}/6 dist={ds} formal={r.get('formal')} pp={r.get('pp')} moveScore={f(((r.get('movePlanV11') or {}).get('shadow') or {}).get('move_score')):4.0f}/100 expUp={f(((r.get('movePlanV11') or {}).get('shadow') or {}).get('expected_excursion_pct')):4.1f}% entry={_fmt_px((r.get('movePlanV11') or {}).get('entry'))} tp3={_fmt_px((r.get('movePlanV11') or {}).get('tp3'))} why={(r.get('reasons') or [])[:10]}",flush=True)
             top=sorted(rows,key=lambda r:f(r.get("bsi")),reverse=True)[:8];print(f"Ψ-BSI BOARD top={[(r.get('symbol'),round(f(r.get('bsi')),1),r.get('bsiState'),round(f(r.get('falseBreakRisk')),1),round(f(r.get('bsiCompression')),1),round(f(r.get('bsiTests')),1),r.get('pp')) for r in top]}",flush=True);print(f"Ψ-BSI LEARNING {_bsi_learning()}",flush=True)
             br,bn=rescue._blocker_learning();print("Ψ-MONSTER-BLOCKER-LEARN "+(f"resolved={bn} top={[(b,n,round(w10*100,1),round(w20*100,1),round(mfe,2)) for w20,w10,mfe,n,b in br]}" if bn else "status=WARMING resolved=0"),flush=True);paths=rescue._path_learning();print(f"Ψ-MONSTER-PATH-LEARN {paths}" if paths else "Ψ-MONSTER-PATH-LEARN status=WARMING",flush=True);print(f"Ψ-MONSTER-RESCUE HEALTH emergencyPromotions={rescue.rescue_stats['emergency_promotions']} lastEmergency={rescue.rescue_stats['last_emergency']} deepPool={rescue.rescue_stats['last_pool']} ignitionEpisodes={rescue.rescue_stats['ignition_episodes']} memoryWindow={int(rescue.MEMORY_WINDOW_S)}s buyAuthority=PINPOINT_ONLY",flush=True);rescue._save_rescue()
         except asyncio.CancelledError:rescue._save_rescue(True);raise
@@ -611,7 +684,7 @@ async def _hydrate_one(sym):
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
         client=app.session
-        sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
+        sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=34.0)
         if not isinstance(sd,dict):
             raise RuntimeError("structure payload incomplete")
         app.structure[sym]=sd
@@ -816,10 +889,12 @@ async def watchdog_loop():
                     print(f"Ψ-WATCHDOG ERROR SHARD_ASSIGN {type(exc).__name__}: {exc}",flush=True)
 
             ext_live=ext_age<=WATCHDOG_EXT_STALE_S
-            structure_progressing=(fresh_cov>=min(total,(16 if pool==0 else 32)) or now-_watchdog_last_cov_progress<=WATCHDOG_STRUCTURE_STALL_S)
-            continuity_ok=(pool>0 or ever_cov<16)
+            min_fresh=min(total,16)
+            structure_ready=(startup_age<=WATCHDOG_STARTUP_GRACE_S or fresh_cov>=min_fresh)
+            rest_recent_ok=(_rest_last_fail<=0 or now-_rest_last_fail>60.0)
+            continuity_ok=(startup_age<=WATCHDOG_STARTUP_GRACE_S or pool>0)
             shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
-            healthy=ext_live and structure_progressing and continuity_ok and shard_ok
+            healthy=ext_live and structure_ready and rest_recent_ok and continuity_ok and shard_ok
             if healthy: watchdog_stats["healthy"]+=1
             else: watchdog_stats["degraded"]+=1
             status="HEALTHY" if healthy else "RECOVERING"

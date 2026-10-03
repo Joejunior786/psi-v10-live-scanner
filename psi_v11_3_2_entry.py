@@ -40,7 +40,9 @@ MAX_NEIGHBORS = 160
 MIN_SIMILARITY = 0.18
 ONE_SIDED_Z = 1.2815515655446004  # ~90% one-sided lower bound
 FORECAST_CACHE_SECONDS = 8.0
+SHADOW_FORECAST_CACHE_SECONDS = 15.0
 forecast_cache = {}
+shadow_forecast_cache = {}
 
 _old_risk_trade_plan = riskmap.trade_plan
 _old_pullback_eval = pullback.pb_eval
@@ -432,6 +434,93 @@ def expected_move_forecast(sym, entry, stop):
     out["target_mode"] = mode
     out["mode_reason"] = reason
     forecast_cache[sym] = dict(out)
+    return out
+
+
+def expected_move_shadow(sym, reference_entry=None):
+    """Candidate-level upside forecast that does not require an execution stop.
+
+    This is discovery telemetry only. It never creates a BUY, stop, or executable
+    take-profit. Probabilities and expected excursion come from the same empirical
+    neighbor model as the strict expected-move engine.
+    """
+    now = time.time()
+    reference_entry = f(reference_entry)
+    cache = shadow_forecast_cache.get(sym)
+    if cache and now - f(cache.get("updated")) <= SHADOW_FORECAST_CACHE_SECONDS:
+        prior_ref = f(cache.get("reference_entry"))
+        if reference_entry <= 0 or prior_ref <= 0 or abs(prior_ref-reference_entry) <= max(reference_entry*.001,1e-12):
+            return dict(cache)
+
+    rows = _history_rows()
+    current = _current_features(sym)
+    neighbors = _neighbors(current, rows)
+    weights = [w for _, w, _ in neighbors]
+    neff = _effective_n(weights)
+    live_score = _live_continuation_score(sym, current)
+    out = {
+        "updated": now,
+        "reference_entry": reference_entry,
+        "history_n": len(rows),
+        "neighbor_n": len(neighbors),
+        "effective_n": round(neff,2),
+        "live_continuation_score": live_score,
+        "probability_method": "BAYESIAN_EMPIRICAL_SHADOW",
+    }
+
+    if not rows:
+        out.update({
+            "data_status":"NO_DATA",
+            "p5":0.0,"p10":0.0,"p15":0.0,"p20":0.0,
+            "p5_lower":0.0,"p10_lower":0.0,"p15_lower":0.0,"p20_lower":0.0,
+            "expected_excursion_pct":0.0,
+            "expected_excursion_lower_pct":0.0,
+            "move_score":0.0,
+        })
+        shadow_forecast_cache[sym]=dict(out)
+        return out
+
+    posts={}
+    for threshold in MOVE_THRESHOLDS:
+        posts[threshold]=_beta_posterior(
+            rows,neighbors,
+            lambda t,th=threshold:f(t.get("max_return_pct"))>=th,
+        )
+    means=[posts[t]["mean"] for t in MOVE_THRESHOLDS]
+    lowers=[posts[t]["lower"] for t in MOVE_THRESHOLDS]
+    for i in range(1,len(means)):
+        means[i]=min(means[i],means[i-1])
+        lowers[i]=min(lowers[i],lowers[i-1])
+
+    expected_excursion=5.0*sum(means)
+    conservative_excursion=5.0*sum(lowers)
+    calibration_status=str((getattr(learn,"calibration",{}) or {}).get("status") or "WARMING")
+    if len(rows)<20 or neff<5:
+        data_status="WARMING"
+    elif neff<12:
+        data_status="EMPIRICAL_LOW"
+    elif calibration_status=="ACTIVE" and neff>=25:
+        data_status="EMPIRICAL_WALKFORWARD_ACTIVE"
+    else:
+        data_status="EMPIRICAL_MEDIUM"
+
+    out.update({
+        "data_status":data_status,
+        "calibration_status":calibration_status,
+        "p5":means[0],"p10":means[1],"p15":means[2],"p20":means[3],
+        "p5_lower":lowers[0],"p10_lower":lowers[1],"p15_lower":lowers[2],"p20_lower":lowers[3],
+        "expected_excursion_pct":expected_excursion,
+        "expected_excursion_lower_pct":conservative_excursion,
+        "move_score":clamp(expected_excursion/20.0*100.0,0.0,100.0),
+    })
+    if reference_entry>0:
+        out.update({
+            "projection5":reference_entry*1.05,
+            "projection10":reference_entry*1.10,
+            "projection15":reference_entry*1.15,
+            "projection20":reference_entry*1.20,
+        })
+    shadow_forecast_cache[sym]=dict(out)
     return out
 
 
