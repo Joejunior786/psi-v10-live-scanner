@@ -12,18 +12,18 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.55-dark-horse-tape-price-fallback"
+VERSION="11.0.5.56-fair-universe-rotation"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
-DISCOVERY_NEW_SLOTS = int(os.environ.get("PSI_DISCOVERY_NEW_SLOTS", "12"))
-DISCOVERY_ROTATE_SLOTS = int(os.environ.get("PSI_DISCOVERY_ROTATE_SLOTS", "12"))
-DISCOVERY_DISPLAY_SLOTS = int(os.environ.get("PSI_DISCOVERY_DISPLAY_SLOTS", "8"))
+DISCOVERY_NEW_SLOTS = int(os.environ.get("PSI_DISCOVERY_NEW_SLOTS", "48"))
+DISCOVERY_ROTATE_SLOTS = int(os.environ.get("PSI_DISCOVERY_ROTATE_SLOTS", "96"))
+DISCOVERY_DISPLAY_SLOTS = int(os.environ.get("PSI_DISCOVERY_DISPLAY_SLOTS", "12"))
 DISCOVERY_RECENT_CYCLES = int(os.environ.get("PSI_DISCOVERY_RECENT_CYCLES", "10"))
 DISCOVERY_WATCH_COOLDOWN_CYCLES = int(os.environ.get("PSI_DISCOVERY_WATCH_COOLDOWN_CYCLES", "8"))
 DISCOVERY_WATCH_PENALTY = float(os.environ.get("PSI_DISCOVERY_WATCH_PENALTY", "2.5"))
-RECOVERY_ROTATION_SLOTS = int(os.environ.get("PSI_RECOVERY_ROTATION_SLOTS", "40"))
-RECOVERY_ROTATION_PERIOD_S = float(os.environ.get("PSI_RECOVERY_ROTATION_PERIOD_S", "20"))
+RECOVERY_ROTATION_SLOTS = int(os.environ.get("PSI_RECOVERY_ROTATION_SLOTS", "64"))
+RECOVERY_ROTATION_PERIOD_S = float(os.environ.get("PSI_RECOVERY_ROTATION_PERIOD_S", "10"))
 
 # Diagnostic-only early-momentum lane. This NEVER feeds formal state, the
 # Monster deep pool, Pinpoint, RiskMap, BUY/PRE authority, or execution gates.
@@ -1466,10 +1466,19 @@ def scan_v5():
     seen={s for _,s,_,_ in pool}
     row_by_sym={x[2]:x for x in rows}
 
+    # Fair-universe reservation: high-ranked/rescue names are not allowed to
+    # consume the entire deep pool before novel + round-robin symbols enter.
+    # This changes research coverage only; formal BUY/PRE gates remain intact.
+    fair_reserve=min(
+        max(0,rescue.MAX_DEEP_POOL-int(base.DEEP_LIMIT)),
+        max(0,DISCOVERY_NEW_SLOTS)+max(0,DISCOVERY_ROTATE_SLOTS),
+    )
+    priority_cap=max(int(base.DEEP_LIMIT),rescue.MAX_DEEP_POOL-fair_reserve)
+
     # Preserve genuine high-velocity exceptions.
     for a,rs,s,r,c in rows:
         if s not in seen and (f(c.get("peak"))>=100 or f(c.get("radar_n"))>=.45 or f(c.get("r60"))>=.75):
-            if len(pool)>=rescue.MAX_DEEP_POOL: break
+            if len(pool)>=priority_cap: break
             pool.append((a,s,r,c));seen.add(s)
 
     emergency=sorted(
@@ -1477,7 +1486,7 @@ def scan_v5():
         key=lambda x:(x[1],x[0]),reverse=True
     )[:rescue.EXTRA_RESCUE_SLOTS]
     for a,rs,s,r,c in emergency:
-        if len(pool)>=rescue.MAX_DEEP_POOL:break
+        if len(pool)>=priority_cap:break
         pool.append((a,s,r,c));seen.add(s);rescue.rescue_stats["emergency_promotions"]+=1
 
     promoted={}
@@ -1587,10 +1596,13 @@ def scan_v5():
     )
     base.stats["cycles"]+=1;base.stats["universe"]=len(u);base.stats["deep"]=len(pool);base.stats["cand"]=len(out);rescue.rescue_stats["last_pool"]=len(pool);rescue.rescue_stats["last_emergency"]=len(emergency)
     base.latest["_all_candidates"]=list(out)
+    fair_window=max(2,math.ceil(len(u)/max(1,DISCOVERY_ROTATE_SLOTS))+1) if u else 0
+    fair_recent=sum(1 for s in u if cycle-int(_discovery_last_seen.get(s,-10_000))<=fair_window) if u else 0
     base.latest["_discovery_stats"]={
         "cycle":cycle,"novel":sum(1 for v in promoted.values() if v=="NOVEL"),
         "rotated":sum(1 for v in promoted.values() if v=="ROTATE"),
         "recent":len(_discovery_recent_promotions),"cursor":_discovery_cursor,
+        "fairReserve":fair_reserve,"fairRecent":fair_recent,"fairUniverse":len(u),"fairWindow":fair_window,
     }
     board=_balanced_monster_board(out)
     base.latest["_display_mix"]=dict(Counter(str(r.get("displayLane") or "BEST") for r in board))
