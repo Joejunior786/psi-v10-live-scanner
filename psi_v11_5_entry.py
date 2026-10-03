@@ -992,12 +992,69 @@ def _candidate_move_plan(r):
     }
 
 def _monster_risk_priority():
-    out=[];seen=set()
-    for r in list(base.latest.get("_all_candidates") or []):
+    rows=list(base.latest.get("_all_candidates") or [])
+    by_sym={str(r.get("symbol") or ""):r for r in rows if str(r.get("symbol") or "")}
+
+    state_rank={
+        "MONSTER-HOT":6,
+        "MONSTER-IGNITION":5,
+        "MONSTER-RESCUE":4,
+        "MONSTER-MEMORY":3,
+        "MONSTER-SEED":2,
+        "MONSTER-EXTENDED":1,
+        "MONSTER-WATCH":0,
+    }
+
+    def row_score(r):
+        formal=str(r.get("formal") or "")
+        state=str(r.get("state") or "")
+        layers=int(f(r.get("layers")))
+        fresh=1 if _structure_age_recovery(str(r.get("symbol") or ""))<=RECOVERY_STALE_S else 0
+        serious=1 if (
+            formal=="PRE-IGNITION"
+            or state in {"MONSTER-HOT","MONSTER-IGNITION","MONSTER-RESCUE","MONSTER-MEMORY"}
+            or layers>=4
+        ) else 0
+        return (
+            fresh,
+            serious,
+            1 if formal=="PRE-IGNITION" else 0,
+            state_rank.get(state,0),
+            layers,
+            f(r.get("bsi")),
+            f(r.get("eventTape")),
+            f(r.get("early")),
+        )
+
+    ordered=[];seen=set()
+
+    # Execution pool always gets first claim on risk-map capacity.
+    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+        sym=str(sym)
+        if sym and sym not in seen:
+            ordered.append(sym);seen.add(sym)
+
+    # Then serious Monster/structure candidates, strongest first.
+    for r in sorted(rows,key=row_score,reverse=True):
+        sym=str(r.get("symbol") or "")
+        if not sym or sym in seen:
+            continue
+        layers=int(f(r.get("layers")))
+        state=str(r.get("state") or "")
+        formal=str(r.get("formal") or "")
+        if (
+            layers>=3
+            or formal=="PRE-IGNITION"
+            or state in {"MONSTER-HOT","MONSTER-IGNITION","MONSTER-RESCUE","MONSTER-MEMORY"}
+        ):
+            ordered.append(sym);seen.add(sym)
+
+    # Only fill spare slots from weaker discovery names.
+    for r in sorted(rows,key=row_score,reverse=True):
         sym=str(r.get("symbol") or "")
         if sym and sym not in seen:
-            out.append(sym);seen.add(sym)
-    return out
+            ordered.append(sym);seen.add(sym)
+    return ordered
 
 move_engine.riskmap.priority_symbols_provider = _monster_risk_priority
 
