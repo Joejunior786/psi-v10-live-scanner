@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.14-breakout-structural-intelligence"
+VERSION="11.0.5.15-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -73,7 +73,7 @@ async def resilient_api_get(client, path, params=None):
     route_key = "structure_klines" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane))
 
     if lane=="klines":
-        timeout_s,max_hosts=(3.2,1) if is_structure else ((6.5,3) if is_risk else (5.5,3))
+        timeout_s,max_hosts=(5.5,1) if is_structure else ((6.5,3) if is_risk else (5.5,3))
     elif lane=="depth":
         timeout_s,max_hosts=3.5,2
     elif lane=="ticker24":
@@ -235,10 +235,19 @@ app.api_get = resilient_api_get
 # the next retry reuses the verified siblings and refetches only the missing one.
 _original_load_klines = app.load_klines
 _structure_tf_cache = {}
+_structure_symbol_gates = {}
 STRUCTURE_TF_CACHE_S = 180.0
 STRUCTURE_TF_RETRY_DELAY_S = 0.12
-STRUCTURE_TF_ATTEMPTS = 4
+STRUCTURE_TF_ATTEMPTS = 3
 _structure_tf_stats = {"cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0}
+
+def _structure_symbol_gate(symbol):
+    key=str(symbol)
+    gate=_structure_symbol_gates.get(key)
+    if gate is None:
+        gate=asyncio.Semaphore(1)
+        _structure_symbol_gates[key]=gate
+    return gate
 
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
     if not _structure_request_ctx.get():
@@ -251,19 +260,26 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
         _structure_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    for attempt in range(STRUCTURE_TF_ATTEMPTS):
-        rows=await _original_load_klines(client, symbol, interval, limit)
-        if isinstance(rows,list) and rows:
-            _structure_tf_cache[key]=(time.time(),rows)
-            if attempt==0:
-                _structure_tf_stats["fetch_ok"]+=1
-            else:
-                _structure_tf_stats["retry_ok"]+=1
-            return rows
-        if attempt+1<STRUCTURE_TF_ATTEMPTS:
-            # Failed hosts are temporarily quarantined by resilient_api_get,
-            # so each round naturally advances to a different endpoint group.
-            await asyncio.sleep(STRUCTURE_TF_RETRY_DELAY_S)
+    # app.load_structure launches 1h/4h/15m together. Serialize those siblings
+    # per symbol so a 3-symbol recovery batch creates at most 3 structure REST
+    # requests at once instead of 9.
+    async with _structure_symbol_gate(symbol):
+        cached=_structure_tf_cache.get(key)
+        if cached and time.time()-float(cached[0])<=STRUCTURE_TF_CACHE_S:
+            _structure_tf_stats["cache_hit"]+=1
+            return cached[1]
+
+        for attempt in range(STRUCTURE_TF_ATTEMPTS):
+            rows=await _original_load_klines(client, symbol, interval, limit)
+            if isinstance(rows,list) and rows:
+                _structure_tf_cache[key]=(time.time(),rows)
+                if attempt==0:
+                    _structure_tf_stats["fetch_ok"]+=1
+                else:
+                    _structure_tf_stats["retry_ok"]+=1
+                return rows
+            if attempt+1<STRUCTURE_TF_ATTEMPTS:
+                await asyncio.sleep(STRUCTURE_TF_RETRY_DELAY_S)
 
     _structure_tf_stats["fail"]+=1
     print(
@@ -809,7 +825,7 @@ async def _hydrate_one(sym):
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=22.0)
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=32.0)
         finally:
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
@@ -868,7 +884,9 @@ async def structure_recovery_loop():
             print(
                 f"Ψ-RECOVERY BATCH fresh={fresh}/{total} ever={ever}/{total} "
                 f"batch={len(batch)} batchOK={sum(bool(x) for x in results)} batchFail={sum(not bool(x) for x in results)} "
-                f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']}",
+                f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
+                f"structHost={_rest_good_host.get('structure_klines','-')} tfCache={_structure_tf_stats['cache_hit']} "
+                f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
             )
 
