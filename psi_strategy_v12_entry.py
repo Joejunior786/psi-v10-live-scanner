@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.4-daily-rest-race"
+VERSION = "12.1.5-fallback-budget-fix"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1438,9 +1438,9 @@ async def _fetch_tf(sym, tf, deep=False):
                 sym,
                 tf,
                 limit,
-                wait_ready=1.25,
-                response_timeout=10.0 if deep else 8.0,
-                gate_timeout=1.25,
+                wait_ready=0.55,
+                response_timeout=6.0 if deep else 4.0,
+                gate_timeout=0.55,
             )
         except asyncio.CancelledError:
             raise
@@ -1511,7 +1511,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 10.0 if deep else 7.0
+                timeout = 13.0 if deep else 11.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1928,10 +1928,10 @@ async def strategy_loop():
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
-                f"fetchTO={_stats.get('fetch_timeout',0)} multiTransport={_stats.get('multi_transport_ok',0)}/"
-                f"{_stats.get('multi_transport_miss',0)} dailyRace={_stats.get('daily_race_ok',0)}/"
-                f"{_stats.get('daily_rest_race_attempts',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
-                f"{_stats.get('fast_rest_fail',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)} structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
+                f"fetchTO={_stats.get('fetch_timeout',0)} legacyWS={_stats.get('legacy_ws_ok',0)}/"
+                f"{_stats.get('legacy_ws_miss',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
+                f"{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
+                f"fetchRestOK={_stats.get('fetch_rest_ok',0)} structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
                 f"structTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
                 f"marketOK={getattr(legacy,'_market_ws_stats',{}).get('ok',0)} "
                 f"marketTO={getattr(legacy,'_market_ws_stats',{}).get('timeouts',0)} "
@@ -2048,7 +2048,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.4] MULTI-SETUP AUTHORITY + DAILY REST RACE active — legacy BUY/PRE authority disabled; "
+        "[v12.1.5] MULTI-SETUP AUTHORITY + FALLBACK BUDGET FIX active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
