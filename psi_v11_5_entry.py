@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.17-breakout-structural-intelligence"
+VERSION="11.0.5.18-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -44,7 +44,7 @@ def _rest_gates(path):
     if _rest_kline_gate is None:
         _rest_kline_gate = asyncio.Semaphore(12)
     if _rest_risk_kline_gate is None:
-        _rest_risk_kline_gate = asyncio.Semaphore(2)
+        _rest_risk_kline_gate = asyncio.Semaphore(3)
     if _rest_bg_kline_gate is None:
         _rest_bg_kline_gate = asyncio.Semaphore(1)
     if _rest_depth_gate is None:
@@ -188,7 +188,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=9+risk=2+background=1) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=8+risk=3+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -321,6 +321,13 @@ def _merge_kline_rows(seed, fresh, keep):
         except Exception:
             continue
     return [merged[k] for k in sorted(merged.keys())][-int(keep):]
+
+def _raw_seed_count(symbol):
+    symbol=str(symbol)
+    return sum(
+        1 for interval,limit in (("1h",260),("4h",260),("15m",80))
+        if isinstance((_structure_raw_cache.get(_raw_key(symbol,interval,limit)) or {}).get("rows"),list)
+    )
 
 def _structure_symbol_gate(symbol):
     key=str(symbol)
@@ -1001,6 +1008,14 @@ async def structure_recovery_loop():
             if _structure_age_recovery(s)>RECOVERY_STALE_S
             and _recovery_retry_after.get(s,0)<=now
         ]
+        scope_pos={s:i for i,s in enumerate(scope)}
+        targets.sort(
+            key=lambda s:(
+                -_raw_seed_count(s),
+                0 if _structure_age_recovery(s)<999000 else 1,
+                scope_pos.get(s,9999),
+            )
+        )
 
         if targets:
             batch=targets[:RECOVERY_BATCH]
@@ -1019,6 +1034,7 @@ async def structure_recovery_loop():
                 f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
             )
+            _save_structure_raw_cache()
 
         # Continuity is fresh-structure-only and grows in bounded steps. It can
         # start as soon as verified structure exists; every execution symbol

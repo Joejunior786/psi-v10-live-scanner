@@ -266,9 +266,11 @@ async def build_risk_map(sym):
         return
     try:
         fetch = getattr(app, "load_risk_klines", app.load_klines)
-        rows1 = await fetch(app.session, sym, "1m", 64)
-        rows5 = await fetch(app.session, sym, "5m", 72)
-        rows15 = await fetch(app.session, sym, "15m", 52)
+        rows1, rows5, rows15 = await asyncio.gather(
+            fetch(app.session, sym, "1m", 64),
+            fetch(app.session, sym, "5m", 72),
+            fetch(app.session, sym, "15m", 52),
+        )
         c1, c5, c15 = candle_rows(rows1), candle_rows(rows5), candle_rows(rows15)
         if len(c5) < 20:
             risk_stats["empty"] += 1
