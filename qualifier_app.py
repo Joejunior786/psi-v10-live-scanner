@@ -246,19 +246,36 @@ async def _discovery_rest_snapshot():
     global disc_rest_ok,disc_rest_fail,disc_source
     if app.session is None:
         return 0
-    try:
-        payload=await app.api_get(app.session,"/api/v3/ticker/24hr")
-        accepted=_ingest_discovery_payload(payload,"REST_24HR")
-        disc_rest_ok+=1
-        if accepted:
-            print(f"Ψ-DISCOVERY FALLBACK source=REST_24HR accepted={accepted}/{len(universe)}",flush=True)
-        return accepted
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        disc_rest_fail+=1
-        print(f"Ψ-DISCOVERY FALLBACK_ERROR {type(e).__name__}: {e}",flush=True)
-        return 0
+    hosts=[
+        "https://api.binance.com",
+        "https://data-api.binance.vision",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+    ]
+    last_exc=None
+    for host in hosts:
+        try:
+            async with app.session.get(
+                f"{host}/api/v3/ticker/24hr",
+                timeout=aiohttp.ClientTimeout(total=6,connect=2),
+            ) as resp:
+                body=await resp.text()
+                if resp.status!=200:
+                    raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
+                payload=json.loads(body)
+                accepted=_ingest_discovery_payload(payload,"REST_24HR")
+                disc_rest_ok+=1
+                if accepted:
+                    print(f"Ψ-DISCOVERY FALLBACK source=REST_24HR accepted={accepted}/{len(universe)} host={host}",flush=True)
+                return accepted
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            last_exc=e
+            continue
+    disc_rest_fail+=1
+    print(f"Ψ-DISCOVERY FALLBACK_ERROR {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",flush=True)
+    return 0
 
 async def discovery_rest_loop():
     while True:
