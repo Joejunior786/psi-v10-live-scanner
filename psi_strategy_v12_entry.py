@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.5-fallback-budget-fix"
+VERSION = "12.1.6-dedicated-hydration-ws"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -45,9 +45,9 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(3, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 4))
-MAX_INFLIGHT_SYMBOLS = max(8, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "12")), 16))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 12))
+FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 6))
+MAX_INFLIGHT_SYMBOLS = max(12, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "18")), 24))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(6, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "12")), 18))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -115,7 +115,7 @@ V12_REST_HOSTS = tuple(
     if h.strip()
 )
 _v12_rest_cursor = 0
-V12_WS_SHARDS = max(4, min(int(os.getenv("PSI_V12_WS_SHARDS", "8")), 8))
+V12_WS_SHARDS = 1
 _v12_ws_conns = [None] * V12_WS_SHARDS
 _v12_ws_ready = [None] * V12_WS_SHARDS
 _v12_ws_locks = [None] * V12_WS_SHARDS
@@ -1259,10 +1259,9 @@ def _v12_ws_primitives(shard):
     if _v12_ws_locks[shard] is None:
         _v12_ws_locks[shard] = asyncio.Lock()
     if _v12_ws_gates[shard] is None:
-        # Two in-flight requests per physical socket is intentionally modest.
-        # Aggregate throughput comes from independent sockets, not one flooded
-        # connection.
-        _v12_ws_gates[shard] = asyncio.Semaphore(1)
+        # Dedicated V12 hydration lane. Six request IDs may be in flight
+        # concurrently without competing with discovery or execution sockets.
+        _v12_ws_gates[shard] = asyncio.Semaphore(6)
     return _v12_ws_ready[shard], _v12_ws_locks[shard], _v12_ws_gates[shard]
 
 
@@ -1418,7 +1417,7 @@ async def _fetch_tf(sym, tf, deep=False):
     need = DEEP_MIN_ROWS if deep else 55
     rows = None
 
-    # 0) Zero-request reuse from V11's persisted Binance structure history.
+    # 0) Zero-request reuse from V11's persisted Binance 1H/4H structure.
     if tf in {"1h", "4h"}:
         reused, saved = _v11_raw_best(sym, tf)
         if isinstance(reused, list) and len(reused) >= need:
@@ -1430,17 +1429,16 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = merged if isinstance(merged, list) else reused
             _stats["fetch_v11_cache_ok"] += 1
 
-    # 1) Single proven historical lane. This is the exact transport that
-    # successfully grew V12 coverage before the dual-lane experiment.
+    # 1) Primary transport: one V12-only Binance WS-API socket.
+    # It is isolated from discovery, microstructure and execution traffic.
     if not isinstance(rows, list) or len(rows) < need:
         try:
-            rows = await legacy.binance_ws_api_klines(
+            rows = await v12_ws_klines(
                 sym,
                 tf,
                 limit,
-                wait_ready=0.55,
-                response_timeout=6.0 if deep else 4.0,
-                gate_timeout=0.55,
+                shard=0,
+                response_timeout=5.0 if deep else 3.2,
             )
         except asyncio.CancelledError:
             raise
@@ -1448,20 +1446,39 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = None
 
         if isinstance(rows, list) and len(rows) >= need:
-            _stats["legacy_ws_ok"] += 1
+            _stats["dedicated_ws_ok"] += 1
         else:
-            _stats["legacy_ws_miss"] += 1
+            _stats["dedicated_ws_miss"] += 1
             rows = None
 
-    # 2) One bounded fallback only. Do not chain multiple failing transports,
-    # because doing so caused the worker-level timeouts seen in V12.1.2.
+    # 2) Short proven shared-WS fallback. A miss returns quickly so the fair
+    # bootstrap scheduler can move to another market.
     if rows is None:
         try:
-            rows = (
-                await v12_rest_klines(sym, tf, limit)
-                if deep
-                else await _v12_fast_rest_klines(sym, tf, limit)
+            rows = await legacy.binance_ws_api_klines(
+                sym,
+                tf,
+                limit,
+                wait_ready=0.65,
+                response_timeout=3.5 if deep else 2.0,
+                gate_timeout=0.50,
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            rows = None
+
+        if isinstance(rows, list) and len(rows) >= need:
+            _stats["shared_ws_fallback_ok"] += 1
+        else:
+            _stats["shared_ws_fallback_miss"] += 1
+            rows = None
+
+    # 3) Keep REST only for DEEP history. FAST misses must fail quickly;
+    # otherwise a few unreachable hosts pin all full-universe worker slots.
+    if rows is None and deep:
+        try:
+            rows = await v12_rest_klines(sym, tf, limit)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1478,6 +1495,7 @@ async def _fetch_tf(sym, tf, deep=False):
             current = _cache.get(sym, {}).get(tf) or {}
             current_rows = current.get("rows") or []
 
+            # Never replace a deeper cache entry with a shallower packet.
             if len(rows) >= len(current_rows):
                 _cache[sym][tf] = {
                     "rows": rows,
@@ -1511,7 +1529,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 13.0 if deep else 11.0
+                timeout = 10.0 if deep else 6.2
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1928,14 +1946,12 @@ async def strategy_loop():
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
-                f"fetchTO={_stats.get('fetch_timeout',0)} legacyWS={_stats.get('legacy_ws_ok',0)}/"
-                f"{_stats.get('legacy_ws_miss',0)} fastRest={_stats.get('fast_rest_ok',0)}/"
-                f"{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
-                f"fetchRestOK={_stats.get('fetch_rest_ok',0)} structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
-                f"structTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
-                f"marketOK={getattr(legacy,'_market_ws_stats',{}).get('ok',0)} "
-                f"marketTO={getattr(legacy,'_market_ws_stats',{}).get('timeouts',0)} "
-                f"marketDefer={getattr(legacy,'_market_ws_stats',{}).get('defer',0)}",
+                f"fetchTO={_stats.get('fetch_timeout',0)} dedicatedWS={_stats.get('dedicated_ws_ok',0)}/"
+                f"{_stats.get('dedicated_ws_miss',0)} dedicatedRaw={_stats.get('ws_ok',0)}/"
+                f"{_stats.get('ws_fail',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
+                f"{_stats.get('shared_ws_fallback_miss',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)} "
+                f"structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
+                f"structTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)}",
                 flush=True,
             )
 
@@ -2048,7 +2064,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.5] MULTI-SETUP AUTHORITY + FALLBACK BUDGET FIX active — legacy BUY/PRE authority disabled; "
+        "[v12.1.6] MULTI-SETUP AUTHORITY + DEDICATED HYDRATION WS active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
@@ -2057,7 +2073,7 @@ async def main():
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
-    await asyncio.gather(legacy.main(), strategy_loop(), cache_persist_loop())
+    await asyncio.gather(legacy.main(), strategy_loop(), cache_persist_loop(), v12_ws_rpc_loop(0))
 
 
 if __name__ == "__main__":
