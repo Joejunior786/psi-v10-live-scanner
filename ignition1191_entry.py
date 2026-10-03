@@ -12,8 +12,10 @@ app = base.app
 
 VERSION = "10.19.1-support-liquidity-sweep-riskmap"
 SUPPORT_SAMPLE_SECONDS = 30.0
-SUPPORT_MAX_SYMBOLS = 4
+SUPPORT_MAX_SYMBOLS = 8
 SUPPORT_MAX_AGE = 95.0
+SUPPORT_BATCH_PER_CYCLE = 2
+SUPPORT_BUILD_TIMEOUT = 75.0
 ENTRY_MAX_DISTANCE_PCT = 3.0
 MAX_PLAN_RISK_PCT = 3.5
 MIN_PLAN_RISK_PCT = 0.20
@@ -293,13 +295,14 @@ async def build_risk_map(sym):
 
 
 async def support_loop():
-    sem = asyncio.Semaphore(2)
+    cursor = 0
+
     async def one(sym):
-        async with sem:
-            try:
-                await asyncio.wait_for(build_risk_map(sym), timeout=30.0)
-            except asyncio.TimeoutError:
-                risk_stats["errors"] += 1
+        try:
+            await asyncio.wait_for(build_risk_map(sym), timeout=SUPPORT_BUILD_TIMEOUT)
+        except asyncio.TimeoutError:
+            risk_stats["errors"] += 1
+
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
         try:
@@ -317,7 +320,18 @@ async def support_loop():
                     if sym not in seen:
                         syms.append(sym);seen.add(sym)
                     if len(syms)>=SUPPORT_MAX_SYMBOLS: break
-            await asyncio.gather(*(one(sym) for sym in syms))
+
+            if not syms:
+                continue
+
+            n=min(SUPPORT_BATCH_PER_CYCLE,len(syms))
+            batch=[syms[(cursor+i)%len(syms)] for i in range(n)]
+            cursor=(cursor+n)%max(1,len(syms))
+
+            # Exactly two complete risk-map builds at once, matching the two
+            # reserved background kline lanes. Each symbol fetches 1m/5m/15m
+            # sequentially, so the cycle cannot self-starve.
+            await asyncio.gather(*(one(sym) for sym in batch))
             risk_stats["samples"] += 1
         except asyncio.CancelledError:
             raise
