@@ -12,7 +12,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.3-hydration-throughput"
+VERSION = "12.0.4-two-tier-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -50,9 +50,15 @@ BOOTSTRAP_SYMBOLS_PER_CYCLE = max(8, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOL
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
-# 210 candles are enough for EMA/SMA200 + previous-value calculation while
-# reducing payload size versus the old 260-candle hydration.
-TF_LIMIT = {"1h": 210, "4h": 210, "1d": 210, "1w": 210}
+# Two-tier hydration:
+# - FAST packet gives every market enough history for ATR/range/volume/EMA50,
+#   compression, pullback and rejection logic.
+# - DEEP packet adds EMA/SMA200 authority. Active candidates get DEEP first;
+#   the rest of the universe is backfilled after fast coverage.
+FAST_TF_LIMIT = 96
+DEEP_TF_LIMIT = 210
+DEEP_MIN_ROWS = 202
+TF_LIMIT = {"1h": FAST_TF_LIMIT, "4h": FAST_TF_LIMIT, "1d": FAST_TF_LIMIT, "1w": FAST_TF_LIMIT}
 
 # Structural cache accumulates across the entire 403-symbol universe. Active
 # candidates refresh much faster, but broad coverage is never destroyed just
@@ -979,18 +985,18 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
             gate.release()
 
 
-async def _fetch_tf(sym, tf):
+async def _fetch_tf(sym, tf, deep=False):
     if app.session is None:
         return False
 
+    limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
     rows = None
     preferred = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
 
-    # First request uses the symbol/timeframe's stable shard; a retry moves to
-    # the next physical socket so a slow connection cannot hold that symbol.
+    # Stable shard first, adjacent shard as failover.
     for attempt in range(2):
         shard = (preferred + attempt) % V12_WS_SHARDS
-        rows = await v12_ws_klines(sym, tf, TF_LIMIT[tf], shard=shard)
+        rows = await v12_ws_klines(sym, tf, limit, shard=shard)
         if isinstance(rows, list) and len(rows) >= 55:
             _stats["fetch_ws_ok"] += 1
             break
@@ -1001,8 +1007,24 @@ async def _fetch_tf(sym, tf):
     if isinstance(rows, list) and len(rows) >= 55:
         snapshot = snap(rows)
         if snapshot is not None:
-            _cache[sym][tf] = {"rows": rows, "snap": snapshot, "updated": time.time()}
+            current = _cache.get(sym, {}).get(tf) or {}
+            current_rows = current.get("rows") or []
+            # Never let a smaller fast refresh overwrite an existing deep
+            # EMA200-capable cache.
+            if deep or len(current_rows) < DEEP_MIN_ROWS:
+                _cache[sym][tf] = {
+                    "rows": rows,
+                    "snap": snapshot,
+                    "updated": time.time(),
+                    "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
+                }
+            else:
+                current["updated"] = time.time()
             _stats["fetch_ok"] += 1
+            if len(rows) >= DEEP_MIN_ROWS:
+                _stats["fetch_deep_ok"] += 1
+            else:
+                _stats["fetch_fast_ok"] += 1
             return True
         _stats["fetch_short_history"] += 1
         return False
@@ -1019,28 +1041,33 @@ async def refresh_symbol(sym, sem, active=False):
 
     for tf in core_tfs:
         item = _cache.get(sym, {}).get(tf) or {}
-        if now - f(item.get("updated")) > ttl[tf] or not item.get("snap"):
+        rows = item.get("rows") or []
+        needs_deep = active and len(rows) < DEEP_MIN_ROWS
+        stale = now - f(item.get("updated")) > ttl[tf]
+        if not item.get("snap") or stale or needs_deep:
             core_stale.append(tf)
 
-    async def one(tf):
+    async def one(tf, deep=False):
         async with sem:
             try:
-                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=21.0)
+                timeout = 24.0 if deep else 16.0
+                return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
 
-    # Fetch the three core timeframes together. Once present they remain valid
-    # for structural qualification long enough for coverage to accumulate.
     if core_stale:
-        await asyncio.gather(*(one(tf) for tf in core_stale), return_exceptions=True)
+        # Broad universe uses fast packets; active candidates get full EMA200
+        # depth immediately.
+        await asyncio.gather(*(one(tf, deep=active) for tf in core_stale), return_exceptions=True)
         return
 
-    # Weekly enrichment is lower priority and never blocks initial 1H/4H/1D
-    # coverage. Active symbols receive fresher Weekly refreshes.
     weekly = _cache.get(sym, {}).get("1w") or {}
-    if now - f(weekly.get("updated")) > ttl["1w"] or not weekly.get("snap"):
-        await one("1w")
+    weekly_rows = weekly.get("rows") or []
+    weekly_needs_deep = active and len(weekly_rows) < DEEP_MIN_ROWS
+    weekly_stale = now - f(weekly.get("updated")) > ttl["1w"]
+    if not weekly.get("snap") or weekly_stale or weekly_needs_deep:
+        await one("1w", deep=active)
 
 
 def _priority_symbols(universe):
@@ -1242,12 +1269,22 @@ async def strategy_loop():
                 bool((_cache.get(s, {}).get("1w") or {}).get("snap"))
                 for s in universe
             )
+            deep_ready = sum(
+                all(len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS for tf in ("1h", "4h", "1d"))
+                for s in universe
+            )
+            weekly_deep_ready = sum(
+                len(((_cache.get(s, {}).get("1w") or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                for s in universe
+            )
 
             print(
                 f"Ψ-V12 REFRESH cycle={_cycle + 1} active={len(active)} bootstrap={len(bootstrap)} "
-                f"mtfReady={ready_now}/{len(universe)} weeklyReady={weekly_ready}/{len(universe)} "
+                f"mtfReady={ready_now}/{len(universe)} deepMAReady={deep_ready}/{len(universe)} "
+                f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
-                f"fetchOK={_stats.get('fetch_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)} "
+                f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
+                f"deepOK={_stats.get('fetch_deep_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)} "
                 f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
                 f"wsFail={_stats.get('ws_fail', 0)} "
                 f"shardOK={[int(_stats.get(f'ws_shard_{i}_ok', 0)) for i in range(V12_WS_SHARDS)]} "
@@ -1280,6 +1317,8 @@ async def strategy_loop():
             _stats["refresh_inflight"] = len(refresh_tasks)
             _stats["mtf_ready"] = ready_now
             _stats["weekly_ready"] = weekly_ready
+            _stats["deep_ready"] = deep_ready
+            _stats["weekly_deep_ready"] = weekly_deep_ready
             print_board(force=True)
 
         except asyncio.CancelledError:
@@ -1323,6 +1362,14 @@ async def v12_health(req):
     universe = list(getattr(q, "universe", []) or [])
     ready = sum(all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d")) for s in universe)
     weekly_ready = sum(bool((_cache.get(s, {}).get("1w") or {}).get("snap")) for s in universe)
+    deep_ready = sum(
+        all(len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS for tf in ("1h", "4h", "1d"))
+        for s in universe
+    )
+    weekly_deep_ready = sum(
+        len(((_cache.get(s, {}).get("1w") or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+        for s in universe
+    )
     return app.web.json_response({
         "ok": True,
         "version": VERSION,
@@ -1330,6 +1377,8 @@ async def v12_health(req):
         "universe": len(universe),
         "mtf_ready": ready,
         "weekly_ready": weekly_ready,
+        "deep_ma_ready": deep_ready,
+        "weekly_deep_ready": weekly_deep_ready,
         "stats": dict(_stats),
     })
 
@@ -1349,7 +1398,7 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     print(
-        "[v12.0.3] MULTI-SETUP AUTHORITY + FULL-UNIVERSE HYDRATION THROUGHPUT active — legacy BUY/PRE authority disabled; "
+        "[v12.0.4] MULTI-SETUP AUTHORITY + TWO-TIER FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
