@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.15-breakout-structural-intelligence"
+VERSION="11.0.5.16-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -70,7 +70,8 @@ async def resilient_api_get(client, path, params=None):
     lane=_rest_lane(p)
     is_structure = lane=="klines" and _structure_request_ctx.get()
     is_risk = lane=="klines" and (not is_structure) and _risk_plan_request_ctx.get()
-    route_key = "structure_klines" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane))
+    structure_symbol = str((params or {}).get("symbol") or "") if isinstance(params,dict) else ""
+    route_key = (f"structure_klines:{structure_symbol}" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane)))
 
     if lane=="klines":
         timeout_s,max_hosts=(5.5,1) if is_structure else ((6.5,3) if is_risk else (5.5,3))
@@ -97,6 +98,9 @@ async def resilient_api_get(client, path, params=None):
             "https://api4.binance.com",
             "https://data-api.binance.vision",
         ]
+        if structure_symbol and not preferred:
+            offset=sum(ord(ch) for ch in structure_symbol)%len(base_hosts)
+            base_hosts=base_hosts[offset:]+base_hosts[:offset]
     elif lane in {"klines","depth","ticker24"}:
         base_hosts=[
             "https://data-api.binance.vision",
@@ -649,13 +653,13 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 3
+RECOVERY_BATCH = 5
 RECOVERY_PRIORITY = 80
-RECOVERY_STALE_S = 270.0
+RECOVERY_STALE_S = 285.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
 RECOVERY_FAIL_COOLDOWN_S = 20.0
-RECOVERY_CYCLE_SLEEP_S = 1.5
+RECOVERY_CYCLE_SLEEP_S = 1.0
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
 _structure_cache_dirty = False
@@ -885,8 +889,8 @@ async def structure_recovery_loop():
                 f"Ψ-RECOVERY BATCH fresh={fresh}/{total} ever={ever}/{total} "
                 f"batch={len(batch)} batchOK={sum(bool(x) for x in results)} batchFail={sum(not bool(x) for x in results)} "
                 f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
-                f"structHost={_rest_good_host.get('structure_klines','-')} tfCache={_structure_tf_stats['cache_hit']} "
-                f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
+                f"structHosts={sorted({str(_rest_good_host.get('structure_klines:'+s,'-')).replace('https://','') for s in batch})} "
+                f"tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
             )
 
@@ -907,7 +911,7 @@ async def structure_recovery_loop():
                 f"pass={recovery_stats['passes']} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"pool={len(app.selected_micro_symbols or [])} kicks={recovery_stats['pool_kicks']} "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
-                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} structHost={_rest_good_host.get('structure_klines','-')}",
+                f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} structRoutes={sum(1 for k in _rest_good_host if str(k).startswith('structure_klines:'))}",
                 flush=True,
             )
         await asyncio.sleep(RECOVERY_CYCLE_SLEEP_S)
@@ -985,7 +989,10 @@ async def watchdog_loop():
                 and fresh_cov<min(total,(16 if pool==0 else 32))
                 and now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
             ):
-                prior_host=_rest_good_host.pop("structure_klines",None)
+                rotated=0
+                for key in list(_rest_good_host.keys()):
+                    if str(key).startswith("structure_klines:"):
+                        _rest_good_host.pop(key,None);rotated+=1
                 released=0
                 for sym,until in list(_recovery_retry_after.items()):
                     if until<=now:
@@ -993,10 +1000,10 @@ async def watchdog_loop():
                 _watchdog_last_cov_progress=now
                 watchdog_stats["structure_kicks"]+=1
                 watchdog_stats["actions"]+=1
-                actions.append(f"STRUCTURE_ROUTE_ROTATE:{released}")
+                actions.append(f"STRUCTURE_ROUTE_ROTATE:{rotated}")
                 print(
                     f"Ψ-WATCHDOG ACTION STRUCTURE_ROUTE_ROTATE coverage={ever_cov}/{total} "
-                    f"priorHost={prior_host or '-'} expiredReleased={released} activeCooldowns={len(_recovery_retry_after)}",
+                    f"routesRotated={rotated} expiredReleased={released} activeCooldowns={len(_recovery_retry_after)}",
                     flush=True,
                 )
 
