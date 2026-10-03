@@ -287,7 +287,9 @@ async def fetch_mtf(sym):
     if app.session is None:
         return
     try:
-        rows = await asyncio.gather(*(app.load_klines(app.session, sym, tf, 26) for tf in TF_CFG))
+        rows=[]
+        for tf in TF_CFG:
+            rows.append(await app.load_klines(app.session, sym, tf, 26))
         now = time.time()
         frames = {tf: infer_tf_state(sym, tf, r, now) for tf, r in zip(TF_CFG, rows)}
         mtf_cache[sym] = {"updated": now, "frames": frames}
@@ -311,7 +313,11 @@ async def mtf_loop():
             ][:MTF_MAX_SYMBOLS]
             if not syms:
                 continue
-            await asyncio.gather(*(fetch_mtf(sym) for sym in syms))
+            sem=asyncio.Semaphore(2)
+            async def one(sym):
+                async with sem:
+                    await fetch_mtf(sym)
+            await asyncio.gather(*(one(sym) for sym in syms))
             stats["mtf_samples"] += 1
         except asyncio.CancelledError:
             raise
@@ -653,7 +659,9 @@ async def market_loop():
             continue
         try:
             syms = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
-            vals = await asyncio.gather(*(market_ref(x) for x in syms))
+            vals=[]
+            for x in syms:
+                vals.append(await market_ref(x))
             market_context["refs"] = {s: v for s, v in zip(syms, vals) if v}
             market_context["updated"] = time.time()
             stats["market_samples"] += 1

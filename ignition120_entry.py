@@ -173,10 +173,8 @@ async def fetch_pb_extended(sym):
     if app.session is None:
         return
     try:
-        r5, r15 = await asyncio.gather(
-            app.load_klines(app.session, sym, "5m", 84),
-            app.load_klines(app.session, sym, "15m", 84),
-        )
+        r5 = await app.load_klines(app.session, sym, "5m", 84)
+        r15 = await app.load_klines(app.session, sym, "15m", 84)
         c5, c15 = base.candles(r5), base.candles(r15)
         mr = mean_reversion_context(sym, c5, c15)
         base.pb_cache[sym] = {

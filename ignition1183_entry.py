@@ -15,7 +15,7 @@ app=scanner.app
 VERSION="10.18.3-breakout-lifecycle"
 
 LIFECYCLE_SAMPLE_SECONDS=20.0
-LIFECYCLE_MAX_SYMBOLS=28
+LIFECYCLE_MAX_SYMBOLS=8
 LIFECYCLE_STALE_SECONDS=50.0
 LEVEL_MATCH_PCT=0.45
 BREAK_EPS_PCT=0.08
@@ -232,10 +232,8 @@ async def fetch_lifecycle(sym):
     if app.session is None:
         return
     try:
-        rows1,rows5=await asyncio.gather(
-            app.load_klines(app.session,sym,"1m",14),
-            app.load_klines(app.session,sym,"5m",14),
-        )
+        rows1=await app.load_klines(app.session,sym,"1m",14)
+        rows5=await app.load_klines(app.session,sym,"5m",14)
         lifecycle[sym]=infer_lifecycle(sym,rows1,rows5)
     except asyncio.CancelledError:
         raise
@@ -249,7 +247,11 @@ async def lifecycle_sampler():
         await asyncio.sleep(LIFECYCLE_SAMPLE_SECONDS)
         try:
             syms=candidate_symbols()
-            await asyncio.gather(*(fetch_lifecycle(sym) for sym in syms))
+            sem=asyncio.Semaphore(2)
+            async def one(sym):
+                async with sem:
+                    await fetch_lifecycle(sym)
+            await asyncio.gather(*(one(sym) for sym in syms))
             lifecycle_stats["samples"]+=1
             lifecycle_stats["symbols"]=len(syms)
         except asyncio.CancelledError:

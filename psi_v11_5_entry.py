@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.7-breakout-structural-intelligence"
+VERSION="11.0.5.8-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
