@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.29-breakout-structural-intelligence"
+VERSION="11.0.5.30-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -896,7 +896,10 @@ RISK_RACE_HOSTS = [
     "https://api4.binance.com",
 ]
 _risk_tf_cache = {}
-RISK_TF_CACHE_S = 18.0
+RISK_TF_CACHE_S = 120.0
+RISK_WS_ATTEMPTS = 2
+RISK_WS_RETRY_DELAY_S = 0.18
+_risk_tf_stats = {"cache_hit":0,"ws_ok":0,"ws_retry_ok":0,"rest_ok":0,"fail":0}
 
 async def _risk_fetch_race(client, symbol, interval, limit):
     global _risk_last_ok, _risk_last_fail
@@ -905,6 +908,7 @@ async def _risk_fetch_race(client, symbol, interval, limit):
     now=time.time()
     cached=_risk_tf_cache.get(key)
     if cached and now-float(cached[0])<=RISK_TF_CACHE_S:
+        _risk_tf_stats["cache_hit"]+=1
         return cached[1]
 
     route_key=f"risk_klines:{symbol}:{interval}"
@@ -964,6 +968,7 @@ async def _risk_fetch_race(client, symbol, interval, limit):
                     app.rest_connected=True
                     app.last_error=None
                     _risk_tf_cache[key]=(time.time(),payload)
+                    _risk_tf_stats["rest_ok"]+=1
                     return payload
                 except asyncio.CancelledError:
                     raise
@@ -983,6 +988,7 @@ async def _risk_fetch_race(client, symbol, interval, limit):
     _risk_last_fail=time.time()
     app.rest_connected=False
     app.last_error=f"RISK_RACE_FAIL {symbol} {interval} {limit}: {type(last_exc).__name__}: {last_exc}"
+    _risk_tf_stats["fail"]+=1
     print(
         f"Ψ-REST FAIL lane=risk_race:{symbol}:{interval} "
         f"params={{'symbol':'{symbol}','interval':'{interval}','limit':{limit}}} "
@@ -997,14 +1003,26 @@ async def _risk_load_klines(client, symbol, interval, limit):
     key=(symbol,interval,limit)
     cached=_risk_tf_cache.get(key)
     if cached and time.time()-float(cached[0])<=RISK_TF_CACHE_S:
+        _risk_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    rows=await binance_ws_api_klines(symbol,interval,limit,wait_ready=2.5,response_timeout=7.0)
-    if isinstance(rows,list) and rows:
-        _risk_tf_cache[key]=(time.time(),rows)
-        _risk_last_ok=time.time()
-        _ws_api_stats["risk_ok"]+=1
-        return rows
+    for attempt in range(RISK_WS_ATTEMPTS):
+        rows=await binance_ws_api_klines(
+            symbol,interval,limit,
+            wait_ready=2.5 if attempt==0 else 1.25,
+            response_timeout=6.0,
+        )
+        if isinstance(rows,list) and rows:
+            _risk_tf_cache[key]=(time.time(),rows)
+            _risk_last_ok=time.time()
+            _ws_api_stats["risk_ok"]+=1
+            if attempt==0:
+                _risk_tf_stats["ws_ok"]+=1
+            else:
+                _risk_tf_stats["ws_retry_ok"]+=1
+            return rows
+        if attempt+1<RISK_WS_ATTEMPTS:
+            await asyncio.sleep(RISK_WS_RETRY_DELAY_S)
 
     return await _risk_fetch_race(client, symbol, interval, limit)
 
@@ -1982,7 +2000,7 @@ async def watchdog_loop():
                 f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wsRisk={_ws_api_stats['risk_ok']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wsRisk={_ws_api_stats['risk_ok']} riskCache={_risk_tf_stats['cache_hit']} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )
