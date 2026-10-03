@@ -245,12 +245,20 @@ def _ingest_discovery_payload(payload, source):
     return accepted
 
 async def _discovery_rest_snapshot():
+    """Lightweight full-universe discovery fallback.
+
+    The all-symbol 24h ticker payload can time out on some cloud egress paths.
+    bookTicker is much smaller and is already proven reachable from this
+    runtime, so use it to preserve live price/spread discovery for every symbol.
+    This lane is discovery-only; missing volume/trade acceleration never grants
+    PRE/BUY authority.
+    """
     global disc_rest_ok,disc_rest_fail,disc_source
     if app.session is None:
         return 0
     hosts=[
-        "https://api.binance.com",
         "https://data-api.binance.vision",
+        "https://api.binance.com",
         "https://api1.binance.com",
         "https://api2.binance.com",
     ]
@@ -264,11 +272,38 @@ async def _discovery_rest_snapshot():
                 body=await resp.text()
                 if resp.status!=200:
                     raise RuntimeError(f"{host} HTTP {resp.status}: {body[:120]}")
-                payload=json.loads(body)
+                rows=json.loads(body)
+                if not isinstance(rows,list):
+                    raise RuntimeError("bookTicker payload is not a list")
+                payload=[]
+                for x in rows:
+                    if not isinstance(x,dict):
+                        continue
+                    s=str(x.get("symbol") or "")
+                    if s not in universe_set:
+                        continue
+                    bid=app.safe_float(x.get("bidPrice"))
+                    ask=app.safe_float(x.get("askPrice"))
+                    if bid<=0 or ask<=0:
+                        continue
+                    mid=(bid+ask)/2.0
+                    meta=app.symbol_meta.get(s,{}) if isinstance(getattr(app,"symbol_meta",None),dict) else {}
+                    payload.append({
+                        "s":s,
+                        "c":mid,
+                        "q":app.safe_float(meta.get("quote_volume_24h")),
+                        "n":0.0,
+                        "b":bid,
+                        "a":ask,
+                    })
                 accepted=_ingest_discovery_payload(payload,"REST_BOOK_TICKER")
                 disc_rest_ok+=1
                 if accepted:
-                    print(f"Ψ-DISCOVERY FALLBACK source=REST_BOOK_TICKER accepted={accepted}/{len(universe)} host={host}",flush=True)
+                    print(
+                        f"Ψ-DISCOVERY FALLBACK source=REST_BOOK_TICKER "
+                        f"accepted={accepted}/{len(universe)} host={host}",
+                        flush=True,
+                    )
                 return accepted
         except asyncio.CancelledError:
             raise
@@ -276,7 +311,11 @@ async def _discovery_rest_snapshot():
             last_exc=e
             continue
     disc_rest_fail+=1
-    print(f"Ψ-DISCOVERY FALLBACK_ERROR {type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",flush=True)
+    print(
+        f"Ψ-DISCOVERY FALLBACK_ERROR "
+        f"{type(last_exc).__name__ if last_exc else 'RuntimeError'}: {last_exc}",
+        flush=True,
+    )
     return 0
 
 async def discovery_rest_loop():
