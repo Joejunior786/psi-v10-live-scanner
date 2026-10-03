@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.88-parallel-micro-rest-race"
+VERSION="11.0.5.89-depth-failover-chain"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -166,7 +166,8 @@ _micro_rest_stats={
     "trade_ok":0,"trade_fail":0,"trade_host":"-",
     "depth_ok":0,"depth_fail":0,"depth_host":"-",
     "trade_micro_ws_ok":0,"trade_micro_ws_fail":0,
-    "trade_budget_timeout":0,
+    "depth_micro_ws_ok":0,"depth_micro_ws_fail":0,
+    "trade_budget_timeout":0,"depth_budget_timeout":0,
     "rest_race_ok":0,"rest_race_fail":0,
 }
 
@@ -4601,9 +4602,7 @@ async def ws_api_micro_depth_loop():
     while True:
         try:
             await asyncio.sleep(.65)
-            ready,_,_=_depth_ws_primitives()
-            if not ready.is_set():
-                continue
+            depth_ready,_,_=_depth_ws_primitives()
             core=_micro_fallback_core_symbols()
             if not core:
                 continue
@@ -4612,19 +4611,49 @@ async def ws_api_micro_depth_loop():
             sym=core[idx]
             _strict_depth_cursor=(idx+1)%len(core)
 
-            row=await depth_ws_api_request(
-                "depth",{"symbol":sym,"limit":10},
-                response_timeout=5.5,gate_timeout=1.5,
-            )
-            source="WSAPI"
-            if not isinstance(row,dict):
-                row=await micro_rest_get(
-                    "/api/v3/depth",
-                    {"symbol":sym,"limit":10},
-                    "depth",
-                    total_timeout=3.0,
+            row=None
+            source="-"
+
+            # Primary: dedicated sequence-critical depth transport.
+            if depth_ready.is_set():
+                row=await depth_ws_api_request(
+                    "depth",{"symbol":sym,"limit":10},
+                    response_timeout=5.5,gate_timeout=1.5,
                 )
-                source="REST"
+                if isinstance(row,dict):
+                    source="WSAPI"
+
+            # Secondary: independent shared micro WS-API. Same Binance depth
+            # snapshot schema, still passed through process_partial_depth_snapshot.
+            if not isinstance(row,dict):
+                row=await micro_ws_api_request(
+                    "depth",{"symbol":sym,"limit":10},
+                    response_timeout=5.0,gate_timeout=1.5,
+                )
+                if isinstance(row,dict):
+                    _micro_rest_stats["depth_micro_ws_ok"]+=1
+                    source="MICRO_WS"
+                else:
+                    _micro_rest_stats["depth_micro_ws_fail"]+=1
+
+            # Tertiary: parallel race across rotating official REST hosts.
+            if not isinstance(row,dict):
+                try:
+                    row=await asyncio.wait_for(
+                        micro_rest_get(
+                            "/api/v3/depth",
+                            {"symbol":sym,"limit":10},
+                            "depth",
+                            total_timeout=3.0,
+                        ),
+                        timeout=4.2,
+                    )
+                except asyncio.TimeoutError:
+                    _micro_rest_stats["depth_budget_timeout"]+=1
+                    row=None
+                if isinstance(row,dict):
+                    source="REST_RACE"
+
             if not isinstance(row,dict):
                 continue
 
@@ -4716,7 +4745,9 @@ async def ws_api_micro_log_loop():
                 f"depthWSreq={_depth_ws_stats['requests']} depthOKws={_depth_ws_stats['ok']} "
                 f"depthFail={_depth_ws_stats['fail']} depthTO={_depth_ws_stats['timeouts']} "
                 f"microTradeFB={_micro_rest_stats['trade_micro_ws_ok']}/{_micro_rest_stats['trade_micro_ws_fail']} "
+                f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
+                f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
                 f"restRace={_micro_rest_stats['rest_race_ok']}/{_micro_rest_stats['rest_race_fail']} "
                 f"restTrade={_micro_rest_stats['trade_ok']}/{_micro_rest_stats['trade_fail']} "
                 f"restDepth={_micro_rest_stats['depth_ok']}/{_micro_rest_stats['depth_fail']} "
@@ -4971,7 +5002,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.88] Ψ PARALLEL MICRO REST RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.89] Ψ DEPTH FAILOVER CHAIN active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
