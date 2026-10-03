@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.31-discovery-breadth-rotation"
+VERSION="11.0.5.32-hard-live-integrity"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -24,6 +24,15 @@ DISCOVERY_WATCH_COOLDOWN_CYCLES = int(os.environ.get("PSI_DISCOVERY_WATCH_COOLDO
 DISCOVERY_WATCH_PENALTY = float(os.environ.get("PSI_DISCOVERY_WATCH_PENALTY", "2.5"))
 RECOVERY_ROTATION_SLOTS = int(os.environ.get("PSI_RECOVERY_ROTATION_SLOTS", "40"))
 RECOVERY_ROTATION_PERIOD_S = float(os.environ.get("PSI_RECOVERY_ROTATION_PERIOD_S", "20"))
+
+# Hard live-integrity thresholds. Elevated states are fail-closed if any
+# mandatory feed is outside these bounds.
+INTEGRITY_STRUCTURE_MAX_AGE_S = float(os.environ.get("PSI_INTEGRITY_STRUCTURE_MAX_AGE_S", "120"))
+INTEGRITY_TAPE_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_TAPE_MAX_AGE_MS", "1800"))
+INTEGRITY_BBO_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_BBO_MAX_AGE_MS", "2500"))
+INTEGRITY_MICRO_TRADE_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_MICRO_TRADE_MAX_AGE_MS", "5000"))
+INTEGRITY_MICRO_BOOK_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_MICRO_BOOK_MAX_AGE_MS", "3000"))
+INTEGRITY_RISK_MAX_AGE_S = float(os.environ.get("PSI_INTEGRITY_RISK_MAX_AGE_S", "45"))
 
 _discovery_cycle = 0
 _discovery_cursor = 0
@@ -1184,10 +1193,32 @@ def candidate_v5(sym,row,c,d):
     bsi_bonus=max(0.0,(f(d.get("bsi"))-60.0)*.18)
     if f(d.get("falseBreakRisk"))>=55:bsi_bonus*=.35
     out["retentionScore"]=cl(f(out.get("retentionScore"))+min(6.0,bsi_bonus),0,100)
+
+    # Final integrity overlay is deliberately applied after every inherited
+    # scorer. It may only downgrade elevated labels; it can never promote.
+    try:
+        integ=_integrity_status(sym,row)
+    except Exception:
+        integ={"verified":False,"blockers":["INTEGRITY_CHECK_ERROR"],"ages":{}}
+    out["integrityVerified"]=bool(integ.get("verified"))
+    out["integrityBlockers"]=list(integ.get("blockers") or [])
+    out["integrityAges"]=dict(integ.get("ages") or {})
+    out["integrityRawFormal"]=out.get("formal")
+    out["integrityRawState"]=out.get("state")
+    if not out["integrityVerified"]:
+        if str(out.get("formal") or "") in {"PRE-IGNITION","BUY NOW"}:
+            out["formal"]="COLLECTING DATA"
+        if str(out.get("state") or "") in {"MONSTER-HOT","MONSTER-IGNITION"}:
+            out["state"]="MONSTER-WATCH"
+        rr=list(out.get("reasons") or [])
+        rr.append("DATA_INTEGRITY_WAIT")
+        out["reasons"]=list(dict.fromkeys(rr))
     return out
 base.candidate=candidate_v5
 
 def _live_pullback_exhaustion(sym,ca):
+    if not bool(ca.get("integrityVerified")):
+        return {"state":"DATA_WAIT","depth":0.0,"rebound":0.0,"score":0.0}
     h=base.price_hist.get(sym)
     if not h or len(h)<8:
         return {"state":"NONE","depth":0.0,"rebound":0.0,"score":0.0}
@@ -1543,11 +1574,21 @@ def _candidate_move_plan(r):
     stop=f(plan.get("stop_loss"),f(plan.get("stop")))
     tp1=f(plan.get("tp1"));tp2=f(plan.get("tp2"));tp3=f(plan.get("tp3"))
     runner=f(plan.get("runner_reference"))
-    valid=entry>0 and stop>0 and stop<entry and tp1>entry and tp2>tp1 and tp3>tp2
+    plan_updated=f(plan.get("updated"))
+    plan_age=(time.time()-plan_updated) if plan_updated>0 else 999999.0
+    integ=_integrity_status(sym,row)
+    valid=(
+        entry>0 and stop>0 and stop<entry and tp1>entry and tp2>tp1 and tp3>tp2
+        and bool(integ.get("verified"))
+        and plan_age<=INTEGRITY_RISK_MAX_AGE_S
+    )
     return {
         "source":source,
         "risk_state":risk_state,
         "valid":valid,
+        "integrity_verified":bool(integ.get("verified")),
+        "integrity_blockers":list(integ.get("blockers") or []),
+        "plan_age_s":plan_age,
         "entry":entry if entry>0 else conditional,
         "stop":stop if valid else 0.0,
         "tp1":tp1 if valid else 0.0,
@@ -1650,7 +1691,8 @@ async def board_loop_v5():
         await asyncio.sleep(base.BOARD_S)
         try:
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready,trade_fresh,book_fresh=_monster_tape_health()
-            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON",flush=True)
+            integrity_live=sum(bool(r.get("integrityVerified")) for r in all_rows)
+            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
             move_rows=[]
             move_syms=set()
             for r in all_rows:
@@ -1722,7 +1764,8 @@ async def board_loop_v5():
                 print(f"PX{j:02d}. {r.get('symbol'):<14} state={r.get('monsterPullbackState'):<24} score={f(r.get('monsterExhaustionScore')):5.1f} depth={f(r.get('monsterPullbackDepth')):5.2f}% rebound={f(r.get('monsterPullbackRebound')):5.2f}% BSI={f(r.get('bsi')):5.1f} layers={int(f(r.get('layers')))}/6 tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} formal={r.get('formal')} pp={r.get('pp')}",flush=True)
             for i,r in enumerate(rows,1):
                 ds="-" if r.get("dist") is None else f"{f(r.get('dist')):+.2f}%";age=f(r.get("peak20Age"),999999);mem="-" if age>rescue.MEMORY_WINDOW_S else f"{100*f(r.get('peakShP20_120')):.1f}%/{age:.0f}s"
-                print(f"MR{i:02d}. {r['symbol']:<14} state={str(r.get('state')):<17} BSI={f(r.get('bsi')):5.1f} {str(r.get('bsiState')):<19} FB={f(r.get('falseBreakRisk')):4.0f} comp={f(r.get('bsiCompression')):4.0f} tests={f(r.get('bsiTests')):4.0f} retest={f(r.get('bsiRetest')):4.0f} trend={f(r.get('bsiTrend')):4.0f} EARLY={f(r.get('early')):5.1f} DNA={f(r.get('dna')):5.1f} retain={f(r.get('retentionScore')):5.1f} rapid={f(r.get('rapid')):6.1f}/{f(r.get('peak')):6.1f} tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} event={f(r.get('event')):4.0f} vac={f(r.get('vac')):4.0f} pB15={100*f(r.get('pb15')):4.1f}% shP20={100*f(r.get('sp20')):4.1f}% mem20={mem} layers={int(f(r.get('layers')))}/6 dist={ds} formal={r.get('formal')} pp={r.get('pp')} moveScore={f(((r.get('movePlanV11') or {}).get('shadow') or {}).get('move_score')):4.0f}/100 expUp={f(((r.get('movePlanV11') or {}).get('shadow') or {}).get('expected_excursion_pct')):4.1f}% entry={_fmt_px((r.get('movePlanV11') or {}).get('entry'))} tp3={_fmt_px((r.get('movePlanV11') or {}).get('tp3'))} why={(r.get('reasons') or [])[:10]}",flush=True)
+                ia=r.get("integrityAges") or {};ilive="LIVE" if r.get("integrityVerified") else "WAIT"
+                print(f"MR{i:02d}. {r['symbol']:<14} integrity={ilive:<4} sAge={f(ia.get('structure_s'),999999):5.1f}s tAge={f(ia.get('tape_ms'),999999):6.0f}ms bAge={f(ia.get('micro_book_ms'),999999):6.0f}ms state={str(r.get('state')):<17} BSI={f(r.get('bsi')):5.1f} {str(r.get('bsiState')):<19} FB={f(r.get('falseBreakRisk')):4.0f} comp={f(r.get('bsiCompression')):4.0f} tests={f(r.get('bsiTests')):4.0f} retest={f(r.get('bsiRetest')):4.0f} trend={f(r.get('bsiTrend')):4.0f} EARLY={f(r.get('early')):5.1f} DNA={f(r.get('dna')):5.1f} retain={f(r.get('retentionScore')):5.1f} rapid={f(r.get('rapid')):6.1f}/{f(r.get('peak')):6.1f} tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} event={f(r.get('event')):4.0f} vac={f(r.get('vac')):4.0f} pB15={100*f(r.get('pb15')):4.1f}% shP20={100*f(r.get('sp20')):4.1f}% mem20={mem} layers={int(f(r.get('layers')))}/6 dist={ds} formal={r.get('formal')} pp={r.get('pp')} moveScore={f(((r.get('movePlanV11') or {}).get('shadow') or {}).get('move_score')):4.0f}/100 expUp={f(((r.get('movePlanV11') or {}).get('shadow') or {}).get('expected_excursion_pct')):4.1f}% entry={_fmt_px((r.get('movePlanV11') or {}).get('entry'))} tp3={_fmt_px((r.get('movePlanV11') or {}).get('tp3'))} why={(r.get('reasons') or [])[:10]}",flush=True)
             top=sorted(rows,key=lambda r:f(r.get("bsi")),reverse=True)[:8];print(f"Ψ-BSI BOARD top={[(r.get('symbol'),round(f(r.get('bsi')),1),r.get('bsiState'),round(f(r.get('falseBreakRisk')),1),round(f(r.get('bsiCompression')),1),round(f(r.get('bsiTests')),1),r.get('pp')) for r in top]}",flush=True);print(f"Ψ-BSI LEARNING {_bsi_learning()}",flush=True)
             br,bn=rescue._blocker_learning();print("Ψ-MONSTER-BLOCKER-LEARN "+(f"resolved={bn} top={[(b,n,round(w10*100,1),round(w20*100,1),round(mfe,2)) for w20,w10,mfe,n,b in br]}" if bn else "status=WARMING resolved=0"),flush=True);paths=rescue._path_learning();print(f"Ψ-MONSTER-PATH-LEARN {paths}" if paths else "Ψ-MONSTER-PATH-LEARN status=WARMING",flush=True);print(f"Ψ-MONSTER-RESCUE HEALTH emergencyPromotions={rescue.rescue_stats['emergency_promotions']} lastEmergency={rescue.rescue_stats['last_emergency']} deepPool={rescue.rescue_stats['last_pool']} ignitionEpisodes={rescue.rescue_stats['ignition_episodes']} memoryWindow={int(rescue.MEMORY_WINDOW_S)}s buyAuthority=PINPOINT_ONLY",flush=True);rescue._save_rescue()
         except asyncio.CancelledError:rescue._save_rescue(True);raise
@@ -1734,9 +1777,12 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = int(os.environ.get("PSI_RECOVERY_BATCH", "3"))
+RECOVERY_BATCH = int(os.environ.get("PSI_RECOVERY_BATCH", "4"))
 RECOVERY_PRIORITY = 80
-RECOVERY_STALE_S = 285.0
+# Structure may be cached for research, but execution-tier freshness is much
+# tighter than before. This prevents 3-5 minute-old structure from supporting
+# a live PRE/HOT/IGNITION label.
+RECOVERY_STALE_S = INTEGRITY_STRUCTURE_MAX_AGE_S
 recovery_stats = {"passes":0,"ok":0,"fail":0,"fast_ok":0,"fast_fail":0,"seed_ok":0,"seed_fail":0,"seed_cycles":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
 _recovery_inflight = set()
@@ -1934,6 +1980,95 @@ _watchdog_last_shard_progress = time.time()
 def _structure_age_recovery(sym):
     ts = int(q.structure_ms.get(sym,0) or 0)
     return 999999.0 if ts <= 0 else max(0.0,(q.ms()-ts)/1000.0)
+
+def _integrity_status(sym,row=None,require_risk=False):
+    """Return hard current-data integrity for elevated execution states.
+
+    This checks independent timestamps rather than trusting a score/label.
+    Discovery can continue when this fails, but PRE/HOT/IGNITION/BUY may not.
+    """
+    sym=str(sym or "")
+    row=row if isinstance(row,dict) else (q.latest.get(sym) or {})
+    blockers=[]
+    ages={}
+
+    structure_age=_structure_age_recovery(sym)
+    ages["structure_s"]=round(structure_age,3)
+    if structure_age>INTEGRITY_STRUCTURE_MAX_AGE_S:
+        blockers.append("STALE_STRUCTURE")
+
+    tm=tape.tape_metric(sym)
+    tape_age=f(tm.get("age_ms"),999999.0)
+    bbo_age=f(tm.get("book_age_ms"),999999.0)
+    ages["tape_ms"]=round(tape_age,1)
+    ages["bbo_ms"]=round(bbo_age,1)
+    if not tm.get("ready") or tape_age>INTEGRITY_TAPE_MAX_AGE_MS:
+        blockers.append("STALE_OR_UNREADY_TAPE")
+    if bbo_age>INTEGRITY_BBO_MAX_AGE_MS:
+        blockers.append("STALE_BBO")
+
+    micro=(getattr(app,"micro_state",{}) or {}).get(sym) or {}
+    now_ms=q.ms()
+    last_trade=int(micro.get("last_trade_ms",0) or 0)
+    last_book=int(micro.get("last_book_ms",0) or 0)
+    micro_trade_age=(now_ms-last_trade) if last_trade>0 else 999999999.0
+    micro_book_age=(now_ms-last_book) if last_book>0 else 999999999.0
+    ages["micro_trade_ms"]=round(micro_trade_age,1)
+    ages["micro_book_ms"]=round(micro_book_age,1)
+    if micro_trade_age>INTEGRITY_MICRO_TRADE_MAX_AGE_MS:
+        blockers.append("STALE_DEPTH_TRADE")
+    if micro_book_age>INTEGRITY_MICRO_BOOK_MAX_AGE_MS:
+        blockers.append("STALE_DEPTH_BOOK")
+
+    if row and not bool(row.get("micro_ready")):
+        blockers.append("MICRO_NOT_READY")
+
+    if require_risk:
+        try:
+            ri=move_engine.riskmap.risk_intel(sym)
+        except Exception:
+            ri=None
+        if not isinstance(ri,dict):
+            blockers.append("NO_FRESH_RISK_PLAN")
+            ages["risk_s"]=999999.0
+        else:
+            updated=f(ri.get("updated"))
+            risk_age=(time.time()-updated) if updated>0 else 999999.0
+            ages["risk_s"]=round(risk_age,3)
+            en=f(ri.get("entry_trigger"));st=f(ri.get("stop_loss"))
+            t1=f(ri.get("tp1"));t2=f(ri.get("tp2"));t3=f(ri.get("tp3"))
+            if risk_age>INTEGRITY_RISK_MAX_AGE_S:
+                blockers.append("STALE_RISK_PLAN")
+            if not (en>0 and st>0 and st<en and t1>en and t2>t1 and t3>t2):
+                blockers.append("INVALID_RISK_PLAN")
+
+    return {"verified":not blockers,"blockers":list(dict.fromkeys(blockers)),"ages":ages}
+
+# Wrap the sole formal evaluator. Elevated states are preserved only if their
+# mandatory live feeds pass the independent integrity check at evaluation time.
+_original_evaluate_symbol_integrity = app.evaluate_symbol
+
+def evaluate_symbol_integrity(sym):
+    row=_original_evaluate_symbol_integrity(sym)
+    if not isinstance(row,dict):
+        return row
+    row=dict(row)
+    raw=str(row.get("state") or "REJECT")
+    integ=_integrity_status(sym,row,require_risk=(raw=="BUY NOW"))
+    row["integrity_raw_state"]=raw
+    row["integrity_verified"]=bool(integ.get("verified"))
+    row["integrity_blockers"]=list(integ.get("blockers") or [])
+    row["integrity_ages"]=dict(integ.get("ages") or {})
+    if raw in {"EARLY OPPORTUNITY","PRE-IGNITION","BUY NOW"} and not row["integrity_verified"]:
+        row["state"]="COLLECTING DATA"
+        row["micro_ready"]=False
+        fh=list(row.get("failed_hard") or [])
+        fh.extend(row["integrity_blockers"])
+        fh.append("LIVE_DATA_INTEGRITY")
+        row["failed_hard"]=list(dict.fromkeys(fh))
+    return row
+
+app.evaluate_symbol=evaluate_symbol_integrity
 
 def _recovery_symbols():
     out=[];seen=set()
@@ -2327,7 +2462,7 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def main():
-    print("[v11.0.5.31] Ψ DISCOVERY BREADTH + STRUCTURAL INTELLIGENCE active — full-universe novelty quota, circular deep-analysis rotation, discovery display lane, stale-WATCH cooldown, rotating structure recovery and continuity pool expansion are enabled. These features change research coverage/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution/risk gate remains fail-closed. BSI and Monster logic remain active.",flush=True)
+    print("[v11.0.5.32] Ψ HARD LIVE INTEGRITY active — elevated labels now require independently fresh structure, aggTrade tape, BBO, depth-book/depth-trade micro data and micro readiness; BUY NOW additionally requires a fresh valid risk plan. Stale elevated states are downgraded to COLLECTING DATA/MONSTER-WATCH. Discovery remains broad and Pinpoint remains sole BUY authority.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
