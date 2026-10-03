@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.26-breakout-structural-intelligence"
+VERSION="11.0.5.27-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -251,6 +251,10 @@ _structure_tf_cache = {}
 _structure_symbol_gates = {}
 _structure_raw_cache = {}
 _structure_raw_dirty = False
+_structure_ws_latest = {}
+_structure_ws_stats = {"connects":0,"events":0,"errors":0,"subscribed":0,"refresh_ok":0,"stale":0}
+STRUCTURE_WS_STALE_S = 8.0
+STRUCTURE_WS_SYNC_S = 12.0
 STRUCTURE_RAW_CACHE_PATH = os.environ.get(
     "PSI_STRUCTURE_RAW_CACHE_PATH",
     "/data/psi_v11_structure_raw.json" if os.path.isdir("/data") else "/app/psi_v11_structure_raw.json",
@@ -261,7 +265,7 @@ STRUCTURE_TF_ATTEMPTS = 1
 STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
-    "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"bar_reuse":0,
+    "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"ws_refresh":0,"bar_reuse":0,
 }
 
 def _raw_key(symbol, interval, limit):
@@ -502,6 +506,103 @@ async def _structure_fetch_race(client, symbol, interval, limit):
     )
     return None
 
+def _structure_ws_seeded_symbols():
+    try:
+        scope=_recovery_scope() if "_recovery_scope" in globals() else list(getattr(q,"universe",[]) or [])
+    except Exception:
+        scope=list(getattr(q,"universe",[]) or [])
+    return [s for s in scope if _raw_seed_count(s)>=3][:RECOVERY_PRIORITY if "RECOVERY_PRIORITY" in globals() else 80]
+
+def _structure_ws_row(sym, interval):
+    item=_structure_ws_latest.get((str(sym),str(interval)))
+    if not item:
+        return None
+    ts,row=item
+    age=max(0.0,time.time()-float(ts))
+    if age>STRUCTURE_WS_STALE_S:
+        _structure_ws_stats["stale"]+=1
+        return None
+    return row
+
+async def structure_kline_ws_loop():
+    while app.session is None or not getattr(q,"universe",None):
+        await asyncio.sleep(.5)
+
+    msg_id=1000
+    while True:
+        try:
+            url=f"{app.WS_BASE}/ws"
+            async with app.session.ws_connect(url,heartbeat=None,receive_timeout=90,max_msg_size=0) as ws:
+                _structure_ws_stats["connects"]+=1
+                subscribed=set()
+                last_sync=0.0
+                print(f"Ψ-STRUCTURE-WS connected url={app.WS_BASE}",flush=True)
+
+                while True:
+                    now=time.time()
+                    if now-last_sync>=STRUCTURE_WS_SYNC_S:
+                        syms=_structure_ws_seeded_symbols()
+                        desired={
+                            f"{str(sym).lower()}@kline_{tf}"
+                            for sym in syms
+                            for tf in ("15m","1h","4h")
+                        }
+                        add=sorted(desired-subscribed)
+                        rem=sorted(subscribed-desired)
+
+                        for chunk_start in range(0,len(add),100):
+                            chunk=add[chunk_start:chunk_start+100]
+                            if chunk:
+                                msg_id+=1
+                                await ws.send_json({"method":"SUBSCRIBE","params":chunk,"id":msg_id})
+                        for chunk_start in range(0,len(rem),100):
+                            chunk=rem[chunk_start:chunk_start+100]
+                            if chunk:
+                                msg_id+=1
+                                await ws.send_json({"method":"UNSUBSCRIBE","params":chunk,"id":msg_id})
+                        subscribed=desired
+                        _structure_ws_stats["subscribed"]=len(subscribed)
+                        last_sync=now
+
+                    try:
+                        msg=await asyncio.wait_for(ws.receive(),timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    if msg.type==aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload=json.loads(msg.data)
+                        except Exception:
+                            continue
+                        data=payload.get("data") if isinstance(payload,dict) and isinstance(payload.get("data"),dict) else payload
+                        if not isinstance(data,dict) or str(data.get("e") or "")!="kline":
+                            continue
+                        k=data.get("k") or {}
+                        sym=str(data.get("s") or "").upper()
+                        interval=str(k.get("i") or "")
+                        if not sym or interval not in {"15m","1h","4h"}:
+                            continue
+                        try:
+                            row=[
+                                int(k.get("t")),str(k.get("o")),str(k.get("h")),str(k.get("l")),
+                                str(k.get("c")),str(k.get("v")),int(k.get("T")),str(k.get("q")),
+                                int(k.get("n") or 0),str(k.get("V")),str(k.get("Q")),"0"
+                            ]
+                        except Exception:
+                            continue
+                        _structure_ws_latest[(sym,interval)]=(time.time(),row)
+                        _structure_ws_stats["events"]+=1
+
+                    elif msg.type in {aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.CLOSE,aiohttp.WSMsgType.ERROR}:
+                        raise RuntimeError(f"structure kline websocket closed type={msg.type}")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _structure_ws_stats["errors"]+=1
+            print(f"Ψ-STRUCTURE-WS ERROR {type(exc).__name__}: {exc}",flush=True)
+            await asyncio.sleep(2.0)
+
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
     global _structure_raw_dirty
     if not _structure_request_ctx.get():
@@ -523,6 +624,20 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
     seed=raw_entry.get("rows") if isinstance(raw_entry,dict) else None
     if isinstance(seed,list) and seed:
         _structure_tf_stats["raw_hit"]+=1
+
+        # Preferred live path: historical seed + Binance kline WebSocket current
+        # candle. This keeps the mandatory structure state current without REST.
+        wsrow=_structure_ws_row(symbol,interval)
+        if len(seed)>=_minimum_structure_rows(interval) and wsrow is not None:
+            merged=_merge_kline_rows(seed,[wsrow],limit)
+            if len(merged)>=_minimum_structure_rows(interval):
+                _structure_tf_cache[key]=(time.time(),merged)
+                _structure_raw_cache[raw_key]={"rows":merged,"saved":time.time()}
+                _structure_raw_dirty=True
+                _structure_tf_stats["ws_refresh"]+=1
+                _structure_ws_stats["refresh_ok"]+=1
+                return merged
+
         reusable=_reuse_current_candle(seed,symbol,interval)
         if reusable is not None:
             _structure_tf_cache[key]=(time.time(),reusable)
@@ -540,6 +655,18 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
 
         raw_entry=_structure_raw_cache.get(raw_key) or {}
         seed=raw_entry.get("rows") if isinstance(raw_entry,dict) else None
+
+        wsrow=_structure_ws_row(symbol,interval)
+        if isinstance(seed,list) and len(seed)>=_minimum_structure_rows(interval) and wsrow is not None:
+            merged=_merge_kline_rows(seed,[wsrow],limit)
+            if len(merged)>=_minimum_structure_rows(interval):
+                _structure_tf_cache[key]=(time.time(),merged)
+                _structure_raw_cache[raw_key]={"rows":merged,"saved":time.time()}
+                _structure_raw_dirty=True
+                _structure_tf_stats["ws_refresh"]+=1
+                _structure_ws_stats["refresh_ok"]+=1
+                return merged
+
         request_limit=_bootstrap_structure_limit(interval,limit)
         incremental=False
 
@@ -1411,7 +1538,7 @@ async def structure_recovery_loop():
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} failover={_rest_stats['failover']} tfCache={_structure_tf_stats['cache_hit']} tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"cacheLoad={recovery_stats['cache_load']} cacheSave={recovery_stats['cache_save']} "
                 f"rawLoad={_structure_tf_stats['raw_load']} rawSave={_structure_tf_stats['raw_save']} "
-                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} "
+                f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} wsRefresh={_structure_tf_stats['ws_refresh']} wsSubs={_structure_ws_stats['subscribed']} "
                 f"structRoutes={sum(1 for k in _rest_good_host if str(k).startswith('structure_klines:'))}",
                 flush=True,
             )
@@ -1655,6 +1782,6 @@ async def watchdog_loop():
 
 async def main():
     print("[v11.0.5.1] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
-    await asyncio.gather(rescue.main(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
+    await asyncio.gather(rescue.main(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
