@@ -324,6 +324,46 @@ def candidate_v5(sym,row,c,d):
     return out
 base.candidate=candidate_v5
 
+def _live_pullback_exhaustion(sym,ca):
+    h=base.price_hist.get(sym)
+    if not h or len(h)<8:
+        return {"state":"NONE","depth":0.0,"rebound":0.0,"score":0.0}
+    now=time.time()
+    pts=[(t,p) for t,p in h if now-t<=180 and p>0]
+    if len(pts)<6:
+        pts=list(h)[-40:]
+    vals=[p for _,p in pts if p>0]
+    if len(vals)<4:
+        return {"state":"NONE","depth":0.0,"rebound":0.0,"score":0.0}
+    cur=vals[-1]; hi=max(vals); lo=min(vals)
+    depth=((hi-cur)/hi*100) if hi>0 else 0.0
+    rebound=((cur-lo)/lo*100) if lo>0 else 0.0
+    buy=f(ca.get("buy1s"),.5); cvd=f(ca.get("cvd1s")); tape=f(ca.get("eventTape"))
+    layers=int(f(ca.get("layers"))); bsi=f(ca.get("bsi")); reasons=set(ca.get("reasons") or [])
+    structure_ok=layers>=3 or bsi>=52
+    pulled=.12<=depth<=5.0
+    buyer_return=(buy>=.58 and cvd>=.10) or ("OFI_POS" in reasons and buy>=.54) or (tape>=65 and buy>=.55)
+    reclaim=rebound>=.05
+    exhausting=pulled and structure_ok and ((buy>=.52 and cvd>=-.05) or "OFI_POS" in reasons)
+    exhausted=pulled and structure_ok and buyer_return and reclaim
+    score=0.0
+    if pulled:
+        score+=min(28.0,8.0+depth*8.0)
+    score+=min(18.0,max(0.0,(buy-.50)*90.0))
+    score+=min(16.0,max(0.0,cvd*16.0))
+    score+=min(15.0,tape*.15)
+    score+=min(12.0,layers*2.0)
+    score+=min(8.0,rebound*18.0)
+    if "OFI_POS" in reasons: score+=5.0
+    state="PULLBACK_EXHAUSTED" if exhausted else "SELL_PRESSURE_EXHAUSTING" if exhausting else "PULLBACK_ONLY" if pulled else "NONE"
+    return {
+        "state":state,
+        "depth":round(depth,3),
+        "rebound":round(rebound,3),
+        "score":round(cl(score,0,100),1),
+        "buy":buy,"cvd":cvd,"tape":tape,
+    }
+
 def scan_v5():
     now=time.time();u=list(getattr(q,"universe",[]) or []);rows=[]
     for sym in u:
@@ -339,12 +379,29 @@ def scan_v5():
         pool.append((a,s,r,c));seen.add(s);rescue.rescue_stats["emergency_promotions"]+=1
     out=[]
     for _,s,row,c in pool:
-        ca=base.candidate(s,row,c,base.deep(s));base.latest[s]=ca
-        visible=(f(ca.get("early"))>=38 or f(ca.get("dna"))>=50 or f(ca.get("peak"))>=120 or ca.get("state") in {"MONSTER-RESCUE","MONSTER-MEMORY"} or f(ca.get("retentionScore"))>=58 or f(ca.get("bsi"))>=62)
+        ca=base.candidate(s,row,c,base.deep(s))
+        ex=_live_pullback_exhaustion(s,ca)
+        ca.update({
+            "monsterPullbackState":ex["state"],
+            "monsterPullbackDepth":ex["depth"],
+            "monsterPullbackRebound":ex["rebound"],
+            "monsterExhaustionScore":ex["score"],
+        })
+        if ex["state"]=="PULLBACK_EXHAUSTED":
+            rs=list(ca.get("reasons") or [])
+            if "PULLBACK_SELL_EXHAUSTED" not in rs: rs.append("PULLBACK_SELL_EXHAUSTED")
+            ca["reasons"]=rs
+        elif ex["state"]=="SELL_PRESSURE_EXHAUSTING":
+            rs=list(ca.get("reasons") or [])
+            if "SELL_PRESSURE_EXHAUSTING" not in rs: rs.append("SELL_PRESSURE_EXHAUSTING")
+            ca["reasons"]=rs
+        base.latest[s]=ca
+        visible=(f(ca.get("early"))>=38 or f(ca.get("dna"))>=50 or f(ca.get("peak"))>=120 or ca.get("state") in {"MONSTER-RESCUE","MONSTER-MEMORY"} or f(ca.get("retentionScore"))>=58 or f(ca.get("bsi"))>=62 or ex["state"] in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING"})
         if visible:out.append(ca);base.open_obs(ca)
     priority={"MONSTER-HOT":6,"MONSTER-IGNITION":5,"MONSTER-MEMORY":4,"MONSTER-RESCUE":3,"MONSTER-SEED":2,"MONSTER-EXTENDED":1,"MONSTER-WATCH":0}
     out.sort(key=lambda x:(priority.get(str(x.get("state")),0),f(x.get("bsi")),f(x.get("retentionScore")),f(x.get("early")),f(x.get("dna")),f(x.get("peak"))),reverse=True)
     base.stats["cycles"]+=1;base.stats["universe"]=len(u);base.stats["deep"]=len(pool);base.stats["cand"]=len(out);rescue.rescue_stats["last_pool"]=len(pool);rescue.rescue_stats["last_emergency"]=len(emergency)
+    base.latest["_all_candidates"]=list(out)
     return out[:BOARD_ROWS]
 base.scan=scan_v5
 
@@ -358,8 +415,14 @@ async def board_loop_v5():
     while True:
         await asyncio.sleep(base.BOARD_S)
         try:
-            base.refresh_adapt();rows=list(base.latest.get("_board") or []);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready=sum(1 for s in list(getattr(q,"universe",[]) or []) if tape.tape_metric(s).get("ready"))
-            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} scan={int(base.SCAN_S*1000)}ms tape={ready}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON",flush=True)
+            base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready=sum(1 for s in list(getattr(q,"universe",[]) or []) if tape.tape_metric(s).get("ready"))
+            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={ready}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON",flush=True)
+            print("Ψ-MONSTER-CANDIDATES ALL count="+str(len(all_rows))+" rows="+",".join(f"{r.get('symbol')}:{r.get('state')}:{int(f(r.get('layers')))}/6" for r in all_rows),flush=True)
+            exrows=[r for r in all_rows if str(r.get("monsterPullbackState")) in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING","PULLBACK_ONLY"}]
+            exrows.sort(key=lambda r:(2 if r.get("monsterPullbackState")=="PULLBACK_EXHAUSTED" else 1 if r.get("monsterPullbackState")=="SELL_PRESSURE_EXHAUSTING" else 0,f(r.get("monsterExhaustionScore")),f(r.get("bsi"))),reverse=True)
+            print(f"Ψ-MONSTER-PULLBACK-EXHAUSTION BOARD candidates={len(exrows)} exhausted={sum(r.get('monsterPullbackState')=='PULLBACK_EXHAUSTED' for r in exrows)} exhausting={sum(r.get('monsterPullbackState')=='SELL_PRESSURE_EXHAUSTING' for r in exrows)}",flush=True)
+            for j,r in enumerate(exrows,1):
+                print(f"PX{j:02d}. {r.get('symbol'):<14} state={r.get('monsterPullbackState'):<24} score={f(r.get('monsterExhaustionScore')):5.1f} depth={f(r.get('monsterPullbackDepth')):5.2f}% rebound={f(r.get('monsterPullbackRebound')):5.2f}% BSI={f(r.get('bsi')):5.1f} layers={int(f(r.get('layers')))}/6 tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} formal={r.get('formal')} pp={r.get('pp')}",flush=True)
             for i,r in enumerate(rows,1):
                 ds="-" if r.get("dist") is None else f"{f(r.get('dist')):+.2f}%";age=f(r.get("peak20Age"),999999);mem="-" if age>rescue.MEMORY_WINDOW_S else f"{100*f(r.get('peakShP20_120')):.1f}%/{age:.0f}s"
                 print(f"MR{i:02d}. {r['symbol']:<14} state={str(r.get('state')):<17} BSI={f(r.get('bsi')):5.1f} {str(r.get('bsiState')):<19} FB={f(r.get('falseBreakRisk')):4.0f} comp={f(r.get('bsiCompression')):4.0f} tests={f(r.get('bsiTests')):4.0f} retest={f(r.get('bsiRetest')):4.0f} trend={f(r.get('bsiTrend')):4.0f} EARLY={f(r.get('early')):5.1f} DNA={f(r.get('dna')):5.1f} retain={f(r.get('retentionScore')):5.1f} rapid={f(r.get('rapid')):6.1f}/{f(r.get('peak')):6.1f} tape={f(r.get('eventTape')):4.0f} buy1={100*f(r.get('buy1s'),.5):4.0f}% cvd1={f(r.get('cvd1s')):+.2f} event={f(r.get('event')):4.0f} vac={f(r.get('vac')):4.0f} pB15={100*f(r.get('pb15')):4.1f}% shP20={100*f(r.get('sp20')):4.1f}% mem20={mem} layers={int(f(r.get('layers')))}/6 dist={ds} formal={r.get('formal')} pp={r.get('pp')} why={(r.get('reasons') or [])[:10]}",flush=True)
