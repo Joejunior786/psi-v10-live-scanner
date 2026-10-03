@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.72-batched-bbo-discovery"
+VERSION="11.0.5.73-split-micro-trade-transport"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -126,6 +126,19 @@ _micro_ws_gate=None
 _micro_ws_pending={}
 _micro_ws_id=0
 _micro_ws_stats={
+    "connects":0,"reconnects":0,"requests":0,"ok":0,"fail":0,"timeouts":0,
+    "unavailable":0,"defer":0,"last_error":"",
+}
+
+# Dedicated trade WS-API transport. BBO/depth remain on _micro_ws_conn so a
+# slow aggregate-trade request cannot block order-book sequence hydration.
+_trade_ws_conn=None
+_trade_ws_ready=None
+_trade_ws_send_lock=None
+_trade_ws_gate=None
+_trade_ws_pending={}
+_trade_ws_id=0
+_trade_ws_stats={
     "connects":0,"reconnects":0,"requests":0,"ok":0,"fail":0,"timeouts":0,
     "unavailable":0,"defer":0,"last_error":"",
 }
@@ -865,6 +878,141 @@ async def micro_ws_api_request(method, params=None, wait_ready=2.0, response_tim
     finally:
         if rid is not None:
             _micro_ws_pending.pop(rid,None)
+        if acquired:
+            gate.release()
+
+
+def _trade_ws_primitives():
+    global _trade_ws_ready,_trade_ws_send_lock,_trade_ws_gate
+    if _trade_ws_ready is None:
+        _trade_ws_ready=asyncio.Event()
+    if _trade_ws_send_lock is None:
+        _trade_ws_send_lock=asyncio.Lock()
+    if _trade_ws_gate is None:
+        _trade_ws_gate=asyncio.Semaphore(4)
+    return _trade_ws_ready,_trade_ws_send_lock,_trade_ws_gate
+
+
+def _trade_ws_fail_pending(reason):
+    for rid,fut in list(_trade_ws_pending.items()):
+        if fut is not None and not fut.done():
+            try:
+                fut.set_exception(RuntimeError(reason))
+            except Exception:
+                pass
+    _trade_ws_pending.clear()
+
+
+async def trade_ws_api_loop():
+    global _trade_ws_conn
+    ready,_,_=_trade_ws_primitives()
+    first=True
+    while getattr(app,"session",None) is None or getattr(app.session,"closed",True):
+        await asyncio.sleep(.25)
+
+    while True:
+        try:
+            async with app.session.ws_connect(
+                WS_API_URL,
+                heartbeat=25,
+                receive_timeout=90,
+                max_msg_size=0,
+            ) as ws:
+                _trade_ws_conn=ws
+                ready.set()
+                _trade_ws_stats["connects"]+=1
+                if not first:
+                    _trade_ws_stats["reconnects"]+=1
+                first=False
+                print(f"Ψ-TRADE-WS-API connected url={WS_API_URL}",flush=True)
+
+                async for msg in ws:
+                    if msg.type==aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload=json.loads(msg.data)
+                        except Exception:
+                            continue
+                        rid=str(payload.get("id") or "")
+                        if not rid:
+                            continue
+                        fut=_trade_ws_pending.pop(rid,None)
+                        if fut is not None and not fut.done():
+                            fut.set_result(payload)
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.ERROR
+                    ):
+                        raise RuntimeError(f"Trade WS API closed type={msg.type}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _trade_ws_stats["fail"]+=1
+            _trade_ws_stats["last_error"]=f"{type(exc).__name__}: {exc}"
+            print(f"Ψ-TRADE-WS-API ERROR {type(exc).__name__}: {exc}",flush=True)
+        finally:
+            ready.clear()
+            _trade_ws_conn=None
+            _trade_ws_fail_pending("Trade WS API connection reset")
+        await asyncio.sleep(1.5)
+
+
+async def trade_ws_api_request(method, params=None, wait_ready=2.0, response_timeout=8.0, gate_timeout=2.0):
+    global _trade_ws_id
+    ready,send_lock,gate=_trade_ws_primitives()
+    try:
+        await asyncio.wait_for(ready.wait(),timeout=wait_ready)
+    except asyncio.TimeoutError:
+        _trade_ws_stats["unavailable"]+=1
+        return None
+
+    acquired=False;rid=None;fut=None
+    try:
+        try:
+            await asyncio.wait_for(gate.acquire(),timeout=gate_timeout)
+            acquired=True
+        except asyncio.TimeoutError:
+            _trade_ws_stats["defer"]+=1
+            return None
+
+        loop=asyncio.get_running_loop()
+        async with send_lock:
+            ws=_trade_ws_conn
+            if ws is None or ws.closed:
+                _trade_ws_stats["unavailable"]+=1
+                return None
+            _trade_ws_id+=1
+            rid=str(_trade_ws_id)
+            fut=loop.create_future()
+            _trade_ws_pending[rid]=fut
+            req={"id":rid,"method":str(method)}
+            if params:
+                req["params"]=dict(params)
+            await ws.send_json(req)
+            _trade_ws_stats["requests"]+=1
+
+        payload=await asyncio.wait_for(fut,timeout=response_timeout)
+        status=int(payload.get("status") or 0) if isinstance(payload,dict) else 0
+        if status==200:
+            _trade_ws_stats["ok"]+=1
+            return payload.get("result")
+
+        _trade_ws_stats["fail"]+=1
+        _trade_ws_stats["last_error"]=f"{method} status={status} payload={str(payload)[:220]}"
+        return None
+    except asyncio.TimeoutError:
+        _trade_ws_stats["timeouts"]+=1
+        _trade_ws_stats["fail"]+=1
+        _trade_ws_stats["last_error"]=f"{method} timeout"
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _trade_ws_stats["fail"]+=1
+        _trade_ws_stats["last_error"]=f"{method} {type(exc).__name__}: {exc}"
+        return None
+    finally:
+        if rid is not None:
+            _trade_ws_pending.pop(rid,None)
         if acquired:
             gate.release()
 
@@ -3916,7 +4064,7 @@ async def ws_api_micro_trade_loop():
     while True:
         try:
             await asyncio.sleep(1.0)
-            ready,_,_=_micro_ws_primitives()
+            ready,_,_=_trade_ws_primitives()
             if not ready.is_set():
                 continue
             core=_micro_fallback_core_symbols()
@@ -3928,7 +4076,7 @@ async def ws_api_micro_trade_loop():
             _ws_market_trade_cursor=(start+take)%len(core)
 
             async def one(sym):
-                rows=await micro_ws_api_request(
+                rows=await trade_ws_api_request(
                     "trades.aggregate",{"symbol":sym,"limit":40},
                     response_timeout=8.0,gate_timeout=2.0,
                 )
@@ -4040,9 +4188,12 @@ async def ws_api_micro_log_loop():
                 f"bookAge={book_age:.1f}s tradeRows={_ws_market_stats['trade_rows']} "
                 f"tradeAge={trade_age:.1f}s depthOK={_ws_market_stats['depth_ok']} "
                 f"depthAge={depth_age:.1f}s microWSreq={_micro_ws_stats['requests']} "
-                f"ok={_micro_ws_stats['ok']} fail={_micro_ws_stats['fail']} "
-                f"timeouts={_micro_ws_stats['timeouts']} "
-                f"lastErr={str(_micro_ws_stats.get('last_error') or '-')[:150]}",
+                f"microOK={_micro_ws_stats['ok']} microFail={_micro_ws_stats['fail']} "
+                f"microTO={_micro_ws_stats['timeouts']} tradeWSreq={_trade_ws_stats['requests']} "
+                f"tradeOK={_trade_ws_stats['ok']} tradeFail={_trade_ws_stats['fail']} "
+                f"tradeTO={_trade_ws_stats['timeouts']} "
+                f"lastMicroErr={str(_micro_ws_stats.get('last_error') or '-')[:80]} "
+                f"lastTradeErr={str(_trade_ws_stats.get('last_error') or '-')[:80]}",
                 flush=True,
             )
         except Exception as exc:
@@ -4290,7 +4441,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.72] Ψ BATCHED BBO DISCOVERY active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
+    print("[v11.0.5.73] Ψ SPLIT MICRO TRADE TRANSPORT active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
