@@ -1688,10 +1688,33 @@ def _monster_risk_priority():
 
     ordered=[];seen=set()
 
-    # Execution pool always gets first claim on risk-map capacity.
-    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
-        sym=str(sym)
-        if sym and sym not in seen:
+    # First claim goes to symbols that the formal/Pinpoint engine is actively
+    # preparing for execution. This prevents cold-start discovery symbols from
+    # consuming every RiskMap slot before real setups receive a plan.
+    live_rows=[]
+    for sym,row in list(q.latest.items()):
+        if not isinstance(row,dict) or not str(sym).endswith("USDT"):
+            continue
+        formal=str(row.get("formal_state") or row.get("state") or "")
+        pstate=str(row.get("pinpoint_state") or "")
+        estatus=str(row.get("pinpoint_entry_status") or "")
+        active=(
+            formal in {"BUY NOW","PRE-IGNITION","EARLY OPPORTUNITY"}
+            or pstate in {"BUY NOW","PINPOINT ARMED","SETUP READY"}
+            or estatus in {"PINPOINT_ARMED","PINPOINT_TRIGGERED"}
+            or bool(row.get("pinpoint_setup"))
+        )
+        if active:
+            live_rows.append((
+                1 if formal=="BUY NOW" else 0,
+                1 if estatus=="PINPOINT_TRIGGERED" else 0,
+                1 if formal=="PRE-IGNITION" else 0,
+                f(row.get("pinpoint_live_tape_score")),
+                f(row.get("score")),
+                str(sym),
+            ))
+    for *_,sym in sorted(live_rows,reverse=True):
+        if sym not in seen:
             ordered.append(sym);seen.add(sym)
 
     # Then serious Monster/structure candidates, strongest first.
@@ -1709,10 +1732,18 @@ def _monster_risk_priority():
         ):
             ordered.append(sym);seen.add(sym)
 
+    # Execution-pool symbols come next. ASCII fallbacks are preferred only as
+    # a scheduler efficiency measure; any non-ASCII symbol that becomes a real
+    # formal/Monster setup is already admitted by the two lanes above.
+    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+        sym=str(sym)
+        if sym and sym not in seen and sym.isascii():
+            ordered.append(sym);seen.add(sym)
+
     # Only fill spare slots from weaker discovery names.
     for r in sorted(rows,key=row_score,reverse=True):
         sym=str(r.get("symbol") or "")
-        if sym and sym not in seen:
+        if sym and sym not in seen and sym.isascii():
             ordered.append(sym);seen.add(sym)
     return ordered
 
