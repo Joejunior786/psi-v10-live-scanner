@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.20-breakout-structural-intelligence"
+VERSION="11.0.5.21-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -25,6 +25,7 @@ REST_BASES = [
 _rest_route_printed = False
 _rest_global_gate = None
 _rest_kline_gate = None
+_rest_structure_gate = None
 _rest_risk_kline_gate = None
 _rest_bg_kline_gate = None
 _rest_depth_gate = None
@@ -36,13 +37,17 @@ _rest_good_host = {}
 _rest_host_bad_until = {}
 _rest_stats = {"ok":0,"fail":0,"attempt_fail":0,"failover":0,"host_ok":{},"host_fail":{},"gate_timeout":0,"risk_ok":0,"risk_fail":0,"risk_defer":0,"bg_ok":0,"bg_fail":0,"bg_defer":0}
 _rest_last_fail = 0.0
+_risk_last_ok = 0.0
+_risk_last_fail = 0.0
 
 def _rest_gates(path):
-    global _rest_global_gate, _rest_kline_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
+    global _rest_global_gate, _rest_kline_gate, _rest_structure_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
         _rest_global_gate = asyncio.Semaphore(14)
     if _rest_kline_gate is None:
         _rest_kline_gate = asyncio.Semaphore(12)
+    if _rest_structure_gate is None:
+        _rest_structure_gate = asyncio.Semaphore(6)
     if _rest_risk_kline_gate is None:
         _rest_risk_kline_gate = asyncio.Semaphore(3)
     if _rest_bg_kline_gate is None:
@@ -179,6 +184,8 @@ async def resilient_api_get(client, path, params=None):
             _rest_host_bad_until.pop((route_key,host),None)
             _rest_stats["ok"]+=1
             if lane=="klines" and is_risk:
+                global _risk_last_ok
+                _risk_last_ok=time.time()
                 _rest_stats["risk_ok"]+=1
             elif lane=="klines" and not is_structure:
                 _rest_stats["bg_ok"]+=1
@@ -188,7 +195,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=8+risk=3+background=1) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=14 klines=12(structure<=6+risk=3+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -218,6 +225,8 @@ async def resilient_api_get(client, path, params=None):
     global _rest_last_fail
     _rest_stats["fail"]+=1
     if lane=="klines" and is_risk:
+        global _risk_last_fail
+        _risk_last_fail=time.time()
         _rest_stats["risk_fail"]+=1
     elif lane=="klines" and not is_structure:
         _rest_stats["bg_fail"]+=1
@@ -364,8 +373,9 @@ async def _structure_fetch_race(client, symbol, interval, limit):
     global_gate,lane_gate=_rest_gates("/api/v3/klines")
 
     async def one(host):
-        g=l=False
+        g=l=s=False
         try:
+            await asyncio.wait_for(_rest_structure_gate.acquire(),timeout=2.5);s=True
             await asyncio.wait_for(global_gate.acquire(),timeout=2.5);g=True
             await asyncio.wait_for(lane_gate.acquire(),timeout=2.5);l=True
             async with client.get(
@@ -383,6 +393,7 @@ async def _structure_fetch_race(client, symbol, interval, limit):
         finally:
             if l: lane_gate.release()
             if g: global_gate.release()
+            if s: _rest_structure_gate.release()
 
     last_exc=None
     for round_idx in range(0,len(ordered),2):
@@ -880,7 +891,11 @@ _recovery_retry_after = {}
 _recovery_inflight = set()
 RECOVERY_FAIL_COOLDOWN_S = 20.0
 COLD_SEED_SLEEP_S = 2.0
+COLD_SEED_BACKOFF_S = 35.0
+COLD_SEED_REST_QUIET_S = 12.0
+COLD_SEED_RISK_QUIET_S = 30.0
 RECOVERY_CYCLE_SLEEP_S = 1.0
+_fast_recovery_active = 0
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
 _structure_cache_dirty = False
@@ -1045,11 +1060,13 @@ def _recovery_symbols():
     return out
 
 async def _hydrate_one(sym, lane="FAST"):
-    global _structure_cache_dirty
+    global _structure_cache_dirty, _fast_recovery_active
     sym=str(sym)
     if sym in _recovery_inflight:
         return None
     _recovery_inflight.add(sym)
+    if lane=="FAST":
+        _fast_recovery_active += 1
     try:
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
@@ -1087,6 +1104,8 @@ async def _hydrate_one(sym, lane="FAST"):
             print(f"Ψ-RECOVERY {lane}_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
         return False
     finally:
+        if lane=="FAST":
+            _fast_recovery_active=max(0,_fast_recovery_active-1)
         _recovery_inflight.discard(sym)
 
 async def structure_recovery_loop():
@@ -1177,6 +1196,26 @@ async def cold_seed_loop():
         await asyncio.sleep(COLD_SEED_SLEEP_S)
         try:
             now=time.time()
+
+            # Cold seeding is strictly opportunistic. It yields whenever FAST
+            # structure work is active or recent REST/risk failures show that
+            # Binance HTTP capacity is degraded.
+            if _fast_recovery_active>0:
+                continue
+            rest_recent = _rest_last_fail>0 and (now-_rest_last_fail)<COLD_SEED_REST_QUIET_S
+            risk_recent = _risk_last_fail>0 and (now-_risk_last_fail)<COLD_SEED_RISK_QUIET_S
+            risk_unrecovered = risk_recent and (_risk_last_ok<=_risk_last_fail)
+            if rest_recent or risk_unrecovered:
+                print(
+                    f"Ψ-RECOVERY SEED_BACKOFF restRecent={int(rest_recent)} "
+                    f"riskUnrecovered={int(risk_unrecovered)} restFail={_rest_stats['fail']} "
+                    f"riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} "
+                    f"sleep={int(COLD_SEED_BACKOFF_S)}s",
+                    flush=True,
+                )
+                await asyncio.sleep(COLD_SEED_BACKOFF_S)
+                continue
+
             scope=_recovery_scope()
             candidates=[
                 s for s in scope
