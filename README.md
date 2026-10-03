@@ -1,15 +1,15 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.33 — Integrity Sync + Risk Recovery**
+Current integrated production build: **Ψ-V11.0.5.34 — Non-Blocking RiskMap + Integrity Sync**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.33`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.34`
 - Pinpoint remains the sole BUY NOW authority.
-- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.33 build.
+- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.34 build.
 
 ## Live integrity rules
 
@@ -29,7 +29,7 @@ A BUY NOW candidate must still satisfy the full Pinpoint execution gate.
 
 A valid live Pinpoint trigger/stop/risk plan is accepted as the primary execution-risk plan. The separate RiskMap is retained as an additional structural/fallback plan source and no longer makes BUY mathematically impossible when its cache is temporarily unavailable.
 
-RiskMap refresh has also been accelerated and bounded so failed candle routes cannot occupy a build for 75 seconds.
+RiskMap refresh is non-blocking: while Binance WS-API is healthy it uses two short WS attempts and fails fast; the tightly bounded two-host REST fallback is used only when WS-API is actually unavailable.
 
 ## Scanner lanes
 
