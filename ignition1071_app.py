@@ -369,7 +369,6 @@ async def mini_rest_loop():
 
 
 async def mini_loop():
-async def mini_loop():
     global radar_mini_connected,mini_source
     host_cursor=0
     while True:
