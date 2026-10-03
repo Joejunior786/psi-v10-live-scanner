@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.39-riskmap-diagnostics-cleanup-final"
+VERSION="11.0.5.40-execution-micro-failover-final"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -2638,7 +2638,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.39] Ψ RELIABLE RISKMAP + CLEAN DIAGNOSTICS active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap uses one realistically timed WS-API request first with a short queue deadline, a hard two-host Binance REST fallback, one-symbol scheduling, a bounded per-symbol candle budget, no outer wait_for cancellation, drained child-task exceptions, and explicit live-plan diagnostics.",flush=True)
+    print("[v11.0.5.40] Ψ EXECUTION MICRO FAILOVER + RELIABLE RISKMAP active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. The qualified execution micro feed now uses the same multi-host Binance websocket failover pattern as Monster, with heartbeat/connect deadlines and clean trade/book sequence resets on shard reconnect. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())

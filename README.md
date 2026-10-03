@@ -1,15 +1,15 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.39 — Reliable RiskMap + Clean Diagnostics**
+Current integrated production build: **Ψ-V11.0.5.40 — Execution Micro Failover + Reliable RiskMap**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.39`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.40`
 - Pinpoint remains the sole BUY NOW authority.
-- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.39 build.
+- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.40 build.
 
 ## Live integrity rules
 
@@ -60,3 +60,8 @@ RiskMap refresh is hard-bounded and WS-first: one realistically timed Binance WS
 The included `Dockerfile` and `railway.toml` deploy the current V11 entrypoint.
 
 No Binance API key is required for the public market-data feeds used by this service.
+
+
+## V11.0.5.40 execution-micro transport repair
+
+The four qualified execution-micro shards now rotate across Binance websocket hosts instead of being pinned to a single endpoint. Each shard uses explicit connect/heartbeat/receive deadlines and reports its active host plus last-message age. Trade and book sequence validators are reset cleanly on a shard reconnect so a replayed first frame cannot permanently poison sequence validity. This changes transport reliability only; PRE/BUY thresholds and Pinpoint authority are unchanged.

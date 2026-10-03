@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.0-top10-board-sharded-micro"
+VERSION = "10.16.1-execution-micro-host-failover"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -27,6 +27,10 @@ BUY_LANE_SLOTS = 4
 MICRO_SHARDS = 4
 MICRO_SHARD_SIZE = 20
 SHARD_POLL_SECONDS = 0.5
+EXEC_WS_HEARTBEAT = 20.0
+EXEC_WS_RECEIVE_TIMEOUT = 90.0
+EXEC_WS_CONNECT_TIMEOUT = 20.0
+EXEC_WS_RECONNECT_MAX_DELAY = 8.0
 
 EXCLUDED_BASES = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI", "USD1", "RLUSD", "EURI",
@@ -46,6 +50,9 @@ shard_connected = [False for _ in range(MICRO_SHARDS)]
 shard_reconnects = [0 for _ in range(MICRO_SHARDS)]
 shard_last_change = [0.0 for _ in range(MICRO_SHARDS)]
 shard_current_symbols = [[] for _ in range(MICRO_SHARDS)]
+shard_host_cursor = [i for i in range(MICRO_SHARDS)]
+shard_last_host = ["" for _ in range(MICRO_SHARDS)]
+shard_last_msg_ms = [0 for _ in range(MICRO_SHARDS)]
 
 board_stats = {
     "prints": 0,
@@ -456,6 +463,7 @@ def _sync_ws_status():
 
 
 async def _shard_loop(shard_id):
+    reconnects = 0
     while True:
         generation = shard_generation[shard_id]
         symbols = list(shard_current_symbols[shard_id])
@@ -470,17 +478,36 @@ async def _shard_loop(shard_id):
             for symbol in symbols:
                 lower = symbol.lower()
                 streams.extend([f"{lower}@aggTrade", f"{lower}@depth20@100ms"])
-            url = f"{app.WS_BASE}/stream?streams={'/'.join(streams)}"
+
+            bases = []
+            for raw in (
+                str(getattr(app, "WS_BASE", "") or "").rstrip("/"),
+                "wss://data-stream.binance.vision",
+                "wss://stream.binance.com:9443",
+                "wss://stream.binance.com:443",
+            ):
+                if raw and raw not in bases:
+                    bases.append(raw)
+            base_url = bases[shard_host_cursor[shard_id] % len(bases)]
+            url = f"{base_url}/stream?streams={'/'.join(streams)}"
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16 SHARD{shard_id+1} connecting symbols={len(symbols)} gen={generation} book=DEPTH20_WS",
+                f"Ψ-V10.16.1 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"gen={generation} host={base_url} book=DEPTH20_WS",
                 flush=True,
             )
             async with app.session.ws_connect(
-                url, heartbeat=None, receive_timeout=90, max_msg_size=0
+                url,
+                heartbeat=EXEC_WS_HEARTBEAT,
+                receive_timeout=EXEC_WS_RECEIVE_TIMEOUT,
+                max_msg_size=0,
+                timeout=EXEC_WS_CONNECT_TIMEOUT,
             ) as ws:
                 shard_connected[shard_id] = True
+                shard_last_host[shard_id] = base_url
+                shard_last_msg_ms[shard_id] = int(time.time() * 1000)
+                reconnects = 0
                 _sync_ws_status()
 
                 for symbol in symbols:
@@ -491,9 +518,16 @@ async def _shard_loop(shard_id):
                     st["book_sequence_samples"] = 0
                     st["book_resyncing"] = False
                     st["last_book_update_id"] = None
+                    # A websocket reconnect establishes a new observation
+                    # sequence. Reset trade sequencing so one replayed/duplicate
+                    # first frame cannot poison TRADE_SEQUENCE_VALID forever.
+                    st["last_agg_id"] = None
+                    st["trade_sequence_ok"] = True
+                    st["trade_sequence_samples"] = 0
 
                 print(
-                    f"Ψ-V10.16 SHARD{shard_id+1} connected symbols={len(symbols)} book=REST_FREE_DEPTH20",
+                    f"Ψ-V10.16.1 SHARD{shard_id+1} connected symbols={len(symbols)} "
+                    f"host={base_url} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
 
@@ -507,6 +541,7 @@ async def _shard_loop(shard_id):
                         break
 
                     if message.type == aiohttp.WSMsgType.TEXT:
+                        shard_last_msg_ms[shard_id] = int(time.time() * 1000)
                         try:
                             payload = json.loads(message.data)
                         except json.JSONDecodeError:
@@ -528,13 +563,20 @@ async def _shard_loop(shard_id):
             raise
         except Exception as exc:
             shard_reconnects[shard_id] += 1
-            app.last_error = f"SHARD_WS_{shard_id+1}: {type(exc).__name__}: {exc}"
+            reconnects += 1
+            host = shard_last_host[shard_id] or (
+                bases[shard_host_cursor[shard_id] % len(bases)] if "bases" in locals() and bases else "-"
+            )
+            app.last_error = (
+                f"SHARD_WS_{shard_id+1}: {type(exc).__name__}: {exc} host={host}"
+            )
             print(app.last_error, flush=True)
+            shard_host_cursor[shard_id] += 1
         finally:
             shard_connected[shard_id] = False
             _sync_ws_status()
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(min(EXEC_WS_RECONNECT_MAX_DELAY, 1.0 + min(reconnects, 7)))
 
 
 async def sharded_websocket_loop():
@@ -610,10 +652,16 @@ async def _v1016_board_loop():
                     flush=True,
                 )
 
+            now_ms = int(time.time() * 1000)
+            ages = [
+                (now_ms - ts) if ts > 0 else 999999999
+                for ts in shard_last_msg_ms
+            ]
             print(
-                f"Ψ-V10.16 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.1 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
-                f"reconnects={shard_reconnects} generations={shard_generation}",
+                f"reconnects={shard_reconnects} generations={shard_generation} "
+                f"hosts={shard_last_host} msgAgeMs={ages}",
                 flush=True,
             )
         except Exception as exc:
