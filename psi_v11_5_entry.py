@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.52-watchdog-stale-structure-rescue"
+VERSION="11.0.5.53-dark-horse-display-lane"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -24,6 +24,14 @@ DISCOVERY_WATCH_COOLDOWN_CYCLES = int(os.environ.get("PSI_DISCOVERY_WATCH_COOLDO
 DISCOVERY_WATCH_PENALTY = float(os.environ.get("PSI_DISCOVERY_WATCH_PENALTY", "2.5"))
 RECOVERY_ROTATION_SLOTS = int(os.environ.get("PSI_RECOVERY_ROTATION_SLOTS", "40"))
 RECOVERY_ROTATION_PERIOD_S = float(os.environ.get("PSI_RECOVERY_ROTATION_PERIOD_S", "20"))
+
+# Diagnostic-only early-momentum lane. This NEVER feeds formal state, the
+# Monster deep pool, Pinpoint, RiskMap, BUY/PRE authority, or execution gates.
+# It exists only to surface very-early 0-2/6 names before full confluence.
+DARK_HORSE_SLOTS = int(os.environ.get("PSI_DARK_HORSE_SLOTS", "5"))
+DARK_HORSE_MAX_LAYERS = int(os.environ.get("PSI_DARK_HORSE_MAX_LAYERS", "2"))
+DARK_HORSE_MAX_TRADE_AGE_MS = float(os.environ.get("PSI_DARK_HORSE_MAX_TRADE_AGE_MS", "15000"))
+DARK_HORSE_MIN_SCORE = float(os.environ.get("PSI_DARK_HORSE_MIN_SCORE", "18"))
 
 # Hard live-integrity thresholds. Elevated states are fail-closed if any
 # mandatory feed is outside these bounds.
@@ -1799,6 +1807,123 @@ def _monster_tape_health():
             book_fresh+=1
     return strict,trade_fresh,book_fresh
 
+def _dark_horse_board():
+    """Read-only full-universe early-momentum ranking.
+
+    This lane is intentionally isolated from every execution/state machine.
+    It consumes already-existing market telemetry and returns diagnostics only.
+    """
+    picks=[]
+    now=time.time()
+    for sym in list(getattr(q,"universe",[]) or []):
+        try:
+            row=q.latest.get(sym) or {}
+            price=base.px(sym,row)
+            if price<=0:
+                continue
+
+            # Fast prefilter: do not run the heavier tape metric when this
+            # symbol has not had any recent aggregate trades.
+            dq=getattr(tape,"trade_events",{}).get(sym)
+            if not dq:
+                continue
+            trade_age_ms=(now-f(dq[-1][0],0))*1000.0
+            if trade_age_ms>DARK_HORSE_MAX_TRADE_AGE_MS:
+                continue
+
+            layers=int(base.layers(row))
+            formal=str(row.get("formal_state") or row.get("state") or "")
+            if layers>DARK_HORSE_MAX_LAYERS or formal in {"BUY NOW","PRE-IGNITION"}:
+                continue
+
+            tm=tape.tape_metric(sym) or {}
+            age=f(tm.get("age_ms"),999999)
+            book_age=f(tm.get("book_age_ms"),999999)
+            if age>DARK_HORSE_MAX_TRADE_AGE_MS:
+                continue
+
+            buy=f(tm.get("buy_ratio_1s"),.5)
+            cvd=f(tm.get("cvd_1s"))
+            nacc=f(tm.get("notional_accel_1s"))
+            cacc=f(tm.get("trade_count_accel_1s"))
+            avg=f(tm.get("avg_trade_shift_1s"))
+            pv5=f(tm.get("price_velocity_5s_pct"))
+            imb=f(tm.get("bbo_imbalance"))
+            spread=f(tm.get("spread_bps"),999)
+            r60=base.ret(sym,60)
+
+            rr=row.get("rapid_ignition") or {}
+            rapid=f(rr.get("score"),f(row.get("rapid_score")))
+
+            # Admission is deliberately broad enough to catch a QI/SUPER/SAND
+            # style early burst, but this lane has zero execution authority.
+            anomaly=(
+                rapid>=85
+                or nacc>=1.50
+                or cacc>=1.50
+                or avg>=1.45
+                or pv5>=0.10
+                or (buy>=.58 and cvd>=.08)
+                or imb>=.15
+                or r60>=.25
+            )
+            if not anomaly:
+                continue
+
+            score=100*(
+                .18*cl(rapid/150.0)
+                +.16*cl((nacc-.8)/2.2)
+                +.13*cl((cacc-.8)/2.2)
+                +.08*cl((avg-.8)/2.0)
+                +.13*cl((buy-.50)/.20)
+                +.12*cl((cvd+.02)/.42)
+                +.08*cl((imb+.05)/.55)
+                +.06*cl((pv5+.01)/.30)
+                +.04*cl((r60+.03)/.60)
+                +.02*cl((3.0-spread)/3.0)
+            )
+            # Early-momentum means early: demote already-extended one-minute
+            # moves rather than chasing them into this diagnostic bucket.
+            if r60>4.0:
+                score-=min(20.0,(r60-4.0)*4.0)
+            score=cl(score,0,100)
+            if score<DARK_HORSE_MIN_SCORE:
+                continue
+
+            picks.append({
+                "symbol":sym,
+                "score":score,
+                "layers":layers,
+                "formal":formal or "NONE",
+                "live":bool(age<=5000 and book_age<=5000),
+                "age_ms":age,
+                "book_age_ms":book_age,
+                "rapid":rapid,
+                "buy1":buy,
+                "cvd1":cvd,
+                "notionalA":nacc,
+                "countA":cacc,
+                "avgShift":avg,
+                "pv5":pv5,
+                "imb":imb,
+                "spread":spread,
+                "r60":r60,
+            })
+        except Exception:
+            continue
+
+    picks.sort(
+        key=lambda r:(
+            f(r.get("score")),
+            1 if r.get("live") else 0,
+            f(r.get("rapid")),
+            f(r.get("pv5")),
+        ),
+        reverse=True,
+    )
+    return picks[:max(0,DARK_HORSE_SLOTS)]
+
+
 async def board_loop_v5():
     while True:
         await asyncio.sleep(base.BOARD_S)
@@ -1806,6 +1931,20 @@ async def board_loop_v5():
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready,trade_fresh,book_fresh=_monster_tape_health()
             integrity_live=sum(bool(r.get("integrityVerified")) for r in all_rows)
             print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
+            dark_horses=_dark_horse_board()
+            print(f"Ψ-EARLY-MOMENTUM-DARK-HORSES BOARD count={len(dark_horses)} slots={DARK_HORSE_SLOTS} maxLayers={DARK_HORSE_MAX_LAYERS}/6 source=FULL_UNIVERSE mode=DIAGNOSTIC_ONLY executionAuthority=NONE",flush=True)
+            for j,r in enumerate(dark_horses,1):
+                print(
+                    f"DH{j:02d}. {r.get('symbol'):<14} score={f(r.get('score')):5.1f} "
+                    f"layers={int(f(r.get('layers')))}/6 live={'LIVE' if r.get('live') else 'WARM'} "
+                    f"age={f(r.get('age_ms'),999999):6.0f}ms bookAge={f(r.get('book_age_ms'),999999):6.0f}ms "
+                    f"rapid={f(r.get('rapid')):6.1f} buy1={100*f(r.get('buy1'),.5):4.0f}% "
+                    f"cvd1={f(r.get('cvd1')):+.2f} nA={f(r.get('notionalA')):.2f}x "
+                    f"cA={f(r.get('countA')):.2f}x avg={f(r.get('avgShift')):.2f}x "
+                    f"pv5={f(r.get('pv5')):+.3f}% imb={f(r.get('imb')):+.2f} "
+                    f"spr={f(r.get('spread'),999):.2f}bp r60={f(r.get('r60')):+.2f}% formal={r.get('formal')}",
+                    flush=True,
+                )
             move_rows=[]
             move_syms=set()
             for r in all_rows:
