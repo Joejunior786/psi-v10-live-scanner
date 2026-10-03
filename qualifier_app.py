@@ -257,7 +257,8 @@ async def _discovery_rest_snapshot():
         try:
             async with app.session.get(
                 f"{host}/api/v3/ticker/24hr",
-                timeout=aiohttp.ClientTimeout(total=6,connect=2),
+                params={"type":"MINI"},
+                timeout=aiohttp.ClientTimeout(total=10,connect=2),
             ) as resp:
                 body=await resp.text()
                 if resp.status!=200:
