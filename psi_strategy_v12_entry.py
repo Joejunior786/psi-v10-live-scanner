@@ -1334,14 +1334,17 @@ async def _v12_close_ws_quick(shard):
         pass
 
 
-async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.0):
+async def v12_ws_klines(
+    symbol, interval, limit, shard=None, response_timeout=5.0,
+    ready_timeout=0.75, gate_timeout=0.85, send_timeout=0.75
+):
     if shard is None:
         shard = (sum(ord(ch) for ch in str(symbol)) + sum(ord(ch) for ch in str(interval))) % V12_WS_SHARDS
     shard = int(shard) % V12_WS_SHARDS
 
     ready, lock, gate = _v12_ws_primitives(shard)
     try:
-        await asyncio.wait_for(ready.wait(), timeout=2.0)
+        await asyncio.wait_for(ready.wait(), timeout=ready_timeout)
     except asyncio.TimeoutError:
         _stats["ws_unavailable"] += 1
         return None
@@ -1349,7 +1352,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.
     acquired = False
     rid = None
     try:
-        await asyncio.wait_for(gate.acquire(), timeout=2.0)
+        await asyncio.wait_for(gate.acquire(), timeout=gate_timeout)
         acquired = True
         loop = asyncio.get_running_loop()
 
@@ -1371,7 +1374,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.
                         "limit": int(limit),
                     },
                 }),
-                timeout=1.5,
+                timeout=send_timeout,
             )
             _stats["ws_requests"] += 1
 
@@ -1433,13 +1436,22 @@ async def _fetch_tf(sym, tf, deep=False):
     # 12/12 successful FAST packets with zero misses.
     if not isinstance(rows, list) or len(rows) < need:
         try:
-            rows = await v12_ws_klines(
-                sym,
-                tf,
-                limit,
-                shard=0,
-                response_timeout=5.0 if deep else 3.2,
+            rows = await asyncio.wait_for(
+                v12_ws_klines(
+                    sym,
+                    tf,
+                    limit,
+                    shard=0,
+                    response_timeout=4.8 if deep else 2.8,
+                    ready_timeout=0.55,
+                    gate_timeout=0.70,
+                    send_timeout=0.60,
+                ),
+                timeout=6.5 if deep else 4.4,
             )
+        except asyncio.TimeoutError:
+            _stats["dedicated_stage_timeout"] += 1
+            rows = None
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1557,8 +1569,12 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
             if not item.get("snap") or stale or needs_deep:
                 needed.append(tf)
 
-    # Complete one symbol deterministically. With the dedicated WS this avoids
-    # scattering successful packets across many 1/3 and 2/3 partial symbols.
+    # Complete one symbol deterministically, but during FAST hydration fetch
+    # Daily first. V11 already supplies/reuses much of 1H/4H; Daily was the
+    # observed blocker keeping otherwise-partial symbols from reaching 3/3.
+    if not force_deep and not active:
+        priority = {"1d": 0, "1h": 1, "4h": 2}
+        needed.sort(key=lambda tf: priority.get(tf, 9))
     for tf in needed:
         await one(tf, deep=(force_deep or active))
 
@@ -1936,9 +1952,19 @@ async def strategy_loop():
                 for s in universe
             )
 
+            partial_1 = 0
+            partial_2 = 0
+            for s in universe:
+                cc = _cache.get(s) or {}
+                ncore = sum(bool((cc.get(tf) or {}).get("snap")) for tf in ("1h", "4h", "1d"))
+                if ncore == 1:
+                    partial_1 += 1
+                elif ncore == 2:
+                    partial_2 += 1
+
             print(
                 f"Ψ-V12 REFRESH cycle={_cycle + 1} phase={phase} "
-                f"mtfReady={ready_now}/{len(universe)} deepMAReady={deep_ready}/{len(universe)} "
+                f"mtfReady={ready_now}/{len(universe)} partial1={partial_1} partial2={partial_2} deepMAReady={deep_ready}/{len(universe)} "
                 f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
