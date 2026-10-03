@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.53-dark-horse-display-lane"
+VERSION="11.0.5.54-dark-horse-quality-top5"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -1807,16 +1807,19 @@ def _monster_tape_health():
             book_fresh+=1
     return strict,trade_fresh,book_fresh
 
-def _dark_horse_board():
+def _dark_horse_board(exclude_symbols=None):
     """Read-only full-universe early-momentum ranking.
 
     This lane is intentionally isolated from every execution/state machine.
     It consumes already-existing market telemetry and returns diagnostics only.
     """
     picks=[]
+    exclude_symbols=set(exclude_symbols or [])
     now=time.time()
     for sym in list(getattr(q,"universe",[]) or []):
         try:
+            if sym in exclude_symbols:
+                continue
             row=q.latest.get(sym) or {}
             price=base.px(sym,row)
             if price<=0:
@@ -1857,17 +1860,25 @@ def _dark_horse_board():
 
             # Admission is deliberately broad enough to catch a QI/SUPER/SAND
             # style early burst, but this lane has zero execution authority.
-            anomaly=(
+            strong_anomaly=(
                 rapid>=85
-                or nacc>=1.50
-                or cacc>=1.50
-                or avg>=1.45
                 or pv5>=0.10
-                or (buy>=.58 and cvd>=.08)
-                or imb>=.15
                 or r60>=.25
+                or (buy>=.58 and cvd>=.08)
+                or (imb>=.15 and (nacc>=1.20 or cacc>=1.20))
+                or (avg>=1.45 and buy>=.55)
             )
-            if not anomaly:
+            # If fewer than five strong names exist, keep a positive-side
+            # fallback pool so the diagnostic board can still return five
+            # clearly-labelled WATCH names without relaxing any trade gate.
+            positive_fallback=(
+                buy>=.52
+                or cvd>=0.02
+                or imb>=.08
+                or pv5>=0.02
+                or r60>=0.08
+            )
+            if not (strong_anomaly or positive_fallback):
                 continue
 
             score=100*(
@@ -1887,10 +1898,13 @@ def _dark_horse_board():
             if r60>4.0:
                 score-=min(20.0,(r60-4.0)*4.0)
             score=cl(score,0,100)
-            if score<DARK_HORSE_MIN_SCORE:
+            if strong_anomaly and score<DARK_HORSE_MIN_SCORE:
+                strong_anomaly=False
+            if (not strong_anomaly) and score<8.0:
                 continue
 
             picks.append({
+                "tier":"STRONG" if strong_anomaly else "WATCH",
                 "symbol":sym,
                 "score":score,
                 "layers":layers,
@@ -1914,6 +1928,7 @@ def _dark_horse_board():
 
     picks.sort(
         key=lambda r:(
+            1 if r.get("tier")=="STRONG" else 0,
             f(r.get("score")),
             1 if r.get("live") else 0,
             f(r.get("rapid")),
@@ -1931,11 +1946,20 @@ async def board_loop_v5():
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready,trade_fresh,book_fresh=_monster_tape_health()
             integrity_live=sum(bool(r.get("integrityVerified")) for r in all_rows)
             print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
-            dark_horses=_dark_horse_board()
+            dark_exclude={
+                str(r.get("symbol") or "")
+                for r in all_rows
+                if (
+                    int(f(r.get("layers")))>=3
+                    or str(r.get("formal") or "") in {"PRE-IGNITION","EARLY OPPORTUNITY"}
+                    or str(r.get("state") or "") in {"MONSTER-HOT","MONSTER-IGNITION","MONSTER-RESCUE","MONSTER-MEMORY","MONSTER-SEED"}
+                )
+            }
+            dark_horses=_dark_horse_board(dark_exclude)
             print(f"Ψ-EARLY-MOMENTUM-DARK-HORSES BOARD count={len(dark_horses)} slots={DARK_HORSE_SLOTS} maxLayers={DARK_HORSE_MAX_LAYERS}/6 source=FULL_UNIVERSE mode=DIAGNOSTIC_ONLY executionAuthority=NONE",flush=True)
             for j,r in enumerate(dark_horses,1):
                 print(
-                    f"DH{j:02d}. {r.get('symbol'):<14} score={f(r.get('score')):5.1f} "
+                    f"DH{j:02d}. {r.get('symbol'):<14} tier={str(r.get('tier')):<6} score={f(r.get('score')):5.1f} "
                     f"layers={int(f(r.get('layers')))}/6 live={'LIVE' if r.get('live') else 'WARM'} "
                     f"age={f(r.get('age_ms'),999999):6.0f}ms bookAge={f(r.get('book_age_ms'),999999):6.0f}ms "
                     f"rapid={f(r.get('rapid')):6.1f} buy1={100*f(r.get('buy1'),.5):4.0f}% "
