@@ -36,7 +36,7 @@ app.USER_AGENT="psi-v10-live-scanner/10.4-rolling-hunter"
 
 universe=[]; universe_set=set(); universe_ts=0.0; cursor=0; coverage_round=0
 structure_seen=set(); structure_ms={}; structure_cycles=0; anomaly_cycles=0; pool_cycles=0; qualifier_cycles=0
-disc=defaultdict(lambda:deque(maxlen=DISCOVERY_SAMPLES)); disc_sample_ts={}; disc_ws=False; disc_event_ms=0
+disc=defaultdict(lambda:deque(maxlen=DISCOVERY_SAMPLES)); disc_sample_ts={}; disc_ws=False; disc_event_ms=0; disc_source="NONE"; disc_ws_failures=0; disc_rest_ok=0; disc_rest_fail=0
 entered={}; locked_until={}; streak=defaultdict(int); last_raw={}; stable={}; latest={}; near=[]
 orig_api_get=app.api_get; rest_lock=asyncio.Lock(); next_rest=0.0; backoff_until=0.0; count418=0; count429=0; rest_requests=0
 
@@ -206,7 +206,7 @@ def coverage():
     total=len(universe); cutoff=ms()-STRUCTURE_MAX_AGE*1000; recent=sum(structure_ms.get(s,0)>=cutoff for s in universe); fresh=0
     for s in app.selected_micro_symbols:
         x=app.micro_state.get(s,{}); fresh+=ms()-int(x.get("last_trade_ms",0) or 0)<=15000 and ms()-int(x.get("last_book_ms",0) or 0)<=5000
-    return {"full_universe":total,"discovery_ready":sum(len(disc.get(s,()))>=4 for s in universe),"structure_seen_ever":len(structure_seen),"structure_recent":recent,"structure_recent_pct":round(recent/total*100,2) if total else 0,"coverage_round":coverage_round,"structure_cursor":cursor,"micro_total":len(app.selected_micro_symbols),"micro_verified_fresh":fresh,"locked_slots":len(locks()),"hunter_slots":max(0,len(app.selected_micro_symbols)-len(locks())),"stable_qualifiers":len(stable),"cycles":{"structure":structure_cycles,"anomaly":anomaly_cycles,"pool":pool_cycles,"qualifier":qualifier_cycles}}
+    return {"full_universe":total,"discovery_ready":sum(len(disc.get(s,()))>=4 for s in universe),"discovery_source":disc_source,"discovery_ws_failures":disc_ws_failures,"discovery_rest_ok":disc_rest_ok,"discovery_rest_fail":disc_rest_fail,"structure_seen_ever":len(structure_seen),"structure_recent":recent,"structure_recent_pct":round(recent/total*100,2) if total else 0,"coverage_round":coverage_round,"structure_cursor":cursor,"micro_total":len(app.selected_micro_symbols),"micro_verified_fresh":fresh,"locked_slots":len(locks()),"hunter_slots":max(0,len(app.selected_micro_symbols)-len(locks())),"stable_qualifiers":len(stable),"cycles":{"structure":structure_cycles,"anomaly":anomaly_cycles,"pool":pool_cycles,"qualifier":qualifier_cycles}}
 
 def near_diag(): return [{"symbol":r.get("symbol"),"state":r.get("state"),"score":r.get("score"),"active_setup":r.get("active_setup"),"failed_hard":r.get("failed_hard",[]),"failed_setup":r.get("failed_setup",[]),"micro_ready":r.get("micro_ready")} for r in near]
 
@@ -219,31 +219,98 @@ async def scan(req):
     app.resolve_outcomes(); rows=results(limit)
     return app.web.json_response({"ok":True,"scanner":"Ψ-V10.4 Rolling Qualifier Hunter","version":VERSION,"policy":QUALIFIER_POLICY,"buy_policy":"ALL_HARD_SAFETY_GATES_PLUS_ALL_GATES_OF_ONE_VERIFIED_SETUP","qualifier_target":QUALIFIER_TARGET,"returned":len(rows),"state_counts":dict(Counter(r["state"] for r in rows)),"coverage":coverage(),"results":rows,"near_miss_diagnostics":near_diag(),"generated_ms":ms()})
 
-async def discovery_loop():
-    global disc_ws,disc_event_ms
-    url=f"{app.WS_BASE}/ws/!ticker@arr"
+def _ingest_discovery_payload(payload, source):
+    global disc_event_ms,disc_source
+    if not isinstance(payload,list):
+        return 0
+    now=ts(); accepted=0
+    for x in payload:
+        if not isinstance(x,dict):
+            continue
+        s=x.get("s","")
+        if s not in universe_set or now-disc_sample_ts.get(s,0)<SAMPLE_SECONDS:
+            continue
+        p=app.safe_float(x.get("c") if x.get("c") is not None else x.get("lastPrice"))
+        if p<=0:
+            continue
+        qv=app.safe_float(x.get("q") if x.get("q") is not None else x.get("quoteVolume"))
+        cnt=app.safe_float(x.get("n") if x.get("n") is not None else x.get("count"))
+        bid=app.safe_float(x.get("b") if x.get("b") is not None else x.get("bidPrice"))
+        ask=app.safe_float(x.get("a") if x.get("a") is not None else x.get("askPrice"))
+        disc[s].append((now,p,qv,cnt,bid,ask)); disc_sample_ts[s]=now; accepted+=1
+    if accepted:
+        disc_event_ms=int(now*1000); disc_source=source
+    return accepted
+
+async def _discovery_rest_snapshot():
+    global disc_rest_ok,disc_rest_fail,disc_source
+    if app.session is None:
+        return 0
+    try:
+        payload=await app.api_get(app.session,"/api/v3/ticker/24hr")
+        accepted=_ingest_discovery_payload(payload,"REST_24HR")
+        disc_rest_ok+=1
+        if accepted:
+            print(f"Ψ-DISCOVERY FALLBACK source=REST_24HR accepted={accepted}/{len(universe)}",flush=True)
+        return accepted
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        disc_rest_fail+=1
+        print(f"Ψ-DISCOVERY FALLBACK_ERROR {type(e).__name__}: {e}",flush=True)
+        return 0
+
+async def discovery_rest_loop():
     while True:
         try:
-            async with app.session.ws_connect(url,heartbeat=30,receive_timeout=90,max_msg_size=0) as ws:
-                disc_ws=True; print("Ψ-V10.4 discovery WS connected (!ticker@arr)",flush=True)
+            await asyncio.sleep(5)
+            stale=(not disc_ws) or (ms()-disc_event_ms>8000)
+            if stale:
+                await _discovery_rest_snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"DISCOVERY_REST_LOOP: {type(e).__name__}: {e}",flush=True)
+
+async def discovery_loop():
+    global disc_ws,disc_event_ms,disc_source,disc_ws_failures
+    host_cursor=0
+    while True:
+        bases=[]
+        for raw in (
+            str(getattr(app,"WS_BASE","") or "").rstrip("/"),
+            "wss://data-stream.binance.vision",
+            "wss://stream.binance.com:443",
+            "wss://stream.binance.com:9443",
+        ):
+            if raw and raw not in bases:
+                bases.append(raw)
+        base_url=bases[host_cursor%len(bases)] if bases else "wss://data-stream.binance.vision"
+        url=f"{base_url}/ws/!ticker@arr"
+        try:
+            async with app.session.ws_connect(url,heartbeat=25,receive_timeout=60,max_msg_size=0,timeout=12) as ws:
+                disc_ws=True; disc_source=f"WS:{base_url}"
+                print(f"Ψ-V10.4 discovery WS connected host={base_url} (!ticker@arr)",flush=True)
                 async for msg in ws:
                     if msg.type==aiohttp.WSMsgType.TEXT:
-                        try: payload=json.loads(msg.data)
-                        except json.JSONDecodeError: continue
-                        if not isinstance(payload,list): continue
-                        now=ts(); disc_event_ms=int(now*1000)
-                        for x in payload:
-                            if not isinstance(x,dict): continue
-                            s=x.get("s","")
-                            if s not in universe_set or now-disc_sample_ts.get(s,0)<SAMPLE_SECONDS: continue
-                            p=app.safe_float(x.get("c"));
-                            if p<=0: continue
-                            disc[s].append((now,p,app.safe_float(x.get("q")),app.safe_float(x.get("n")),app.safe_float(x.get("b")),app.safe_float(x.get("a")))); disc_sample_ts[s]=now
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR): break
-        except asyncio.CancelledError: raise
-        except Exception as e: app.last_error=f"DISCOVERY_WS: {type(e).__name__}: {e}"; print(app.last_error,flush=True)
-        finally: disc_ws=False
-        await asyncio.sleep(3)
+                        try:
+                            payload=json.loads(msg.data)
+                        except json.JSONDecodeError:
+                            continue
+                        _ingest_discovery_payload(payload,f"WS:{base_url}")
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError(f"discovery_websocket_{msg.type.name.lower()}")
+                raise RuntimeError("discovery_websocket_stream_ended")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            disc_ws_failures+=1
+            app.last_error=f"DISCOVERY_WS: {type(e).__name__}: {e}"
+            print(f"{app.last_error} host={base_url}",flush=True)
+            host_cursor=(host_cursor+1)%max(1,len(bases))
+        finally:
+            disc_ws=False
+        await asyncio.sleep(1)
 
 async def loop(delay,fn,label):
     while True:
@@ -267,7 +334,7 @@ async def main():
     runner=await app.start_http_server(); tasks=[]
     try:
         print("Ψ-V10.4 ROLLING QUALIFIER HUNTER ACTIVE — full-universe discovery, rotating structure, locked qualifiers, TARGET=10, NO PADDING",flush=True)
-        await refresh_universe(True); tasks.append(asyncio.create_task(discovery_loop())); await refresh_structure(); await refresh_anomaly(); tick()
+        await refresh_universe(True); tasks.append(asyncio.create_task(discovery_loop())); tasks.append(asyncio.create_task(discovery_rest_loop())); await refresh_structure(); await refresh_anomaly(); tick()
         tasks += [asyncio.create_task(loop(UNIVERSE_SECONDS,lambda:refresh_universe(True),"UNIVERSE")),asyncio.create_task(loop(STRUCTURE_SECONDS,refresh_structure,"STRUCTURE")),asyncio.create_task(loop(ANOMALY_SECONDS,refresh_anomaly,"ANOMALY")),asyncio.create_task(loop(POOL_SECONDS,rebalance_pool,"POOL")),asyncio.create_task(app.websocket_loop()),asyncio.create_task(loop(TICK_SECONDS,tick,"QUALIFIER")),asyncio.create_task(print_loop())]
         await asyncio.gather(*tasks)
     finally:
