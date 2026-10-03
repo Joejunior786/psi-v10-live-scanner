@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.4-depth-continuity-preserved"
+VERSION = "10.16.5-stable-depth-rebalance"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -27,6 +27,7 @@ BUY_LANE_SLOTS = 4
 MICRO_SHARDS = 4
 MICRO_SHARD_SIZE = 20
 SHARD_POLL_SECONDS = 0.5
+SHARD_REBALANCE_MIN_DWELL_SECONDS = 12.0
 EXEC_WS_HEARTBEAT = 20.0
 EXEC_WS_RECEIVE_TIMEOUT = 90.0
 EXEC_WS_CONNECT_TIMEOUT = 20.0
@@ -408,6 +409,15 @@ def opportunity_board():
 
 
 def _assign_shards():
+    # Debounce membership changes. Pool growth can happen in several quick
+    # steps during startup; reconnecting again before the new depth stream has
+    # collected enough snapshots manufactures MICRO_NOT_READY gaps.
+    now = time.time()
+    if any(shard_current_symbols):
+        latest_change = max(shard_last_change) if shard_last_change else 0.0
+        if latest_change > 0 and now - latest_change < SHARD_REBALANCE_MIN_DWELL_SECONDS:
+            return set()
+
     selected = list(dict.fromkeys(app.selected_micro_symbols))[: MICRO_SHARDS * MICRO_SHARD_SIZE]
     selected_set = set(selected)
     changed_shards = set()
@@ -483,11 +493,14 @@ async def _shard_loop(shard_id):
                 streams.append(f"{lower}@depth20@100ms")
 
             bases = []
+            # For execution depth20, the stream.binance.com endpoints have
+            # been materially more reliable in production than data-stream.
+            # Keep data-stream as fallback, not the first handshake.
             for raw in (
-                str(getattr(app, "WS_BASE", "") or "").rstrip("/"),
-                "wss://data-stream.binance.vision",
                 "wss://stream.binance.com:9443",
                 "wss://stream.binance.com:443",
+                str(getattr(app, "WS_BASE", "") or "").rstrip("/"),
+                "wss://data-stream.binance.vision",
             ):
                 if raw and raw not in bases:
                     bases.append(raw)
@@ -496,7 +509,7 @@ async def _shard_loop(shard_id):
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16.4 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"Ψ-V10.16.5 SHARD{shard_id+1} connecting symbols={len(symbols)} "
                 f"gen={generation} host={base_url} mode=DEPTH_ONLY book=DEPTH20_WS",
                 flush=True,
             )
@@ -539,7 +552,7 @@ async def _shard_loop(shard_id):
                     # by a depth-only reconnect.
 
                 print(
-                    f"Ψ-V10.16.4 SHARD{shard_id+1} connected symbols={len(symbols)} "
+                    f"Ψ-V10.16.5 SHARD{shard_id+1} connected symbols={len(symbols)} "
                     f"host={base_url} preservedBooks={preserved_books} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
@@ -671,7 +684,7 @@ async def _v1016_board_loop():
                 for ts in shard_last_msg_ms
             ]
             print(
-                f"Ψ-V10.16.4 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.5 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
                 f"reconnects={shard_reconnects} generations={shard_generation} "
                 f"hosts={shard_last_host} msgAgeMs={ages}",

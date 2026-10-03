@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.43-micro-continuity-final"
+VERSION="11.0.5.44-stable-execution-depth-final"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -2638,7 +2638,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.43] Ψ EXECUTION MICRO CONTINUITY + RELIABLE RISKMAP active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only with multi-host failover. Valid depth state is now preserved across membership reconnects and allowed to expire only through the existing freshness gates, preventing artificial MICRO_NOT_READY drops. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.44] Ψ STABLE EXECUTION DEPTH + RELIABLE RISKMAP active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. Depth state survives reconnects, shard membership is debounced for 12 seconds between rebalances, and execution depth prefers the two stream.binance.com endpoints before data-stream fallback. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
