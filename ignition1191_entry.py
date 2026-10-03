@@ -10,13 +10,13 @@ b17 = base.b17
 q = base.q
 app = base.app
 
-VERSION = "10.19.7-rest-first-riskmap"
-SUPPORT_SAMPLE_SECONDS = 10.0
+VERSION = "10.19.8-reliable-ws-riskmap"
+SUPPORT_SAMPLE_SECONDS = 8.0
 SUPPORT_MAX_SYMBOLS = 8
 SUPPORT_MAX_AGE = 120.0
-SUPPORT_BATCH_PER_CYCLE = 2
-SUPPORT_BUILD_TIMEOUT = 6.0
-RISK_FETCH_BUDGET = 4.5
+SUPPORT_BATCH_PER_CYCLE = 1
+SUPPORT_BUILD_TIMEOUT = 10.0
+RISK_FETCH_BUDGET = 8.0
 ENTRY_MAX_DISTANCE_PCT = 3.0
 MAX_PLAN_RISK_PCT = 3.5
 MIN_PLAN_RISK_PCT = 0.20
@@ -328,7 +328,7 @@ async def build_risk_map(sym):
         risk_stats["errors"] += 1
         risk_stats["last_symbol"] = sym
         risk_stats["last_error"] = f"{type(exc).__name__}: {exc}"
-        print(f"Ψ-V10.19.7 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
+        print(f"Ψ-V10.19.8 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
 
 
 async def support_loop():
@@ -344,14 +344,14 @@ async def support_loop():
             elapsed=time.time()-started
             if elapsed>SUPPORT_BUILD_TIMEOUT:
                 risk_stats["slow"] += 1
-                print(f"Ψ-V10.19.7 RISKMAP_SLOW {sym} elapsed={elapsed:.2f}s budget={RISK_FETCH_BUDGET:.1f}s", flush=True)
+                print(f"Ψ-V10.19.8 RISKMAP_SLOW {sym} elapsed={elapsed:.2f}s budget={RISK_FETCH_BUDGET:.1f}s", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             risk_stats["errors"] += 1
             risk_stats["last_symbol"] = sym
             risk_stats["last_error"] = f"{type(exc).__name__}: {exc}"
-            print(f"Ψ-V10.19.7 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
+            print(f"Ψ-V10.19.8 RISKMAP_BUILD_ERROR {sym} {type(exc).__name__}: {exc}", flush=True)
 
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
@@ -377,9 +377,9 @@ async def support_loop():
             batch=[syms[(cursor+i)%len(syms)] for i in range(n)]
             cursor=(cursor+n)%max(1,len(syms))
 
-            # Exactly two complete risk-map builds at once. V11.0.5.36 uses
-            # a hard internal timeframe budget; no outer cancellation timer is
-            # allowed to generate false timeouts under event-loop pressure.
+            # One complete RiskMap build at a time. V11.0.5.38 fetches the
+            # 1m/5m/15m timeframes concurrently with a realistic WS window and
+            # bounded REST fallback, preventing both starvation and request bursts.
             await asyncio.gather(*(one(sym) for sym in batch))
             risk_stats["samples"] += 1
         except asyncio.CancelledError:
@@ -470,7 +470,7 @@ async def print_risk_loop():
             states={}
             for _,x in fresh:
                 st=str(x.get("plan_state") or "WAIT");states[st]=states.get(st,0)+1
-            print(f"Ψ-V10.19.7 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} slow={risk_stats['slow']} partial={risk_stats['partial']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
+            print(f"Ψ-V10.19.8 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']} timeouts={risk_stats['timeouts']} slow={risk_stats['slow']} partial={risk_stats['partial']} empty={risk_stats['empty']} last={risk_stats['last_symbol']}:{risk_stats['last_error']}", flush=True)
             ranked = sorted(fresh, key=lambda item: (1 if str(item[1].get("sweep_state")) == "SWEEP_RECLAIMED" else 0, f(item[1].get("sweep_score")), f(item[1].get("support1_strength")), -f(item[1].get("support1_distance_pct"), 99)), reverse=True)[:10]
             for i, (sym, x) in enumerate(ranked, 1):
                 risk_text = "-" if x.get("risk_pct") is None else f"{f(x.get('risk_pct')):.3f}%"
@@ -478,7 +478,7 @@ async def print_risk_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"Ψ-V10.19.7 RISKMAP_ERROR {type(e).__name__}: {e}", flush=True)
+            print(f"Ψ-V10.19.8 RISKMAP_ERROR {type(e).__name__}: {e}", flush=True)
 
 
 b17.diag_pool = diag1191
@@ -495,11 +495,11 @@ async def main1191():
 scanner.v7.main = main1191
 scanner.VERSION = VERSION
 
-print("Ψ-V10.19.7 UPGRADE ACTIVE — hard-budget REST-first multi-TF support map, live-candidate-only scheduling, partial-timeframe recovery, sweep/reclaim + support-loss detection, ATR-buffered stop placement, verified conditional entry, TP1/TP2/TP3 risk map; formal PRE/BUY gates unchanged", flush=True)
+print("Ψ-V10.19.8 UPGRADE ACTIVE — reliable WS-first multi-TF support map, one-symbol live-candidate scheduling, bounded REST fallback, partial-timeframe recovery, sweep/reclaim + support-loss detection, ATR-buffered stop placement, verified conditional entry, TP1/TP2/TP3 risk map; formal PRE/BUY gates unchanged", flush=True)
 
 if __name__ == "__main__":
     try:
-        print("Ψ-V10.19.7 ACTIVE — hard-budget support + liquidity-sweep risk intelligence", flush=True)
+        print("Ψ-V10.19.8 ACTIVE — hard-budget support + liquidity-sweep risk intelligence", flush=True)
         asyncio.run(scanner.v7.main())
     except KeyboardInterrupt:
         try: base.save_v119_state()

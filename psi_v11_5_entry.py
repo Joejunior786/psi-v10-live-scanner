@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.37-rest-first-riskmap-final"
+VERSION="11.0.5.38-reliable-ws-riskmap-final"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -294,7 +294,7 @@ def _ws_api_primitives():
     if _ws_api_send_lock is None:
         _ws_api_send_lock = asyncio.Lock()
     if _ws_api_gate is None:
-        _ws_api_gate = asyncio.Semaphore(4)
+        _ws_api_gate = asyncio.Semaphore(6)
     return _ws_api_ready, _ws_api_send_lock, _ws_api_gate
 
 def _ws_api_fail_pending(reason):
@@ -357,7 +357,7 @@ async def binance_ws_api_loop():
             _ws_api_fail_pending("Binance WS API connection reset")
         await asyncio.sleep(1.5)
 
-async def binance_ws_api_klines(symbol, interval, limit, wait_ready=3.0, response_timeout=8.0):
+async def binance_ws_api_klines(symbol, interval, limit, wait_ready=3.0, response_timeout=8.0, gate_timeout=2.5):
     global _ws_api_id
     ready,send_lock,gate=_ws_api_primitives()
     symbol=str(symbol).upper(); interval=str(interval); limit=int(limit)
@@ -373,7 +373,7 @@ async def binance_ws_api_klines(symbol, interval, limit, wait_ready=3.0, respons
     fut=None
     try:
         try:
-            await asyncio.wait_for(gate.acquire(),timeout=2.5)
+            await asyncio.wait_for(gate.acquire(),timeout=gate_timeout)
             acquired=True
         except asyncio.TimeoutError:
             _ws_api_stats["defer"]+=1
@@ -1033,14 +1033,13 @@ async def _risk_fetch_race(client, symbol, interval, limit):
 
 
 async def _risk_load_klines(client, symbol, interval, limit):
-    """Bounded REST-first RiskMap candle loader.
+    """Reliable bounded WS-first RiskMap candle loader.
 
-    A connected WS-API socket is not proof that an individual kline request
-    will complete under load. RiskMap therefore races Binance public REST
-    hosts first, which are already proven by the structure lane, then uses one
-    short WS-API attempt as fallback. This fits inside the 4.5s per-symbol
-    hard budget and prevents a healthy-but-busy WS socket from yielding empty
-    risk plans forever.
+    Production telemetry showed the Binance WS-API path can return valid
+    RiskMap candles when allowed a realistic response window. RiskMap now
+    gives one WS request enough time to succeed, while using a short gate
+    acquisition so it cannot queue behind structure work indefinitely.
+    A two-host REST race remains the bounded fallback.
     """
     global _risk_last_ok
     symbol=str(symbol); interval=str(interval); limit=int(limit)
@@ -1050,7 +1049,21 @@ async def _risk_load_klines(client, symbol, interval, limit):
         _risk_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    # Primary path: two-host Binance REST race, hard-bounded internally.
+    if _ws_api_ready is not None and _ws_api_ready.is_set():
+        rows=await binance_ws_api_klines(
+            symbol,interval,limit,
+            wait_ready=.75,
+            response_timeout=3.5,
+            gate_timeout=.75,
+        )
+        if isinstance(rows,list) and rows:
+            _risk_tf_cache[key]=(time.time(),rows)
+            _risk_last_ok=time.time()
+            _ws_api_stats["risk_ok"]+=1
+            _risk_tf_stats["ws_ok"]+=1
+            return rows
+
+    # Bounded public-REST fallback if WS is unavailable, deferred, or fails.
     try:
         rows=await _risk_fetch_race(client, symbol, interval, limit)
     except asyncio.CancelledError:
@@ -1059,27 +1072,6 @@ async def _risk_load_klines(client, symbol, interval, limit):
         rows=None
     if isinstance(rows,list) and rows:
         return rows
-
-    # Secondary path: one short WS-API request. Do not retry repeatedly here;
-    # the RiskMap scheduler will revisit the symbol on the next cycle.
-    if _ws_api_ready is not None and _ws_api_ready.is_set():
-        try:
-            rows=await asyncio.wait_for(
-                binance_ws_api_klines(
-                    symbol,interval,limit,
-                    wait_ready=.20,
-                    response_timeout=1.0,
-                ),
-                timeout=1.45,
-            )
-        except asyncio.TimeoutError:
-            rows=None
-        if isinstance(rows,list) and rows:
-            _risk_tf_cache[key]=(time.time(),rows)
-            _risk_last_ok=time.time()
-            _ws_api_stats["risk_ok"]+=1
-            _risk_tf_stats["ws_ok"]+=1
-            return rows
 
     _risk_tf_stats["fail"]+=1
     return []
@@ -2617,7 +2609,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.37] Ψ REST-FIRST RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses a hard two-host Binance REST race first, one short WS-API fallback, a non-blocking per-symbol candle budget, and no outer wait_for cancellation. A connected-but-busy WS socket can no longer starve risk plans.",flush=True)
+    print("[v11.0.5.38] Ψ RELIABLE WS-FIRST RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses one realistically timed WS-API request first with a short queue deadline, a hard two-host Binance REST fallback, one-symbol scheduling, a bounded per-symbol candle budget, and no outer wait_for cancellation.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())

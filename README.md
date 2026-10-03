@@ -1,15 +1,15 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.37 — REST-First RiskMap + Integrity Sync**
+Current integrated production build: **Ψ-V11.0.5.38 — Reliable WS-First RiskMap + Integrity Sync**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.37`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.38`
 - Pinpoint remains the sole BUY NOW authority.
-- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.37 build.
+- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.38 build.
 
 ## Live integrity rules
 
@@ -29,7 +29,7 @@ A BUY NOW candidate must still satisfy the full Pinpoint execution gate.
 
 A valid live Pinpoint trigger/stop/risk plan is accepted as the primary execution-risk plan. The separate RiskMap is retained as an additional structural/fallback plan source and no longer makes BUY mathematically impossible when its cache is temporarily unavailable.
 
-RiskMap refresh is hard-bounded and REST-first: a two-host Binance public REST race is attempted first, followed by one short WS-API fallback. The 1m/5m/15m build returns at a fixed internal deadline without waiting for slow cancellation cleanup. The outer scheduler has no wait_for cancellation, and it only schedules genuine live Pinpoint/Monster/live-micro candidates rather than arbitrary cold-start symbols. A valid 5m result can still produce a structural plan when 1m/15m are delayed.
+RiskMap refresh is hard-bounded and WS-first: one realistically timed Binance WS-API request is attempted per timeframe with a short queue deadline, followed by a two-host public REST fallback. Only one live candidate is built per scheduler cycle, while 1m/5m/15m still fetch concurrently. The outer scheduler has no wait_for cancellation and never spends capacity on arbitrary cold-start symbols. A valid 5m result can still produce a structural plan when 1m/15m are delayed.
 
 ## Scanner lanes
 
