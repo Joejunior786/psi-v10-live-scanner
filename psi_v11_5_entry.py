@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.86-liveness-aware-micro-core"
+VERSION="11.0.5.87-rotating-micro-rest-hosts"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -161,6 +161,7 @@ _depth_ws_stats={
 
 _micro_rest_trade_gate=None
 _micro_rest_depth_gate=None
+_micro_rest_host_cursor={"trade":0,"depth":0}
 _micro_rest_stats={
     "trade_ok":0,"trade_fail":0,"trade_host":"-",
     "depth_ok":0,"depth_fail":0,"depth_host":"-",
@@ -1273,17 +1274,29 @@ async def micro_rest_get(path, params, lane, total_timeout=3.5):
         return None
     lane=str(lane)
     gate=_micro_rest_gate(lane)
+    # Binance Spot officially exposes these REST bases. Keep each fallback
+    # cycle bounded to two attempts, but rotate the pair after failures so a
+    # Railway route problem to one edge cannot permanently starve strict micro.
     hosts=[
         "https://data-api.binance.vision",
-        "https://api-gcp.binance.com",
         "https://api.binance.com",
+        "https://api-gcp.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+        "https://api3.binance.com",
+        "https://api4.binance.com",
     ]
     preferred=str(_micro_rest_stats.get(f"{lane}_host") or "-")
+    cursor=int(_micro_rest_host_cursor.get(lane,0) or 0)%len(hosts)
+    rotated=hosts[cursor:]+hosts[:cursor]
     if preferred in hosts:
-        hosts=[preferred]+[h for h in hosts if h!=preferred]
+        ordered=[preferred]+[h for h in rotated if h!=preferred]
+    else:
+        ordered=rotated
+    attempts=ordered[:2]
 
     async with gate:
-        for host in hosts[:2]:
+        for host in attempts:
             try:
                 async with app.session.get(
                     f"{host}{path}",
@@ -1302,12 +1315,17 @@ async def micro_rest_get(path, params, lane, total_timeout=3.5):
                         raise RuntimeError("empty/invalid micro REST payload")
                     _micro_rest_stats[f"{lane}_ok"]+=1
                     _micro_rest_stats[f"{lane}_host"]=host
+                    # Start the next fallback after the successful host rather
+                    # than hammering the same edge forever.
+                    _micro_rest_host_cursor[lane]=(hosts.index(host)+1)%len(hosts)
                     return payload
             except asyncio.CancelledError:
                 raise
             except Exception:
                 continue
+
     _micro_rest_stats[f"{lane}_fail"]+=1
+    _micro_rest_host_cursor[lane]=(cursor+len(attempts))%len(hosts)
     return None
 
 
@@ -4916,7 +4934,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.86] Ψ LIVENESS-AWARE MICRO CORE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.87] Ψ ROTATING MICRO REST HOSTS active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
