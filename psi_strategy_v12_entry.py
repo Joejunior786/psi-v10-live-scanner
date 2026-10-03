@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.9-cache-reuse-rest-fallback"
+VERSION = "12.1.0-phased-full-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1712,8 +1712,7 @@ async def strategy_loop():
                 await asyncio.sleep(2.0)
                 continue
 
-            # Retire completed work first so permits and symbol slots are
-            # immediately reusable.
+            # Retire finished jobs.
             for sym, task in list(refresh_tasks.items()):
                 if task.done():
                     try:
@@ -1724,69 +1723,127 @@ async def strategy_loop():
                         _stats["refresh_task_fail"] += 1
                     refresh_tasks.pop(sym, None)
 
+            # Reuse any structure already accumulated by the legacy scanner.
             if _cycle == 0 or _cycle % 4 == 0:
                 imported = _import_v11_structure_cache()
                 if imported:
                     _stats["v11_import_last"] = imported
 
-            active = _priority_symbols(universe)
-
-            # Active candidates refresh quickly, but never consume every slot.
-            pre_ready = sum(
-                all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+            now = time.time()
+            core_ready = sum(
+                all(
+                    ( (_cache.get(s, {}).get(tf) or {}).get("snap") )
+                    and now - f((_cache.get(s, {}).get(tf) or {}).get("updated")) <= TF_TTL[tf]
+                    for tf in ("1h", "4h", "1d")
+                )
                 for s in universe
             )
-            if pre_ready < max(50, int(len(universe) * 0.20)):
-                active_cap = 2
-            elif pre_ready < max(200, int(len(universe) * 0.60)):
-                active_cap = 4
-            else:
-                active_cap = ACTIVE_SYMBOLS_PER_CYCLE
-
-            active_budget = min(
-                len(active),
-                max(0, min(active_cap, MAX_INFLIGHT_SYMBOLS // 4))
+            deep_ready = sum(
+                all(
+                    len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                    for tf in ("1h", "4h", "1d")
+                )
+                for s in universe
             )
-            for sym in active[:active_budget]:
-                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
-                    refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=True))
+            weekly_deep_ready = sum(
+                len(((_cache.get(s, {}).get("1w") or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                for s in universe
+            )
 
-            # Reserve a small number of symbol slots for Weekly and EMA200
-            # enrichment before filling the queue with broad bootstrap work.
-            weekly_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=1, deep=False)
-            for sym in weekly_jobs:
-                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
-                    refresh_tasks[sym] = asyncio.create_task(
-                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=False)
-                    )
+            # ---------------------------------------------------------------
+            # PHASE A: FAST CORE
+            # Complete 1H + 4H + Daily snapshots for the whole universe before
+            # spending bandwidth on deep/weekly/active refreshes.
+            # ---------------------------------------------------------------
+            if core_ready < len(universe):
+                phase = "FAST_CORE"
+                bootstrap = _bootstrap_symbols(universe, refresh_tasks)
+                for sym in bootstrap:
+                    if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                        break
+                    if sym not in refresh_tasks:
+                        refresh_tasks[sym] = asyncio.create_task(
+                            refresh_symbol(sym, sem, active=False)
+                        )
 
-            deep_jobs = _deep_backfill_symbols(universe, refresh_tasks, limit=1)
-            for sym in deep_jobs:
-                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
-                    refresh_tasks[sym] = asyncio.create_task(
-                        refresh_symbol(sym, sem, force_deep=True)
-                    )
+            # ---------------------------------------------------------------
+            # PHASE B: DEEP CORE
+            # Upgrade all 1H/4H/Daily histories to >=202 rows so EMA/SMA200
+            # rules have full authority across every hydrated market.
+            # ---------------------------------------------------------------
+            elif deep_ready < len(universe):
+                phase = "DEEP_CORE"
+                deep_jobs = _deep_backfill_symbols(
+                    universe, refresh_tasks,
+                    limit=min(FETCH_CONCURRENCY, MAX_INFLIGHT_SYMBOLS)
+                )
+                for sym in deep_jobs:
+                    if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                        break
+                    if sym not in refresh_tasks:
+                        refresh_tasks[sym] = asyncio.create_task(
+                            refresh_symbol(sym, sem, force_deep=True)
+                        )
 
-            weekly_deep_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=1, deep=True)
-            for sym in weekly_deep_jobs:
-                if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
-                    refresh_tasks[sym] = asyncio.create_task(
-                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=True)
-                    )
+            # ---------------------------------------------------------------
+            # PHASE C: WEEKLY DEEP
+            # Fetch full Weekly history directly (not a separate shallow pass)
+            # so Weekly EMA50/EMA200 and cross/rejection rules become usable.
+            # ---------------------------------------------------------------
+            elif weekly_deep_ready < len(universe):
+                phase = "WEEKLY_DEEP"
+                weekly_jobs = _weekly_backfill_symbols(
+                    universe, refresh_tasks,
+                    limit=min(FETCH_CONCURRENCY, MAX_INFLIGHT_SYMBOLS),
+                    deep=True,
+                )
+                for sym in weekly_jobs:
+                    if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                        break
+                    if sym not in refresh_tasks:
+                        refresh_tasks[sym] = asyncio.create_task(
+                            refresh_symbol(
+                                sym, sem,
+                                weekly_only=True,
+                                weekly_deep=True,
+                            )
+                        )
 
-            # The remaining slots are dedicated to fair whole-universe core
-            # hydration, with partial symbols completed first.
-            bootstrap = _bootstrap_symbols(universe, refresh_tasks)
-            for sym in bootstrap:
-                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
-                    break
-                if sym not in refresh_tasks:
-                    refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=False))
+            # ---------------------------------------------------------------
+            # PHASE D: STEADY
+            # Only after broad structure is complete do active candidates get
+            # short TTL refresh priority. Persistent cache preserves coverage.
+            # ---------------------------------------------------------------
+            else:
+                phase = "STEADY"
+                active = _priority_symbols(universe)
+                for sym in active[:ACTIVE_SYMBOLS_PER_CYCLE]:
+                    if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
+                        refresh_tasks[sym] = asyncio.create_task(
+                            refresh_symbol(sym, sem, active=True)
+                        )
+
+                # Fairly refresh any structurally stale market without letting
+                # active names monopolize all worker slots.
+                stale_jobs = _bootstrap_symbols(universe, refresh_tasks)
+                for sym in stale_jobs:
+                    if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                        break
+                    if sym not in refresh_tasks:
+                        refresh_tasks[sym] = asyncio.create_task(
+                            refresh_symbol(sym, sem, active=False)
+                        )
 
             await asyncio.sleep(0.25)
 
+            # Recalculate after jobs had a chance to land.
+            now = time.time()
             ready_now = sum(
-                all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+                all(
+                    ((_cache.get(s, {}).get(tf) or {}).get("snap"))
+                    and now - f((_cache.get(s, {}).get(tf) or {}).get("updated")) <= TF_TTL[tf]
+                    for tf in ("1h", "4h", "1d")
+                )
                 for s in universe
             )
             weekly_ready = sum(
@@ -1794,7 +1851,10 @@ async def strategy_loop():
                 for s in universe
             )
             deep_ready = sum(
-                all(len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS for tf in ("1h", "4h", "1d"))
+                all(
+                    len(((_cache.get(s, {}).get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS
+                    for tf in ("1h", "4h", "1d")
+                )
                 for s in universe
             )
             weekly_deep_ready = sum(
@@ -1803,36 +1863,29 @@ async def strategy_loop():
             )
 
             print(
-                f"Ψ-V12 REFRESH cycle={_cycle + 1} active={len(active)} bootstrap={len(bootstrap)} "
-                f"deepJobs={len(deep_jobs)} weeklyJobs={len(weekly_jobs)} weeklyDeepJobs={len(weekly_deep_jobs)} "
+                f"Ψ-V12 REFRESH cycle={_cycle + 1} phase={phase} "
                 f"mtfReady={ready_now}/{len(universe)} deepMAReady={deep_ready}/{len(universe)} "
                 f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
                 f"shardPool={_v12_get_shard_pool().qsize()}/{V12_WS_SHARDS} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
-                f"v11Bulk={_stats.get('v11_imported',0)} restFast={_stats.get('fast_rest_ok',0)}/{_stats.get('fast_rest_fail',0)} "
-                f"fetchFail={_stats.get('fetch_fail', 0)} "
-                f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
-                f"restOK={_stats.get('rest_race_ok', 0)} restFail={_stats.get('rest_race_fail', 0)} "
-                f"wsRecycle={_stats.get('ws_timeout_recycles', 0)} "
-                f"wsFail={_stats.get('ws_fail', 0)} "
-                f"shardOK={[int(_stats.get(f'ws_shard_{i}_ok', 0)) for i in range(V12_WS_SHARDS)]} "
-                f"shardFail={[int(_stats.get(f'ws_shard_{i}_fail', 0)) for i in range(V12_WS_SHARDS)]} "
-                f"lastWS={_stats.get('ws_last_error', '-')}",
+                f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
+                f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
+                f"fetchTO={_stats.get('fetch_timeout',0)} wsOK={_stats.get('ws_ok',0)} "
+                f"wsFail={_stats.get('ws_fail',0)} failoverOK={_stats.get('ws_failover_ok',0)} "
+                f"lastWS={_stats.get('ws_last_error','-')}",
                 flush=True,
             )
 
             new_results = {}
-            now = time.time()
             for sym in universe:
                 c = _cache.get(sym) or {}
-                # Qualification requires structurally usable core snapshots.
-                # Active-candidate freshness is handled by the fast tier above.
                 if not all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d")):
                     continue
-                if now - f((c.get("1h") or {}).get("updated")) > TF_TTL["1h"]:
-                    continue
+                # Signal evaluation can run from FAST data for setup families
+                # that do not require EMA200. MA200/Weekly engines naturally
+                # remain unavailable until their DEEP phases complete.
                 try:
                     row = evaluate_symbol(sym)
                 except Exception:
@@ -1844,6 +1897,7 @@ async def strategy_loop():
             _results = new_results
             _cycle += 1
             _stats["cycles"] = _cycle
+            _stats["hydration_phase"] = phase
             _stats["refresh_inflight"] = len(refresh_tasks)
             _stats["mtf_ready"] = ready_now
             _stats["weekly_ready"] = weekly_ready
@@ -1859,7 +1913,8 @@ async def strategy_loop():
             _stats["loop_fail"] += 1
             print(f"Ψ-V12 LOOP_ERROR {type(exc).__name__}: {exc}", flush=True)
 
-        await asyncio.sleep(5.0)
+        # Hydration phases run faster than the normal steady scanner loop.
+        await asyncio.sleep(2.0 if phase != "STEADY" else 5.0)
 
 
 async def v12_scan(req):
@@ -1930,7 +1985,7 @@ async def main():
     loaded = await asyncio.to_thread(_load_cache_sync)
     print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
     print(
-        "[v12.0.9] MULTI-SETUP AUTHORITY + BALANCED PERSISTENT HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.1.0] MULTI-SETUP AUTHORITY + PHASED FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
