@@ -1,15 +1,15 @@
 # Ψ-V11 Live Scanner
 
-Current integrated production build: **Ψ-V11.0.5.46 — Handshake-Safe Execution Depth + Reliable RiskMap**
+Current integrated production build: **Ψ-V11.0.5.47 — Depth-Frame Ready Execution + Reliable RiskMap**
 
 Read-only Binance Spot market-data scanner with full-universe discovery, deep microstructure analysis, Pinpoint execution authority, Monster breakout detection, pullback monitoring, and fail-closed live-data integrity.
 
 ## Active production entrypoint
 
 - `psi_v11_5_entry.py`
-- Docker environment: `PSI_SCANNER_VERSION=11.0.5.46`
+- Docker environment: `PSI_SCANNER_VERSION=11.0.5.47`
 - Pinpoint remains the sole BUY NOW authority.
-- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.46 build.
+- Historical modules keep their own lineage version strings, but the runtime exposes the integrated V11.0.5.47 build.
 
 ## Live integrity rules
 
@@ -62,36 +62,41 @@ The included `Dockerfile` and `railway.toml` deploy the current V11 entrypoint.
 No Binance API key is required for the public market-data feeds used by this service.
 
 
-## V11.0.5.46 execution-micro transport repair
+## V11.0.5.47 execution-micro transport repair
 
 The four qualified execution-micro shards now rotate across Binance websocket hosts instead of being pinned to a single endpoint. Each shard uses explicit connect/heartbeat/receive deadlines and reports its active host plus last-message age. Trade and book sequence validators are reset cleanly on a shard reconnect so a replayed first frame cannot permanently poison sequence validity. This changes transport reliability only; PRE/BUY thresholds and Pinpoint authority are unchanged.
 
 
-## V11.0.5.46 execution-micro subscription repair
+## V11.0.5.47 execution-micro subscription repair
 
 Qualified execution shards now open a short `/stream` websocket first and then issue Binance's official `SUBSCRIBE` request for each shard's `aggTrade` and `depth20@100ms` streams. Subscription acknowledgements and server-side subscription errors are logged explicitly. Multi-host failover and reconnect sequence resets from V11.0.5.40 remain active. Signal thresholds are unchanged.
 
 
-## V11.0.5.46 split execution-micro transport
+## V11.0.5.47 split execution-micro transport
 
 Qualified aggressive-trade telemetry now reuses the already-stable full-universe Monster aggTrade websocket and forwards the original Binance aggTrade payload into the formal micro engine only for selected micro symbols. The four execution shards are depth20-only. This removes duplicate aggTrade subscriptions, reduces execution-shard stream load, and lets depth reconnect independently without resetting trade sequence continuity. No synthetic order flow is introduced and no PRE/BUY threshold is relaxed.
 
 
-## V11.0.5.46 depth continuity
+## V11.0.5.47 depth continuity
 
 Depth20 execution shards preserve already-valid book state across membership/rebalance reconnects. Because each incoming depth20 frame is a complete top-20 snapshot and the formal engine already requires very fresh books, there is no need to zero healthy book state during our own reconnect. If the replacement stream fails, freshness expires naturally and execution still fails closed. This prevents pool growth from repeatedly collapsing live-micro readiness.
 
 
-## V11.0.5.46 stable execution-depth scheduling
+## V11.0.5.47 stable execution-depth scheduling
 
 Execution depth shards now enforce a 12-second minimum dwell between membership rebalances. This prevents startup pool growth from reconnecting a shard again before it can accumulate the depth samples required by the formal micro gate. The execution depth host order now prefers `stream.binance.com:9443` and `:443`, with the less reliable data-stream endpoint retained as fallback. Existing freshness, book-sequence, spread, slippage and Pinpoint execution gates remain unchanged.
 
 
-## V11.0.5.46 connection-aware depth dwell
+## V11.0.5.47 connection-aware depth dwell
 
 Execution-depth rebalancing now uses connection time, not only assignment time. After any successful depth websocket connection, the current shard membership is protected for at least 12 seconds so the formal micro engine can accumulate fresh depth samples. If an assigned shard is handshaking or temporarily disconnected, pool membership is frozen for a 30-second settle window rather than being rewritten underneath the reconnect. Freshness and sequence gates remain fail-closed; this changes scheduling continuity only.
 
 
-## V11.0.5.46 handshake-safe depth membership
+## V11.0.5.47 handshake-safe depth membership
 
 An execution depth shard with assigned symbols is now immutable while its websocket is disconnected or still handshaking. The previous 30-second settle window was shorter than some real Binance handshake delays, allowing a shard generation to change before the socket completed and forcing an immediate reconnect on arrival. Pool growth now waits for assigned shards to establish a connection, after which the existing 12-second post-connect dwell applies. All execution gates remain unchanged.
+
+
+## V11.0.5.47 first-depth readiness gate
+
+Execution-depth scheduler readiness is now based on receipt and successful processing of a real Binance depth20 frame, not websocket-open state. Each shard carries an explicit stream-ready flag tied to its current generation. While an assigned shard has not yet produced a valid depth frame, membership is immutable. Once the first valid frame arrives, a 12-second post-data dwell begins before any rebalance is permitted. This removes the final socket-open / first-frame generation race without changing any trading threshold.

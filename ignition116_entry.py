@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.7-no-rebalance-during-handshake"
+VERSION = "10.16.8-depth-frame-ready-gate"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -56,6 +56,8 @@ shard_last_host = ["" for _ in range(MICRO_SHARDS)]
 shard_last_msg_ms = [0 for _ in range(MICRO_SHARDS)]
 shard_last_connect = [0.0 for _ in range(MICRO_SHARDS)]
 shard_last_disconnect = [0.0 for _ in range(MICRO_SHARDS)]
+shard_stream_ready = [False for _ in range(MICRO_SHARDS)]
+shard_last_ready = [0.0 for _ in range(MICRO_SHARDS)]
 
 board_stats = {
     "prints": 0,
@@ -416,21 +418,19 @@ def _assign_shards():
     # collected enough snapshots manufactures MICRO_NOT_READY gaps.
     now = time.time()
     if any(shard_current_symbols):
-        # Never rewrite membership underneath an assigned shard that is
-        # handshaking/reconnecting. Binance websocket handshakes can exceed
-        # 30 seconds under load; a fixed settle timeout allowed generation
-        # changes before the connection completed, creating an immediate
-        # connected -> membership-changed -> reconnect loop.
+        # Never rewrite membership underneath an assigned shard until it
+        # has processed a real depth20 frame for the current websocket
+        # generation. A socket can be OPEN before any market-data frame has
+        # arrived, so shard_connected alone is not a readiness signal.
         for shard_id, members in enumerate(shard_current_symbols):
-            if members and not shard_connected[shard_id]:
+            if members and not shard_stream_ready[shard_id]:
                 return set()
 
-        # Protect the actual post-connect warm-up window. The previous debounce
-        # started at assignment time, so a 20s handshake could consume the
-        # entire dwell before the socket had received a single depth frame.
+        # Protect the actual post-data warm-up window. Start the dwell at the
+        # first valid depth frame, not at assignment or websocket handshake.
         latest_change = max(shard_last_change) if shard_last_change else 0.0
-        latest_connect = max(shard_last_connect) if shard_last_connect else 0.0
-        latest_event = max(latest_change, latest_connect)
+        latest_ready = max(shard_last_ready) if shard_last_ready else 0.0
+        latest_event = max(latest_change, latest_ready)
         if latest_event > 0 and now - latest_event < SHARD_REBALANCE_MIN_DWELL_SECONDS:
             return set()
 
@@ -493,6 +493,7 @@ async def _shard_loop(shard_id):
     while True:
         generation = shard_generation[shard_id]
         symbols = list(shard_current_symbols[shard_id])
+        shard_stream_ready[shard_id] = False
         try:
             if not symbols:
                 shard_connected[shard_id] = False
@@ -525,7 +526,7 @@ async def _shard_loop(shard_id):
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16.7 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"Ψ-V10.16.8 SHARD{shard_id+1} connecting symbols={len(symbols)} "
                 f"gen={generation} host={base_url} mode=DEPTH_ONLY book=DEPTH20_WS",
                 flush=True,
             )
@@ -569,7 +570,7 @@ async def _shard_loop(shard_id):
                     # by a depth-only reconnect.
 
                 print(
-                    f"Ψ-V10.16.7 SHARD{shard_id+1} connected symbols={len(symbols)} "
+                    f"Ψ-V10.16.8 SHARD{shard_id+1} connected symbols={len(symbols)} "
                     f"host={base_url} preservedBooks={preserved_books} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
@@ -598,6 +599,16 @@ async def _shard_loop(shard_id):
                             app.process_agg_trade(symbol, data)
                         elif "@depth20" in stream_name:
                             app.process_partial_depth_snapshot(symbol, data)
+                            if not shard_stream_ready[shard_id]:
+                                st = app.ensure_micro_state(symbol)
+                                if st.get("book_snapshot_ready") and st.get("book_sequence_ok"):
+                                    shard_stream_ready[shard_id] = True
+                                    shard_last_ready[shard_id] = time.time()
+                                    print(
+                                        f"Ψ-V10.16.8 SHARD{shard_id+1} stream_ready "
+                                        f"gen={generation} firstDepth={symbol} host={base_url}",
+                                        flush=True,
+                                    )
                     elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         shard_reconnects[shard_id] += 1
                         break
@@ -619,6 +630,7 @@ async def _shard_loop(shard_id):
             if shard_connected[shard_id]:
                 shard_last_disconnect[shard_id] = time.time()
             shard_connected[shard_id] = False
+            shard_stream_ready[shard_id] = False
             _sync_ws_status()
 
         await asyncio.sleep(min(EXEC_WS_RECONNECT_MAX_DELAY, 1.0 + min(reconnects, 7)))
@@ -703,7 +715,7 @@ async def _v1016_board_loop():
                 for ts in shard_last_msg_ms
             ]
             print(
-                f"Ψ-V10.16.7 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.8 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
                 f"reconnects={shard_reconnects} generations={shard_generation} "
                 f"hosts={shard_last_host} msgAgeMs={ages}",
