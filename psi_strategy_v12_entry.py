@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.2-dual-proven-ws-hydration"
+VERSION = "12.1.3-fast-fail-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -348,7 +348,7 @@ async def _v12_fast_rest_klines(sym, tf, limit):
                 async with app.session.get(
                     host + endpoint,
                     params={"symbol": str(sym), "interval": str(tf), "limit": int(limit)},
-                    timeout=legacy.aiohttp.ClientTimeout(total=3.8, connect=1.0),
+                    timeout=legacy.aiohttp.ClientTimeout(total=2.4, connect=0.8),
                 ) as resp:
                     if resp.status != 200:
                         return None
@@ -364,7 +364,7 @@ async def _v12_fast_rest_klines(sym, tf, limit):
             asyncio.create_task(one(hosts[1], "/api/v3/uiKlines")),
         }
         winner = None
-        deadline = asyncio.get_running_loop().time() + 4.2
+        deadline = asyncio.get_running_loop().time() + 2.6
         try:
             while tasks and winner is None:
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -1185,7 +1185,7 @@ def _v12_return_shard(shard):
 
 async def _v12_rest_one(host, symbol, interval, limit):
     try:
-        timeout = legacy.aiohttp.ClientTimeout(total=3.2, connect=1.2, sock_read=2.4)
+        timeout = legacy.aiohttp.ClientTimeout(total=2.4, connect=0.9, sock_read=1.8)
         async with app.session.get(
             host + "/api/v3/klines",
             params={"symbol": str(symbol).upper(), "interval": str(interval), "limit": int(limit)},
@@ -1223,7 +1223,7 @@ async def v12_rest_klines(symbol, interval, limit):
 
     tasks = [asyncio.create_task(_v12_rest_one(h, symbol, interval, limit)) for h in hosts]
     try:
-        deadline = time.monotonic() + 3.5
+        deadline = time.monotonic() + 2.7
         pending = set(tasks)
         while pending and time.monotonic() < deadline:
             timeout = max(0.05, deadline - time.monotonic())
@@ -1446,7 +1446,7 @@ async def _fetch_tf(sym, tf, deep=False):
                     tf,
                     limit,
                     wait_ready=1.0,
-                    response_timeout=7.0 if deep else 5.0,
+                    response_timeout=5.5 if deep else 3.2,
                     gate_timeout=0.9,
                 )
             except asyncio.CancelledError:
@@ -1463,7 +1463,7 @@ async def _fetch_tf(sym, tf, deep=False):
                     "klines",
                     {"symbol": str(sym).upper(), "interval": str(tf), "limit": int(limit)},
                     wait_ready=1.0,
-                    response_timeout=7.0 if deep else 5.0,
+                    response_timeout=5.5 if deep else 3.2,
                     gate_timeout=0.9,
                 )
             except asyncio.CancelledError:
@@ -1474,7 +1474,7 @@ async def _fetch_tf(sym, tf, deep=False):
         tasks = {asyncio.create_task(structure_ws()), asyncio.create_task(market_ws())}
         winner = None
         try:
-            deadline = asyncio.get_running_loop().time() + (7.5 if deep else 5.5)
+            deadline = asyncio.get_running_loop().time() + (5.8 if deep else 3.5)
             while tasks and winner is None:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -1567,7 +1567,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 15.0 if deep else 10.0
+                timeout = 10.0 if deep else 7.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1984,10 +1984,12 @@ async def strategy_loop():
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
-                f"fetchTO={_stats.get('fetch_timeout',0)} legacyWS={_stats.get('legacy_ws_ok',0)}/"
-                f"{_stats.get('legacy_ws_miss',0)} legacyGateOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
-                f"legacyGateTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
-                f"legacyGateDefer={getattr(legacy,'_ws_api_stats',{}).get('defer',0)} legacyGateCap=6",
+                f"fetchTO={_stats.get('fetch_timeout',0)} dualWS={_stats.get('dual_ws_ok',0)}/"
+                f"{_stats.get('dual_ws_miss',0)} structOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
+                f"structTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
+                f"marketOK={getattr(legacy,'_market_ws_stats',{}).get('ok',0)} "
+                f"marketTO={getattr(legacy,'_market_ws_stats',{}).get('timeouts',0)} "
+                f"marketDefer={getattr(legacy,'_market_ws_stats',{}).get('defer',0)}",
                 flush=True,
             )
 
@@ -2103,7 +2105,7 @@ async def main():
     # repeatedly deferring behind legacy structure requests.
     legacy._ws_api_gate = asyncio.Semaphore(6)
     print(
-        "[v12.1.2] MULTI-SETUP AUTHORITY + PROVEN-TRANSPORT THROUGHPUT active — legacy BUY/PRE authority disabled; "
+        "[v12.1.3] MULTI-SETUP AUTHORITY + FAST-FAIL FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
