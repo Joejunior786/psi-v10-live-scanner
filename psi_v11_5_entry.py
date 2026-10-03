@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.78-dedicated-depth-wsapi"
+VERSION="11.0.5.79-serialized-strict-micro"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -168,6 +168,9 @@ MICRO_FALLBACK_CORE_SIZE=max(1,min(int(os.getenv("PSI_MICRO_FALLBACK_CORE","2"))
 MICRO_FALLBACK_CORE_HOLD_S=max(90.0,float(os.getenv("PSI_MICRO_FALLBACK_CORE_HOLD","180")))
 _micro_fallback_core=[]
 _micro_fallback_core_since=0.0
+
+_strict_trade_cursor=0
+_strict_depth_cursor=0
 
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_structure_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
@@ -4309,7 +4312,7 @@ async def ws_api_micro_bbo_loop():
 
 
 async def ws_api_micro_trade_loop():
-    global _ws_market_trade_cursor
+    global _ws_market_trade_cursor,_strict_trade_cursor
     while True:
         try:
             await asyncio.sleep(1.2)
@@ -4319,10 +4322,10 @@ async def ws_api_micro_trade_loop():
             core=_micro_fallback_core_symbols()
             if not core:
                 continue
-            start=_ws_market_trade_cursor%len(core)
-            take=min(2,len(core))
-            targets=[core[(start+i)%len(core)] for i in range(take)]
-            _ws_market_trade_cursor=(start+take)%len(core)
+            idx=_strict_trade_cursor%len(core)
+            targets=[core[idx]]
+            _strict_trade_cursor=(idx+1)%len(core)
+            _ws_market_trade_cursor=_strict_trade_cursor
 
             async def one(sym):
                 rows=await trade_ws_api_request(
@@ -4383,9 +4386,10 @@ async def ws_api_micro_trade_loop():
 
 
 async def ws_api_micro_depth_loop():
+    global _strict_depth_cursor
     while True:
         try:
-            await asyncio.sleep(.9)
+            await asyncio.sleep(.65)
             ready,_,_=_depth_ws_primitives()
             if not ready.is_set():
                 continue
@@ -4393,34 +4397,65 @@ async def ws_api_micro_depth_loop():
             if not core:
                 continue
 
-            async def one(sym):
-                row=await depth_ws_api_request(
-                    "depth",{"symbol":sym,"limit":10},
-                    response_timeout=7.0,gate_timeout=2.0,
-                )
-                if not isinstance(row,dict):
-                    row=await micro_rest_get(
-                        "/api/v3/depth",
-                        {"symbol":sym,"limit":10},
-                        "depth",
-                        total_timeout=3.5,
-                    )
-                if not isinstance(row,dict):
-                    return 0
-                app.process_partial_depth_snapshot(sym,row)
-                ms=int(time.time()*1000)
-                _ws_market_stats["last_depth_ms"]=ms
-                tape.tape_stats["wsapi_last_depth_ms"]=ms
-                return 1
+            idx=_strict_depth_cursor%len(core)
+            sym=core[idx]
+            _strict_depth_cursor=(idx+1)%len(core)
 
-            rs=await asyncio.gather(*(one(s) for s in core),return_exceptions=True)
-            ok=sum(1 for x in rs if x==1)
-            if ok:
-                _ws_market_stats["depth_ok"]+=ok
+            row=await depth_ws_api_request(
+                "depth",{"symbol":sym,"limit":10},
+                response_timeout=5.5,gate_timeout=1.5,
+            )
+            source="WSAPI"
+            if not isinstance(row,dict):
+                row=await micro_rest_get(
+                    "/api/v3/depth",
+                    {"symbol":sym,"limit":10},
+                    "depth",
+                    total_timeout=3.0,
+                )
+                source="REST"
+            if not isinstance(row,dict):
+                continue
+
+            try:
+                before=app.ensure_micro_state(sym)
+                before_seq=int(before.get("book_sequence_samples",0) or 0)
+                before_upd=int(before.get("book_updates",0) or 0)
+                before_id=int(before.get("last_book_update_id",0) or 0)
+                update_id=int(row.get("lastUpdateId") or row.get("u") or 0)
+                bid_n=len(row.get("bids") or row.get("b") or [])
+                ask_n=len(row.get("asks") or row.get("a") or [])
+
+                app.process_partial_depth_snapshot(sym,row)
+
+                after=app.ensure_micro_state(sym)
+                seq=int(after.get("book_sequence_samples",0) or 0)
+                updates=int(after.get("book_updates",0) or 0)
+                last_id=int(after.get("last_book_update_id",0) or 0)
+                ofi_n=len(after.get("ofi") or [])
+                changed=(seq>before_seq or updates>before_upd or last_id>before_id)
+                if changed:
+                    ms=int(time.time()*1000)
+                    _ws_market_stats["last_depth_ms"]=ms
+                    tape.tape_stats["wsapi_last_depth_ms"]=ms
+                    _ws_market_stats["depth_ok"]+=1
+                print(
+                    f"Ψ-DEPTH-DIAG sym={sym} src={source} updateId={update_id} "
+                    f"levels={bid_n}/{ask_n} accepted={int(changed)} "
+                    f"seq={seq} updates={updates} ofi={ofi_n} lastId={last_id}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"Ψ-DEPTH-DIAG ERROR sym={sym} src={source} "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             print(f"Ψ-WSAPI MICRO-DEPTH ERROR {type(exc).__name__}: {exc}",flush=True)
+
 
 
 async def ws_api_micro_log_loop():
@@ -4431,14 +4466,26 @@ async def ws_api_micro_log_loop():
             selected=[s for s in list(getattr(app,"selected_micro_symbols",[]) or []) if s in universe_set]
             core=_micro_fallback_core_symbols()
             ready_n=0; seq_n=0; book_seq_n=0
+            core_diag=[]
             for sym in core:
                 try:
                     mm=app.micro_metrics(sym)
+                    st=app.ensure_micro_state(sym)
                 except Exception:
-                    mm={}
+                    mm={}; st={}
                 ready_n+=int(bool(mm.get("micro_ready")))
                 seq_n+=int(bool(mm.get("sequence_verified")))
                 book_seq_n+=int(bool(mm.get("book_sequence_verified")))
+                core_diag.append(
+                    (
+                        sym,
+                        int(st.get("trade_sequence_samples",0) or 0),
+                        int(st.get("book_sequence_samples",0) or 0),
+                        int(st.get("book_updates",0) or 0),
+                        len(st.get("ofi") or []),
+                        int(st.get("last_book_update_id",0) or 0),
+                    )
+                )
             now=time.time()
             book_age=(now*1000-f(_ws_market_stats.get("last_book_ms"),0))/1000.0 if f(_ws_market_stats.get("last_book_ms"),0)>0 else 999999.0
             trade_age=(now*1000-f(_ws_market_stats.get("last_trade_ms"),0))/1000.0 if f(_ws_market_stats.get("last_trade_ms"),0)>0 else 999999.0
@@ -4461,7 +4508,8 @@ async def ws_api_micro_log_loop():
                 f"restDepth={_micro_rest_stats['depth_ok']}/{_micro_rest_stats['depth_fail']} "
                 f"lastMicroErr={str(_micro_ws_stats.get('last_error') or '-')[:80]} "
                 f"lastTradeErr={str(_trade_ws_stats.get('last_error') or '-')[:80]} "
-                f"lastDepthErr={str(_depth_ws_stats.get('last_error') or '-')[:80]}",
+                f"lastDepthErr={str(_depth_ws_stats.get('last_error') or '-')[:80]} "
+                f"coreDiag={core_diag}",
                 flush=True,
             )
         except Exception as exc:
@@ -4709,7 +4757,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.78] Ψ DEDICATED DEPTH WS-API active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.79] Ψ SERIALIZED STRICT MICRO active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
