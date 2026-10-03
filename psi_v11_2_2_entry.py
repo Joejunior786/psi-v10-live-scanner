@@ -34,7 +34,8 @@ def _rest_status(symbol):
     row = ext_cache.get(symbol) or {}
     ts = f(row.get("ts"))
     feed_ts = f(getattr(v71, "mini_last_message_ts", 0.0))
-    connected = bool(getattr(v71, "radar_mini_connected", False))
+    source = str(getattr(v71, "mini_source", "NONE") or "NONE")
+    connected = bool(getattr(v71, "radar_mini_connected", False)) or source.startswith("REST_")
     feed_age = max(0.0, now - feed_ts) if feed_ts > 0 else None
     symbol_age = max(0.0, now - ts) if ts > 0 else None
 
@@ -53,6 +54,7 @@ def _rest_status(symbol):
         "ticker_age_seconds": round(symbol_age, 2) if symbol_age is not None else None,
         "feed_connected": status == "LIVE",
         "last_feed_symbol_count": int(getattr(v71, "mini_last_count", 0) or len(ext_cache)),
+        "source": source,
     }
 
 def sync_extension_from_ws():
@@ -109,7 +111,7 @@ def _inject_rest_extension(symbol, row):
             "extension_feed_age_seconds": status["feed_age_seconds"],
             "extension_feed_connected": True,
             "extension_feed_symbol_count": status["last_feed_symbol_count"],
-            "adaptive_telemetry_source": "BINANCE_PUBLIC_WS_MINITICKER_ALL",
+            "adaptive_telemetry_source": f"BINANCE_PUBLIC_{status.get('source','UNKNOWN')}",
         })
         row["change_24h_pct"] = round(change, 4)
     else:
@@ -119,7 +121,7 @@ def _inject_rest_extension(symbol, row):
             "extension_feed_age_seconds": status["feed_age_seconds"],
             "extension_feed_connected": False,
             "extension_feed_symbol_count": status["last_feed_symbol_count"],
-            "adaptive_telemetry_source": "BINANCE_PUBLIC_WS_MINITICKER_ALL",
+            "adaptive_telemetry_source": f"BINANCE_PUBLIC_{status.get('source','UNKNOWN')}",
         })
 
     row["extension_guard"] = ext
@@ -190,7 +192,7 @@ async def telemetry_health_loop():
             f"Ψ-V11.0.2.4 EXTENSION_SOURCE status={btc['status']} "
             f"cache={len(ext_cache)} feedAge={btc['feed_age_seconds']}s "
             f"btcAge={btc['ticker_age_seconds']}s ok={ext_refresh_ok} "
-            f"errors={ext_refresh_errors}",
+            f"errors={ext_refresh_errors} source={btc.get('source')}",
             flush=True,
         )
 
@@ -198,8 +200,8 @@ async def telemetry_health_loop():
 async def main():
     print(
         "[v11.0.2.4] Adaptive extension guard production source: "
-        "Binance public !miniTicker@arr WebSocket all-market feed; "
-        "miniTicker heartbeat >45s becomes UNKNOWN and blocks execution.",
+        "Binance public !miniTicker@arr WebSocket with verified REST 24h fallback; "
+        "feed heartbeat >45s becomes UNKNOWN and blocks execution.",
         flush=True,
     )
     await asyncio.gather(
