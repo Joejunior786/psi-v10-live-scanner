@@ -4,7 +4,7 @@ import aiohttp
 import psi_v11_3_6_entry as base
 
 app,q,scanner=base.app,base.q,base.scanner
-VERSION='11.0.3.9-event-tape-monster-radar'
+VERSION='11.0.3.10-event-tape-micro-trade-bridge'
 SHARDS=8
 WINDOW=35.0
 WS_HEARTBEAT=20.0
@@ -121,6 +121,16 @@ async def _shard_loop(idx):
                             if price>0 and qty>0:
                                 trade_events[sym].append((now,price,price*qty,not bool(d.get('m')),int(f(d.get('E')))))
                                 tape_stats['trades']+=1
+                                # Reuse this stable full-universe aggTrade feed
+                                # for the selected qualified micro pool. This is
+                                # the exact Binance aggTrade payload expected by
+                                # app.process_agg_trade(); no synthetic telemetry.
+                                if sym in set(getattr(app,'selected_micro_symbols',[]) or []):
+                                    try:
+                                        app.process_agg_trade(sym,d)
+                                        tape_stats['micro_trade_bridge']+=1
+                                    except Exception:
+                                        tape_stats['micro_trade_bridge_fail']+=1
                         elif stream.endswith('@bookTicker'):
                             bbo[sym]={'t':now,'bid':f(d.get('b')),'bq':f(d.get('B')),'ask':f(d.get('a')),'aq':f(d.get('A'))}
                             tape_stats['books']+=1

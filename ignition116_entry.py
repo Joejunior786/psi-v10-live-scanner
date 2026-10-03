@@ -17,7 +17,7 @@ q = scanner.q
 s = scanner.s
 app = scanner.app
 
-VERSION = "10.16.2-execution-micro-live-subscribe"
+VERSION = "10.16.3-depth-only-execution-shards"
 
 BOARD_SIZE = 10
 PRE_LANE_SLOTS = 3
@@ -474,10 +474,13 @@ async def _shard_loop(shard_id):
                 await asyncio.sleep(0.5)
                 continue
 
+            # AggTrade is bridged from the already-stable full-universe
+            # Monster tape. Qualified execution shards only carry depth20,
+            # cutting subscription count and websocket load roughly in half.
             streams = []
             for symbol in symbols:
                 lower = symbol.lower()
-                streams.extend([f"{lower}@aggTrade", f"{lower}@depth20@100ms"])
+                streams.append(f"{lower}@depth20@100ms")
 
             bases = []
             for raw in (
@@ -489,16 +492,12 @@ async def _shard_loop(shard_id):
                 if raw and raw not in bases:
                     bases.append(raw)
             base_url = bases[shard_host_cursor[shard_id] % len(bases)]
-            # Connect first, subscribe second. Binance documents this as an
-            # official alternative to putting every stream in the URL. It
-            # prevents a slow/invalid stream subscription from stalling the
-            # websocket HTTP upgrade itself.
-            url = f"{base_url}/stream"
+            url = f"{base_url}/stream?streams={'/'.join(streams)}"
 
             assert app.session is not None
             print(
-                f"Ψ-V10.16.2 SHARD{shard_id+1} connecting symbols={len(symbols)} "
-                f"gen={generation} host={base_url} mode=LIVE_SUBSCRIBE book=DEPTH20_WS",
+                f"Ψ-V10.16.3 SHARD{shard_id+1} connecting symbols={len(symbols)} "
+                f"gen={generation} host={base_url} mode=DEPTH_ONLY book=DEPTH20_WS",
                 flush=True,
             )
             async with app.session.ws_connect(
@@ -508,13 +507,6 @@ async def _shard_loop(shard_id):
                 max_msg_size=0,
                 timeout=EXEC_WS_CONNECT_TIMEOUT,
             ) as ws:
-                subscription_id = int(time.time() * 1000) % 2147483647 + shard_id
-                await ws.send_json({
-                    "method": "SUBSCRIBE",
-                    "params": streams,
-                    "id": subscription_id,
-                })
-
                 shard_connected[shard_id] = True
                 shard_last_host[shard_id] = base_url
                 shard_last_msg_ms[shard_id] = int(time.time() * 1000)
@@ -529,15 +521,12 @@ async def _shard_loop(shard_id):
                     st["book_sequence_samples"] = 0
                     st["book_resyncing"] = False
                     st["last_book_update_id"] = None
-                    # A websocket reconnect establishes a new observation
-                    # sequence. Reset trade sequencing so one replayed/duplicate
-                    # first frame cannot poison TRADE_SEQUENCE_VALID forever.
-                    st["last_agg_id"] = None
-                    st["trade_sequence_ok"] = True
-                    st["trade_sequence_samples"] = 0
+                    # Trade sequencing is now supplied continuously by the
+                    # full-universe Monster aggTrade bridge, so a depth-shard
+                    # reconnect must not reset or interrupt trade continuity.
 
                 print(
-                    f"Ψ-V10.16.2 SHARD{shard_id+1} connected+subscribed symbols={len(symbols)} "
+                    f"Ψ-V10.16.3 SHARD{shard_id+1} connected symbols={len(symbols)} "
                     f"host={base_url} book=REST_FREE_DEPTH20",
                     flush=True,
                 )
@@ -557,18 +546,6 @@ async def _shard_loop(shard_id):
                             payload = json.loads(message.data)
                         except json.JSONDecodeError:
                             continue
-                        # SUBSCRIBE acknowledgement has no stream wrapper.
-                        if payload.get("id") == subscription_id and "result" in payload:
-                            print(
-                                f"Ψ-V10.16.2 SHARD{shard_id+1} subscription_ack "
-                                f"host={base_url} streams={len(streams)} result={payload.get('result')}",
-                                flush=True,
-                            )
-                            continue
-                        if payload.get("code") is not None:
-                            raise RuntimeError(
-                                f"subscription_error code={payload.get('code')} msg={payload.get('msg')}"
-                            )
                         stream_name = payload.get("stream", "")
                         data = payload.get("data", {})
                         if not stream_name or not isinstance(data, dict):
@@ -681,7 +658,7 @@ async def _v1016_board_loop():
                 for ts in shard_last_msg_ms
             ]
             print(
-                f"Ψ-V10.16.2 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
+                f"Ψ-V10.16.3 SHARDS sizes={[len(x) for x in shard_current_symbols]} "
                 f"connected={sum(1 for x in shard_connected if x)}/{MICRO_SHARDS} "
                 f"reconnects={shard_reconnects} generations={shard_generation} "
                 f"hosts={shard_last_host} msgAgeMs={ages}",
