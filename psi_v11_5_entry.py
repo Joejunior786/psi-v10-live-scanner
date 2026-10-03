@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.38-reliable-ws-riskmap-final"
+VERSION="11.0.5.39-riskmap-diagnostics-cleanup-final"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -986,7 +986,21 @@ async def _risk_fetch_race(client, symbol, interval, limit):
             if g: global_gate.release()
             if r: _rest_risk_kline_gate.release()
 
-    tasks=[asyncio.create_task(one(host)) for host in ordered]
+    def _consume_child_result(task):
+        # Retrieve terminal exceptions from raced/cancelled aiohttp children so
+        # asyncio does not emit "Task exception was never retrieved" noise.
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
+    tasks=[]
+    for host in ordered:
+        task=asyncio.create_task(one(host))
+        task.add_done_callback(_consume_child_result)
+        tasks.append(task)
     try:
         try:
             for fut in asyncio.as_completed(tasks,timeout=3.0):
@@ -2585,6 +2599,21 @@ async def watchdog_loop():
             continuity_ok=(startup_age<=WATCHDOG_STARTUP_GRACE_S or pool>0)
             shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
             healthy=ext_live and structure_ready and rest_recent_ok and continuity_ok and shard_ok
+
+            # RiskMap diagnostics: report actual live map/cache state. The old
+            # "riskCache" field was only a cache-hit counter and could show 0
+            # while valid RiskMap plans already existed.
+            _risk_map_cache=getattr(move_engine.riskmap,"risk_cache",{}) or {}
+            _risk_map_max_age=float(getattr(move_engine.riskmap,"SUPPORT_MAX_AGE",120.0) or 120.0)
+            _risk_map_fresh=[
+                ri for ri in _risk_map_cache.values()
+                if isinstance(ri,dict) and now-f(ri.get("updated"))<=_risk_map_max_age
+            ]
+            _risk_map_tracked=len(_risk_map_fresh)
+            _risk_map_plans=sum(
+                f(ri.get("entry_trigger"))>0 and f(ri.get("stop_loss"))>0
+                for ri in _risk_map_fresh
+            )
             if healthy: watchdog_stats["healthy"]+=1
             else: watchdog_stats["degraded"]+=1
             status="HEALTHY" if healthy else "RECOVERING"
@@ -2593,7 +2622,7 @@ async def watchdog_loop():
                 f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wsRisk={_ws_api_stats['risk_ok']} riskCache={_risk_tf_stats['cache_hit']} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )
@@ -2609,7 +2638,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.38] Ψ RELIABLE WS-FIRST RISKMAP + INTEGRITY SYNC active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap now uses one realistically timed WS-API request first with a short queue deadline, a hard two-host Binance REST fallback, one-symbol scheduling, a bounded per-symbol candle budget, and no outer wait_for cancellation.",flush=True)
+    print("[v11.0.5.39] Ψ RELIABLE RISKMAP + CLEAN DIAGNOSTICS active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap uses one realistically timed WS-API request first with a short queue deadline, a hard two-host Binance REST fallback, one-symbol scheduling, a bounded per-symbol candle budget, no outer wait_for cancellation, drained child-task exceptions, and explicit live-plan diagnostics.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
