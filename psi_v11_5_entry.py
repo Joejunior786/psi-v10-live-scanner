@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.23-breakout-structural-intelligence"
+VERSION="11.0.5.24-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -393,12 +393,13 @@ def _structure_symbol_gate(symbol):
     return gate
 
 STRUCTURE_RACE_HOSTS = [
+    "https://data-api.binance.vision",
+    "https://api-gcp.binance.com",
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
     "https://api4.binance.com",
-    "https://data-api.binance.vision",
 ]
 
 async def _structure_fetch_race(client, symbol, interval, limit):
@@ -406,7 +407,21 @@ async def _structure_fetch_race(client, symbol, interval, limit):
     route_key=f"structure_klines:{symbol}"
     hosts=list(STRUCTURE_RACE_HOSTS)
     preferred=_rest_good_host.get(route_key)
-    if preferred in hosts:
+    small_15m = interval=="15m" and limit<=10
+    if small_15m:
+        # Small 15m rollovers are the most time-sensitive structure request.
+        # Keep a deterministic market-data-first order rather than rotating by symbol.
+        priority=[
+            "https://data-api.binance.vision",
+            "https://api-gcp.binance.com",
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+        ]
+        hosts=priority+[h for h in hosts if h not in priority]
+        if preferred in hosts:
+            hosts=[preferred]+[h for h in hosts if h!=preferred]
+    elif preferred in hosts:
         hosts=[preferred]+[h for h in hosts if h!=preferred]
     elif symbol:
         offset=sum(ord(ch) for ch in symbol)%len(hosts)
@@ -1274,6 +1289,17 @@ async def cold_seed_loop():
                 continue
 
             scope=_recovery_scope()
+
+            fast_pending=[
+                s for s in scope
+                if _raw_seed_count(s)>=3
+                and _structure_age_recovery(s)>RECOVERY_STALE_S
+                and _recovery_retry_after.get(s,0)<=now
+                and s not in _recovery_inflight
+            ]
+            if fast_pending:
+                continue
+
             candidates=[
                 s for s in scope
                 if _raw_seed_count(s)<3
