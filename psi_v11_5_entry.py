@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.10-breakout-structural-intelligence"
+VERSION="11.0.5.11-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -40,9 +40,9 @@ _rest_last_fail = 0.0
 def _rest_gates(path):
     global _rest_global_gate, _rest_kline_gate, _rest_risk_kline_gate, _rest_bg_kline_gate, _rest_depth_gate
     if _rest_global_gate is None:
-        _rest_global_gate = asyncio.Semaphore(8)
+        _rest_global_gate = asyncio.Semaphore(12)
     if _rest_kline_gate is None:
-        _rest_kline_gate = asyncio.Semaphore(6)
+        _rest_kline_gate = asyncio.Semaphore(9)
     if _rest_risk_kline_gate is None:
         _rest_risk_kline_gate = asyncio.Semaphore(2)
     if _rest_bg_kline_gate is None:
@@ -73,7 +73,7 @@ async def resilient_api_get(client, path, params=None):
     route_key = "structure_klines" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane))
 
     if lane=="klines":
-        timeout_s,max_hosts=(9.5,3) if is_structure else ((6.5,3) if is_risk else (5.5,3))
+        timeout_s,max_hosts=(6.5,5) if is_structure else ((6.5,3) if is_risk else (5.5,3))
     elif lane=="depth":
         timeout_s,max_hosts=3.5,2
     elif lane=="ticker24":
@@ -175,7 +175,7 @@ async def resilient_api_get(client, path, params=None):
             app.rest_connected=True
             app.last_error=None
             if not _rest_route_printed:
-                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=8 klines=6(structure=3+risk=2+background=1) depth=1 keepalive=ON",flush=True)
+                print(f"Ψ-REST ROUTE active={host} hosts={len(REST_BASES)} global=12 klines=9(structure<=6+risk=2+background=1) depth=1 keepalive=ON",flush=True)
                 _rest_route_printed=True
             return payload
 
@@ -578,13 +578,13 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 1
+RECOVERY_BATCH = 2
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
-RECOVERY_FAIL_COOLDOWN_S = 45.0
-RECOVERY_CYCLE_SLEEP_S = 2.0
+RECOVERY_FAIL_COOLDOWN_S = 30.0
+RECOVERY_CYCLE_SLEEP_S = 1.5
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
 _structure_cache_dirty = False
@@ -754,7 +754,7 @@ async def _hydrate_one(sym):
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=34.0)
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=42.0)
         finally:
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
@@ -805,12 +805,15 @@ async def structure_recovery_loop():
 
         if targets:
             batch=targets[:RECOVERY_BATCH]
-            await asyncio.gather(*[_hydrate_one(s) for s in batch])
+            batch_started=time.time()
+            results=await asyncio.gather(*[_hydrate_one(s) for s in batch])
+            batch_s=time.time()-batch_started
             fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
             ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
             print(
                 f"Ψ-RECOVERY BATCH fresh={fresh}/{total} ever={ever}/{total} "
-                f"batch={len(batch)} ok={recovery_stats['ok']} fail={recovery_stats['fail']}",
+                f"batch={len(batch)} batchOK={sum(bool(x) for x in results)} batchFail={sum(not bool(x) for x in results)} "
+                f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']}",
                 flush=True,
             )
 
