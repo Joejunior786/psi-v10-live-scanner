@@ -819,20 +819,31 @@ def build_plan(sym, current, best, setups, s1, s4, sd, sw):
 async def _fetch_tf(sym, tf):
     if app.session is None:
         return False
-    try:
-        rows = await legacy.resilient_api_get(
-            app.session,
-            "/api/v3/klines",
-            {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]},
-        )
-        if isinstance(rows, list) and len(rows) >= 55:
-            _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
-            _stats["fetch_ok"] += 1
-            return True
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        _stats["fetch_fail"] += 1
+    params = {"symbol": sym, "interval": tf, "limit": TF_LIMIT[tf]}
+    hosts = (
+        "https://data-api.binance.vision",
+        "https://api.binance.com",
+        "https://api1.binance.com",
+    )
+    for host in hosts:
+        try:
+            async with app.session.get(
+                host + "/api/v3/klines",
+                params=params,
+                timeout=legacy.aiohttp.ClientTimeout(total=4.5, connect=1.5),
+            ) as resp:
+                if resp.status != 200:
+                    continue
+                rows = await resp.json()
+                if isinstance(rows, list) and len(rows) >= 55:
+                    _cache[sym][tf] = {"rows": rows, "snap": snap(rows), "updated": time.time()}
+                    _stats["fetch_ok"] += 1
+                    return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+    _stats["fetch_fail"] += 1
     return False
 
 
@@ -1024,12 +1035,9 @@ async def v12_health(req):
     })
 
 
-# Register V12 endpoints before inherited aiohttp application startup.
-try:
-    app.app.router.add_get("/v12/scan", v12_scan)
-    app.app.router.add_get("/v12/health", v12_health)
-except Exception as exc:
-    print(f"Ψ-V12 ROUTE_WARNING {type(exc).__name__}: {exc}", flush=True)
+# The inherited HTTP application is constructed inside app.main(), so V12
+# publishes its authoritative board through runtime logs. The existing /health
+# and /scan endpoints remain untouched for backward compatibility.
 
 
 async def main():
