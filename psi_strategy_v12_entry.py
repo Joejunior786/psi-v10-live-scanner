@@ -12,7 +12,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.4-two-tier-hydration"
+VERSION = "12.0.5-serialized-ws-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -44,9 +44,9 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(6, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "12")), 16))
+FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 8))
 MAX_INFLIGHT_SYMBOLS = max(24, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "48")), 80))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(8, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "24")), 48))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(6, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "12")), 24))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -79,7 +79,7 @@ _stats = defaultdict(int)
 # prevents legacy recovery/structure traffic from starving the new strategy
 # engines and avoids dependence on Railway REST routing.
 V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
-V12_WS_SHARDS = max(2, min(int(os.getenv("PSI_V12_WS_SHARDS", "4")), 6))
+V12_WS_SHARDS = max(4, min(int(os.getenv("PSI_V12_WS_SHARDS", "6")), 8))
 _v12_ws_conns = [None] * V12_WS_SHARDS
 _v12_ws_ready = [None] * V12_WS_SHARDS
 _v12_ws_locks = [None] * V12_WS_SHARDS
@@ -853,7 +853,7 @@ def _v12_ws_primitives(shard):
         # Two in-flight requests per physical socket is intentionally modest.
         # Aggregate throughput comes from independent sockets, not one flooded
         # connection.
-        _v12_ws_gates[shard] = asyncio.Semaphore(3)
+        _v12_ws_gates[shard] = asyncio.Semaphore(1)
     return _v12_ws_ready[shard], _v12_ws_locks[shard], _v12_ws_gates[shard]
 
 
@@ -932,7 +932,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
     acquired = False
     rid = None
     try:
-        await asyncio.wait_for(gate.acquire(), timeout=4.0)
+        await asyncio.wait_for(gate.acquire(), timeout=2.0)
         acquired = True
         loop = asyncio.get_running_loop()
 
@@ -958,7 +958,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
             )
             _stats["ws_requests"] += 1
 
-        payload = await asyncio.wait_for(fut, timeout=8.0)
+        payload = await asyncio.wait_for(fut, timeout=12.0)
         status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
         rows = payload.get("result") if isinstance(payload, dict) else None
         if status == 200 and isinstance(rows, list) and rows:
@@ -990,27 +990,19 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
-    rows = None
     preferred = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
 
-    # Stable shard first, adjacent shard as failover.
-    for attempt in range(2):
-        shard = (preferred + attempt) % V12_WS_SHARDS
-        rows = await v12_ws_klines(sym, tf, limit, shard=shard)
-        if isinstance(rows, list) and len(rows) >= 55:
-            _stats["fetch_ws_ok"] += 1
-            break
-        rows = None
-        if attempt == 0:
-            await asyncio.sleep(0.05)
+    # One request per socket. Do not immediately double-load Binance with a
+    # second historical request after a timeout; the fair scheduler retries the
+    # symbol on a later cycle.
+    rows = await v12_ws_klines(sym, tf, limit, shard=preferred)
 
     if isinstance(rows, list) and len(rows) >= 55:
+        _stats["fetch_ws_ok"] += 1
         snapshot = snap(rows)
         if snapshot is not None:
             current = _cache.get(sym, {}).get(tf) or {}
             current_rows = current.get("rows") or []
-            # Never let a smaller fast refresh overwrite an existing deep
-            # EMA200-capable cache.
             if deep or len(current_rows) < DEEP_MIN_ROWS:
                 _cache[sym][tf] = {
                     "rows": rows,
@@ -1050,7 +1042,7 @@ async def refresh_symbol(sym, sem, active=False):
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 24.0 if deep else 16.0
+                timeout = 16.0 if deep else 15.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1398,7 +1390,7 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     print(
-        "[v12.0.4] MULTI-SETUP AUTHORITY + TWO-TIER FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.5] MULTI-SETUP AUTHORITY + SERIALIZED SHARDED HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
