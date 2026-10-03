@@ -329,7 +329,13 @@ async def support_loop():
             except Exception:
                 pass
             if len(syms)<SUPPORT_MAX_SYMBOLS:
-                for sym in base.candidate_symbols(SUPPORT_MAX_SYMBOLS*2):
+                for sym in base.candidate_symbols(SUPPORT_MAX_SYMBOLS*3):
+                    sym=str(sym or "")
+                    # Cold-start fallback is scheduler-only, not a universe
+                    # filter. Non-ASCII markets remain eligible through the
+                    # formal priority provider once they become real setups.
+                    if not sym.isascii():
+                        continue
                     if sym not in seen:
                         syms.append(sym);seen.add(sym)
                     if len(syms)>=SUPPORT_MAX_SYMBOLS: break
