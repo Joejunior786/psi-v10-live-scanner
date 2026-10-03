@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.11-single-bounded-fast-ws"
+VERSION = "12.1.12-fast-no-outer-timeout"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1564,8 +1564,14 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 14.0 if deep else 5.2
-                return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
+                # FAST uses only the isolated V12 WS, whose ready/gate/lock/
+                # send/response stages are all independently bounded. Do not
+                # wrap it in a second timeout that can cancel a healthy request
+                # while it is finishing. DEEP still has fallback transports,
+                # so retain the 14-second outer safety budget there.
+                if not deep:
+                    return await _fetch_tf(sym, tf, deep=False)
+                return await asyncio.wait_for(_fetch_tf(sym, tf, deep=True), timeout=14.0)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
@@ -2116,7 +2122,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.11] MULTI-SETUP AUTHORITY + SINGLE-BOUNDED FAST WS active — legacy BUY/PRE authority disabled; "
+        "[v12.1.12] MULTI-SETUP AUTHORITY + FAST INTERNAL-TIMEOUTS ONLY active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
