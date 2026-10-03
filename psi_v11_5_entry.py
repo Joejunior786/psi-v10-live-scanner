@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.68-batched-discovery-triple-mesh"
+VERSION="11.0.5.69-anchored-discovery-triple-mesh"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -3598,16 +3598,27 @@ async def ws_api_discovery_fallback_loop():
                 continue
             universe_set=set(universe)
             nuni=len(universe)
-            if cursor>=nuni:
-                cursor=0
 
-            start_idx=cursor
-            end_idx=min(nuni,start_idx+100)
-            batch=universe[start_idx:end_idx]
-            cursor=end_idx
-            if cursor>=nuni:
+            # Keep benchmark/extension anchors fresh on every batch while the
+            # remaining slots rotate fairly through the entire universe.
+            anchors=[s for s in ("BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT") if s in universe_set]
+            anchor_set=set(anchors)
+            rotating=[s for s in universe if s not in anchor_set]
+            nrot=len(rotating)
+            if nrot<=0:
+                batch=list(anchors)
                 cursor=0
                 rounds+=1
+            else:
+                if cursor>=nrot:
+                    cursor=0
+                start_idx=cursor
+                end_idx=min(nrot,start_idx+max(1,100-len(anchors)))
+                batch=anchors+rotating[start_idx:end_idx]
+                cursor=end_idx
+                if cursor>=nrot:
+                    cursor=0
+                    rounds+=1
 
             rows=await market_ws_api_request(
                 "ticker.24hr",
@@ -4093,7 +4104,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.68] Ψ BATCHED DISCOVERY TRIPLE WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.69] Ψ ANCHORED DISCOVERY TRIPLE WS-API FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
