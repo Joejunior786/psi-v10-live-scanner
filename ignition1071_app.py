@@ -178,8 +178,6 @@ async def ticker_loop():
         await asyncio.sleep(1)
 
 
-def _mini_ingest
-
 def _mini_ingest(payload, source):
     global mini_last_message_ts,mini_last_count,mini_source
     if not isinstance(payload,list):
