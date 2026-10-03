@@ -45,8 +45,8 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(3, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 4))
-MAX_INFLIGHT_SYMBOLS = max(6, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "12")), 20))
+FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 6))
+MAX_INFLIGHT_SYMBOLS = max(10, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "18")), 24))
 BOOTSTRAP_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "8")), 12))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
@@ -1463,8 +1463,6 @@ async def _fetch_tf(sym, tf, deep=False):
                 rows = await v12_rest_klines(sym, tf, limit)
             else:
                 rows = await _v12_fast_rest_klines(sym, tf, limit)
-                if not isinstance(rows, list) or len(rows) < 55:
-                    rows = await v12_rest_klines(sym, tf, limit)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1935,7 +1933,7 @@ async def strategy_loop():
                 f"fetchTO={_stats.get('fetch_timeout',0)} legacyWS={_stats.get('legacy_ws_ok',0)}/"
                 f"{_stats.get('legacy_ws_miss',0)} legacyGateOK={getattr(legacy,'_ws_api_stats',{}).get('ok',0)} "
                 f"legacyGateTO={getattr(legacy,'_ws_api_stats',{}).get('timeouts',0)} "
-                f"legacyGateDefer={getattr(legacy,'_ws_api_stats',{}).get('defer',0)}",
+                f"legacyGateDefer={getattr(legacy,'_ws_api_stats',{}).get('defer',0)} legacyGateCap=6",
                 flush=True,
             )
 
@@ -2045,8 +2043,13 @@ async def main():
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     loaded = await asyncio.to_thread(_load_cache_sync)
     print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
+    # The production WS-API loader defaults to a conservative 3-slot gate.
+    # V12 full-universe hydration and the legacy recovery lane now share a
+    # six-slot cap—still bounded, but enough to prevent harmless V12 work from
+    # repeatedly deferring behind legacy structure requests.
+    legacy._ws_api_gate = asyncio.Semaphore(6)
     print(
-        "[v12.1.1] MULTI-SETUP AUTHORITY + PHASED HYDRATION ON PROVEN WS TRANSPORT active — legacy BUY/PRE authority disabled; "
+        "[v12.1.2] MULTI-SETUP AUTHORITY + PROVEN-TRANSPORT THROUGHPUT active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
