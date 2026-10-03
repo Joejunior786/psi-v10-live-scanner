@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import pickle
 import statistics
 import time
 from collections import defaultdict
@@ -12,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.6-partial-first-hydration"
+VERSION = "12.0.7-persistent-full-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -44,9 +45,9 @@ ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
 ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 8))
-MAX_INFLIGHT_SYMBOLS = max(12, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "24")), 48))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(6, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "12")), 24))
+FETCH_CONCURRENCY = max(6, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "8")), 8))
+MAX_INFLIGHT_SYMBOLS = max(16, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "32")), 48))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(8, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "16")), 24))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
@@ -55,7 +56,7 @@ MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20"))
 #   compression, pullback and rejection logic.
 # - DEEP packet adds EMA/SMA200 authority. Active candidates get DEEP first;
 #   the rest of the universe is backfilled after fast coverage.
-FAST_TF_LIMIT = 96
+FAST_TF_LIMIT = 64
 DEEP_TF_LIMIT = 210
 DEEP_MIN_ROWS = 202
 TF_LIMIT = {"1h": FAST_TF_LIMIT, "4h": FAST_TF_LIMIT, "1d": FAST_TF_LIMIT, "1w": FAST_TF_LIMIT}
@@ -79,13 +80,120 @@ _stats = defaultdict(int)
 # prevents legacy recovery/structure traffic from starving the new strategy
 # engines and avoids dependence on Railway REST routing.
 V12_WS_API_URL = os.getenv("PSI_V12_WS_API_URL", "wss://ws-api.binance.com:443/ws-api/v3")
-V12_WS_SHARDS = max(4, min(int(os.getenv("PSI_V12_WS_SHARDS", "6")), 8))
+V12_WS_SHARDS = max(4, min(int(os.getenv("PSI_V12_WS_SHARDS", "8")), 8))
 _v12_ws_conns = [None] * V12_WS_SHARDS
 _v12_ws_ready = [None] * V12_WS_SHARDS
 _v12_ws_locks = [None] * V12_WS_SHARDS
 _v12_ws_gates = [None] * V12_WS_SHARDS
 _v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
 _v12_ws_ids = [0] * V12_WS_SHARDS
+
+V12_CACHE_PATH = os.getenv("PSI_V12_CACHE_PATH", "/data/v12_hydration_cache.pkl")
+V12_CACHE_SAVE_SECONDS = max(30.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "60")))
+_last_cache_save = 0.0
+_last_cache_ready = -1
+
+
+def _cache_snapshot_for_disk():
+    payload = {}
+    for sym, tfmap in _cache.items():
+        saved = {}
+        for tf, item in (tfmap or {}).items():
+            rows = item.get("rows") or []
+            if not rows:
+                continue
+            saved[tf] = {
+                "rows": rows,
+                "updated": f(item.get("updated")),
+                "depth": item.get("depth") or ("DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST"),
+            }
+        if saved:
+            payload[sym] = saved
+    return {"version": VERSION, "saved_at": time.time(), "cache": payload}
+
+
+def _save_cache_sync():
+    global _last_cache_save
+    try:
+        directory = os.path.dirname(V12_CACHE_PATH) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = V12_CACHE_PATH + ".tmp"
+        with open(tmp, "wb") as fh:
+            pickle.dump(_cache_snapshot_for_disk(), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, V12_CACHE_PATH)
+        _last_cache_save = time.time()
+        return True
+    except Exception as exc:
+        _stats["cache_save_fail"] += 1
+        _stats["cache_last_error"] = f"{type(exc).__name__}: {exc}"
+        return False
+
+
+def _load_cache_sync():
+    try:
+        if not os.path.exists(V12_CACHE_PATH):
+            return 0
+        with open(V12_CACHE_PATH, "rb") as fh:
+            payload = pickle.load(fh)
+        raw = payload.get("cache") if isinstance(payload, dict) else None
+        if not isinstance(raw, dict):
+            return 0
+
+        loaded = 0
+        now = time.time()
+        for sym, tfmap in raw.items():
+            if not isinstance(tfmap, dict):
+                continue
+            for tf, item in tfmap.items():
+                if tf not in ("1h", "4h", "1d", "1w") or not isinstance(item, dict):
+                    continue
+                rows = item.get("rows") or []
+                updated = f(item.get("updated"))
+                if not isinstance(rows, list) or len(rows) < 55:
+                    continue
+                # Keep only cache entries still meaningful for their structural TTL.
+                max_age = TF_TTL.get(tf, 0.0)
+                if updated <= 0 or now - updated > max_age:
+                    continue
+                snapshot = snap(rows)
+                if snapshot is None:
+                    continue
+                _cache[sym][tf] = {
+                    "rows": rows,
+                    "snap": snapshot,
+                    "updated": updated,
+                    "depth": item.get("depth") or ("DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST"),
+                }
+                loaded += 1
+        _stats["cache_loaded_items"] = loaded
+        return loaded
+    except Exception as exc:
+        _stats["cache_load_fail"] += 1
+        _stats["cache_last_error"] = f"{type(exc).__name__}: {exc}"
+        return 0
+
+
+async def cache_persist_loop():
+    global _last_cache_ready
+    while True:
+        await asyncio.sleep(V12_CACHE_SAVE_SECONDS)
+        try:
+            universe = list(getattr(q, "universe", []) or [])
+            ready = sum(
+                all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+                for s in universe
+            )
+            # Save when coverage changed or the periodic interval elapsed.
+            if ready != _last_cache_ready or time.time() - _last_cache_save >= V12_CACHE_SAVE_SECONDS:
+                ok = await asyncio.to_thread(_save_cache_sync)
+                if ok:
+                    _last_cache_ready = ready
+                    _stats["cache_saves"] += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _stats["cache_save_fail"] += 1
+            _stats["cache_last_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def f(v, d=0.0):
@@ -917,7 +1025,7 @@ async def v12_ws_rpc_loop(shard):
         await asyncio.sleep(0.75)
 
 
-async def v12_ws_klines(symbol, interval, limit, shard=None):
+async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.0):
     if shard is None:
         shard = (sum(ord(ch) for ch in str(symbol)) + sum(ord(ch) for ch in str(interval))) % V12_WS_SHARDS
     shard = int(shard) % V12_WS_SHARDS
@@ -958,7 +1066,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
             )
             _stats["ws_requests"] += 1
 
-        payload = await asyncio.wait_for(fut, timeout=12.0)
+        payload = await asyncio.wait_for(fut, timeout=response_timeout)
         status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
         rows = payload.get("result") if isinstance(payload, dict) else None
         if status == 200 and isinstance(rows, list) and rows:
@@ -990,12 +1098,30 @@ async def _fetch_tf(sym, tf, deep=False):
         return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
-    preferred = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
+    base_shard = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % V12_WS_SHARDS
 
-    # One request per socket. Do not immediately double-load Binance with a
-    # second historical request after a timeout; the fair scheduler retries the
-    # symbol on a later cycle.
-    rows = await v12_ws_klines(sym, tf, limit, shard=preferred)
+    # Prefer the deterministic shard first, then fail over to a different
+    # physical socket. This prevents a single slow shard from pinning one
+    # symbol/timeframe for an entire hydration cycle.
+    shard_order = [base_shard]
+    others = [i for i in range(V12_WS_SHARDS) if i != base_shard]
+    others.sort(key=lambda i: len(_v12_ws_pending[i]))
+    shard_order.extend(others[:2])
+
+    rows = None
+    attempts = 0
+    for shard in shard_order:
+        attempts += 1
+        timeout = 6.0 if deep else 4.5
+        rows = await v12_ws_klines(sym, tf, limit, shard=shard, response_timeout=timeout)
+        if isinstance(rows, list) and len(rows) >= 55:
+            if shard != base_shard:
+                _stats["ws_failover_ok"] += 1
+            break
+        rows = None
+        if attempts >= 2:
+            break
+        await asyncio.sleep(0.05)
 
     if isinstance(rows, list) and len(rows) >= 55:
         _stats["fetch_ws_ok"] += 1
@@ -1025,41 +1151,57 @@ async def _fetch_tf(sym, tf, deep=False):
     return False
 
 
-async def refresh_symbol(sym, sem, active=False):
+async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=False, weekly_deep=False):
     now = time.time()
     ttl = ACTIVE_TF_TTL if active else TF_TTL
-    core_tfs = ("1h", "4h", "1d")
-    core_stale = []
-
-    for tf in core_tfs:
-        item = _cache.get(sym, {}).get(tf) or {}
-        rows = item.get("rows") or []
-        needs_deep = active and len(rows) < DEEP_MIN_ROWS
-        stale = now - f(item.get("updated")) > ttl[tf]
-        if not item.get("snap") or stale or needs_deep:
-            core_stale.append(tf)
 
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 16.0 if deep else 15.0
+                timeout = 14.0 if deep else 11.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
 
-    if core_stale:
-        # Broad universe uses fast packets; active candidates get full EMA200
-        # depth immediately.
-        await asyncio.gather(*(one(tf, deep=active) for tf in core_stale), return_exceptions=True)
+    if weekly_only:
+        weekly = _cache.get(sym, {}).get("1w") or {}
+        rows = weekly.get("rows") or []
+        if weekly_deep and len(rows) >= DEEP_MIN_ROWS:
+            return
+        if not weekly_deep and weekly.get("snap") and now - f(weekly.get("updated")) <= ttl["1w"]:
+            return
+        await one("1w", deep=weekly_deep)
         return
 
-    weekly = _cache.get(sym, {}).get("1w") or {}
-    weekly_rows = weekly.get("rows") or []
-    weekly_needs_deep = active and len(weekly_rows) < DEEP_MIN_ROWS
-    weekly_stale = now - f(weekly.get("updated")) > ttl["1w"]
-    if not weekly.get("snap") or weekly_stale or weekly_needs_deep:
-        await one("1w", deep=active)
+    core_tfs = ("1h", "4h", "1d")
+    needed = []
+    for tf in core_tfs:
+        item = _cache.get(sym, {}).get(tf) or {}
+        rows = item.get("rows") or []
+        if force_deep:
+            if len(rows) < DEEP_MIN_ROWS:
+                needed.append(tf)
+        else:
+            needs_deep = active and len(rows) < DEEP_MIN_ROWS
+            stale = now - f(item.get("updated")) > ttl[tf]
+            if not item.get("snap") or stale or needs_deep:
+                needed.append(tf)
+
+    if needed:
+        await asyncio.gather(
+            *(one(tf, deep=(force_deep or active)) for tf in needed),
+            return_exceptions=True,
+        )
+        return
+
+    if active:
+        weekly = _cache.get(sym, {}).get("1w") or {}
+        weekly_rows = weekly.get("rows") or []
+        weekly_needs_deep = len(weekly_rows) < DEEP_MIN_ROWS
+        weekly_stale = now - f(weekly.get("updated")) > ttl["1w"]
+        if not weekly.get("snap") or weekly_stale or weekly_needs_deep:
+            await one("1w", deep=True)
 
 
 def _priority_symbols(universe):
@@ -1161,6 +1303,44 @@ def _bootstrap_symbols(universe, refresh_tasks):
                 out.append(sym)
                 chosen.add(sym)
 
+    return out
+
+
+
+def _deep_backfill_symbols(universe, refresh_tasks, limit=2):
+    out = []
+    for sym in universe:
+        if sym in refresh_tasks:
+            continue
+        c = _cache.get(sym) or {}
+        core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+        core_deep = all(len(((c.get(tf) or {}).get("rows") or [])) >= DEEP_MIN_ROWS for tf in ("1h", "4h", "1d"))
+        if core_ready and not core_deep:
+            out.append(sym)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _weekly_backfill_symbols(universe, refresh_tasks, limit=2, deep=False):
+    out = []
+    for sym in universe:
+        if sym in refresh_tasks:
+            continue
+        c = _cache.get(sym) or {}
+        core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+        if not core_ready:
+            continue
+        weekly = c.get("1w") or {}
+        rows = weekly.get("rows") or []
+        if deep:
+            needed = len(rows) < DEEP_MIN_ROWS
+        else:
+            needed = not weekly.get("snap")
+        if needed:
+            out.append(sym)
+            if len(out) >= limit:
+                break
     return out
 
 
@@ -1282,6 +1462,38 @@ async def strategy_loop():
                 if sym not in refresh_tasks:
                     refresh_tasks[sym] = asyncio.create_task(refresh_symbol(sym, sem, active=False))
 
+            # Do not leave Weekly and EMA200 at zero until fast coverage reaches
+            # 403/403. Reserve a small background budget for each from the
+            # beginning, while most capacity continues broad core hydration.
+            weekly_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=2, deep=False)
+            for sym in weekly_jobs:
+                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                    break
+                if sym not in refresh_tasks:
+                    refresh_tasks[sym] = asyncio.create_task(
+                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=False)
+                    )
+
+            deep_jobs = _deep_backfill_symbols(universe, refresh_tasks, limit=2)
+            for sym in deep_jobs:
+                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                    break
+                if sym not in refresh_tasks:
+                    refresh_tasks[sym] = asyncio.create_task(
+                        refresh_symbol(sym, sem, force_deep=True)
+                    )
+
+            # Once a Weekly fast packet exists, progressively upgrade it to
+            # Weekly EMA/SMA200 depth as spare capacity becomes available.
+            weekly_deep_jobs = _weekly_backfill_symbols(universe, refresh_tasks, limit=1, deep=True)
+            for sym in weekly_deep_jobs:
+                if len(refresh_tasks) >= MAX_INFLIGHT_SYMBOLS:
+                    break
+                if sym not in refresh_tasks:
+                    refresh_tasks[sym] = asyncio.create_task(
+                        refresh_symbol(sym, sem, weekly_only=True, weekly_deep=True)
+                    )
+
             await asyncio.sleep(0.25)
 
             ready_now = sum(
@@ -1303,6 +1515,7 @@ async def strategy_loop():
 
             print(
                 f"Ψ-V12 REFRESH cycle={_cycle + 1} active={len(active)} bootstrap={len(bootstrap)} "
+                f"deepJobs={len(deep_jobs)} weeklyJobs={len(weekly_jobs)} weeklyDeepJobs={len(weekly_deep_jobs)} "
                 f"mtfReady={ready_now}/{len(universe)} deepMAReady={deep_ready}/{len(universe)} "
                 f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
@@ -1420,8 +1633,10 @@ async def main():
         except Exception:
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
+    loaded = await asyncio.to_thread(_load_cache_sync)
+    print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
     print(
-        "[v12.0.6] MULTI-SETUP AUTHORITY + PARTIAL-FIRST HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.7] MULTI-SETUP AUTHORITY + PERSISTENT FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
@@ -1430,7 +1645,7 @@ async def main():
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
-    await asyncio.gather(legacy.main(), strategy_loop(), *(v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)))
+    await asyncio.gather(legacy.main(), strategy_loop(), cache_persist_loop(), *(v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)))
 
 
 if __name__ == "__main__":
