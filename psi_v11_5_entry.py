@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.64-single-owner-feed-failover"
+VERSION="11.0.5.65-batched-wsapi-failover"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -3310,9 +3310,24 @@ async def ws_api_market_feed_fallback_loop():
 
             # Full-universe BBO snapshot: one low-weight WS-API request.
             if now-last_book_req>=1.5:
-                rows=await binance_ws_api_request("ticker.book",{},response_timeout=5.0)
+                # Batch book tickers to keep individual WS-API responses small
+                # and avoid transport/proxy limits on one 400+ symbol payload.
+                rows=[]
+                book_batches=[universe[i:i+100] for i in range(0,len(universe),100)]
+                book_results=await asyncio.gather(*(
+                    binance_ws_api_request(
+                        "ticker.book",{"symbols":batch},
+                        response_timeout=5.0,gate_timeout=1.5
+                    )
+                    for batch in book_batches
+                ),return_exceptions=True)
+                for br in book_results:
+                    if isinstance(br,list):
+                        rows.extend(br)
+                    elif isinstance(br,dict):
+                        rows.append(br)
                 last_book_req=now
-                if isinstance(rows,list) and rows:
+                if rows:
                     stamp=time.time()
                     discovery_payload=[]
                     accepted=0
@@ -3406,6 +3421,13 @@ async def ws_api_market_feed_fallback_loop():
                     "trades.aggregate",{"symbol":sym,"limit":50},
                     response_timeout=4.0,gate_timeout=1.5
                 )
+                aggregate=True
+                if not isinstance(rows,list):
+                    rows=await binance_ws_api_request(
+                        "trades.recent",{"symbol":sym,"limit":50},
+                        response_timeout=4.0,gate_timeout=1.5
+                    )
+                    aggregate=False
                 if not isinstance(rows,list):
                     return 0
                 last=int(tape._rest_agg_last_id.get(sym,-1))
@@ -3413,21 +3435,32 @@ async def ws_api_market_feed_fallback_loop():
                 for d in rows:
                     if not isinstance(d,dict):
                         continue
-                    try: aid=int(d.get("a"))
-                    except Exception: continue
+                    if aggregate:
+                        try: aid=int(d.get("a"))
+                        except Exception: continue
+                        event_ms=int(f(d.get("T"),0))
+                        price=f(d.get("p"));qty=f(d.get("q"))
+                        maker=bool(d.get("m"))
+                    else:
+                        try: aid=int(d.get("id",-1))
+                        except Exception: continue
+                        event_ms=int(f(d.get("time"),0))
+                        price=f(d.get("price"));qty=f(d.get("qty"))
+                        maker=bool(d.get("isBuyerMaker"))
                     if aid<=last:
                         continue
-                    event_ms=int(f(d.get("T"),0))
                     stamp=event_ms/1000.0 if event_ms>0 else time.time()
-                    price=f(d.get("p"));qty=f(d.get("q"))
                     if price<=0 or qty<=0:
                         continue
                     tape.trade_events[sym].append(
-                        (stamp,price,price*qty,not bool(d.get("m")),event_ms)
+                        (stamp,price,price*qty,not maker,event_ms)
                     )
                     if sym in set(selected):
                         try:
-                            payload=dict(d);payload["E"]=event_ms
+                            payload={
+                                "a":aid,"p":str(price),"q":str(qty),
+                                "T":event_ms,"E":event_ms,"m":maker
+                            }
                             app.process_agg_trade(sym,payload)
                         except Exception:
                             pass
@@ -3488,6 +3521,7 @@ async def ws_api_market_feed_fallback_loop():
                     f"tradeRows={_ws_market_stats['trade_rows']} tradeAge={trade_age:.1f}s "
                     f"depthOK={_ws_market_stats['depth_ok']} ticker24OK={_ws_market_stats['ticker24_ok']} "
                     f"requests={_ws_market_stats['requests']} fail={_ws_market_stats['fail']} "
+                    f"lastError={str(_ws_market_stats.get('last_error') or '-')[:160]} "
                     f"executionGates=UNCHANGED",
                     flush=True,
                 )
@@ -3726,7 +3760,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.64] Ψ SINGLE-OWNER WS-API MARKET FAILOVER + RESILIENT FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.65] Ψ BATCHED WS-API MARKET FAILOVER + RESILIENT FEED MESH active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
