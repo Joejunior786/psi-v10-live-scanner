@@ -12,7 +12,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.2-hydration-shards"
+VERSION = "12.0.3-hydration-throughput"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -57,7 +57,7 @@ TF_LIMIT = {"1h": 210, "4h": 210, "1d": 210, "1w": 210}
 # Structural cache accumulates across the entire 403-symbol universe. Active
 # candidates refresh much faster, but broad coverage is never destroyed just
 # because an hourly candle cache is older than 75 seconds.
-TF_TTL = {"1h": 1800.0, "4h": 7200.0, "1d": 21600.0, "1w": 86400.0}
+TF_TTL = {"1h": 3600.0, "4h": 14400.0, "1d": 86400.0, "1w": 604800.0}
 ACTIVE_TF_TTL = {"1h": 90.0, "4h": 300.0, "1d": 900.0, "1w": 3600.0}
 STATE_RANK = {"BUY": 3, "ARMED": 2, "WATCH": 1}
 STATE_EMOJI = {"BUY": "🟢", "ARMED": "🟠", "WATCH": "🟡"}
@@ -847,7 +847,7 @@ def _v12_ws_primitives(shard):
         # Two in-flight requests per physical socket is intentionally modest.
         # Aggregate throughput comes from independent sockets, not one flooded
         # connection.
-        _v12_ws_gates[shard] = asyncio.Semaphore(2)
+        _v12_ws_gates[shard] = asyncio.Semaphore(3)
     return _v12_ws_ready[shard], _v12_ws_locks[shard], _v12_ws_gates[shard]
 
 
@@ -918,7 +918,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
 
     ready, lock, gate = _v12_ws_primitives(shard)
     try:
-        await asyncio.wait_for(ready.wait(), timeout=1.25)
+        await asyncio.wait_for(ready.wait(), timeout=2.0)
     except asyncio.TimeoutError:
         _stats["ws_unavailable"] += 1
         return None
@@ -926,7 +926,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
     acquired = False
     rid = None
     try:
-        await asyncio.wait_for(gate.acquire(), timeout=1.0)
+        await asyncio.wait_for(gate.acquire(), timeout=4.0)
         acquired = True
         loop = asyncio.get_running_loop()
 
@@ -952,7 +952,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None):
             )
             _stats["ws_requests"] += 1
 
-        payload = await asyncio.wait_for(fut, timeout=4.0)
+        payload = await asyncio.wait_for(fut, timeout=8.0)
         status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
         rows = payload.get("result") if isinstance(payload, dict) else None
         if status == 200 and isinstance(rows, list) and rows:
@@ -1025,7 +1025,7 @@ async def refresh_symbol(sym, sem, active=False):
     async def one(tf):
         async with sem:
             try:
-                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=12.5)
+                return await asyncio.wait_for(_fetch_tf(sym, tf), timeout=21.0)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
@@ -1092,7 +1092,12 @@ def _bootstrap_symbols(universe, refresh_tasks):
             continue
 
         c = _cache.get(sym) or {}
-        core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+        now = time.time()
+        core_ready = all(
+            (c.get(tf) or {}).get("snap")
+            and now - f((c.get(tf) or {}).get("updated")) <= TF_TTL[tf]
+            for tf in ("1h", "4h", "1d")
+        )
         if not core_ready:
             out.append(sym)
 
@@ -1106,8 +1111,14 @@ def _bootstrap_symbols(universe, refresh_tasks):
             if sym in refresh_tasks:
                 continue
             c = _cache.get(sym) or {}
-            core_ready = all((c.get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
-            weekly_ready = bool((c.get("1w") or {}).get("snap"))
+            now = time.time()
+            core_ready = all(
+                (c.get(tf) or {}).get("snap")
+                and now - f((c.get(tf) or {}).get("updated")) <= TF_TTL[tf]
+                for tf in ("1h", "4h", "1d")
+            )
+            weekly = c.get("1w") or {}
+            weekly_ready = bool(weekly.get("snap")) and now - f(weekly.get("updated")) <= TF_TTL["1w"]
             if core_ready and not weekly_ready:
                 out.append(sym)
 
@@ -1238,7 +1249,10 @@ async def strategy_loop():
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fetchFail={_stats.get('fetch_fail', 0)} "
                 f"fetchTO={_stats.get('fetch_timeout', 0)} wsOK={_stats.get('ws_ok', 0)} "
-                f"wsFail={_stats.get('ws_fail', 0)}",
+                f"wsFail={_stats.get('ws_fail', 0)} "
+                f"shardOK={[int(_stats.get(f'ws_shard_{i}_ok', 0)) for i in range(V12_WS_SHARDS)]} "
+                f"shardFail={[int(_stats.get(f'ws_shard_{i}_fail', 0)) for i in range(V12_WS_SHARDS)]} "
+                f"lastWS={_stats.get('ws_last_error', '-')}",
                 flush=True,
             )
 
@@ -1335,7 +1349,7 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     print(
-        "[v12.0.2] MULTI-SETUP AUTHORITY + SHARDED FULL-UNIVERSE HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.3] MULTI-SETUP AUTHORITY + FULL-UNIVERSE HYDRATION THROUGHPUT active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
