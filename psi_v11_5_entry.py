@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.3-breakout-structural-intelligence"
+VERSION="11.0.5.4-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -28,6 +28,7 @@ _rest_kline_gate = None
 _rest_bg_kline_gate = None
 _rest_depth_gate = None
 _structure_request_ctx = contextvars.ContextVar("psi_structure_request", default=False)
+_structure_owner_ctx = contextvars.ContextVar("psi_v11_structure_owner", default=False)
 _structure_active = 0
 _rest_good_host = {}
 _rest_host_bad_until = {}
@@ -196,6 +197,15 @@ _original_load_structure = app.load_structure
 
 async def _priority_load_structure(client, symbol):
     global _structure_active
+    # Single-owner rule: only the V11 recovery scheduler may hit Binance REST
+    # for historical structure. Legacy loops receive fresh cached structure or
+    # None and therefore cannot create duplicate REST bursts.
+    if not _structure_owner_ctx.get():
+        sd=getattr(app,"structure",{}).get(symbol)
+        age=_structure_age_recovery(symbol) if "_structure_age_recovery" in globals() else 999999.0
+        if isinstance(sd,dict) and age<=RECOVERY_STALE_S if "RECOVERY_STALE_S" in globals() else False:
+            return sd
+        return None
     token = _structure_request_ctx.set(True)
     _structure_active += 1
     try:
@@ -684,7 +694,11 @@ async def _hydrate_one(sym):
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
         client=app.session
-        sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=34.0)
+        owner_token=_structure_owner_ctx.set(True)
+        try:
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=34.0)
+        finally:
+            _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
             raise RuntimeError("structure payload incomplete")
         app.structure[sym]=sd
