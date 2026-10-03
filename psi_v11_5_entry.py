@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.79-serialized-strict-micro"
+VERSION="11.0.5.80-timeout-reset-strict-micro"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -977,7 +977,7 @@ async def trade_ws_api_loop():
             ready.clear()
             _trade_ws_conn=None
             _trade_ws_fail_pending("Trade WS API connection reset")
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(.6)
 
 
 async def trade_ws_api_request(method, params=None, wait_ready=2.0, response_timeout=8.0, gate_timeout=2.0):
@@ -1027,6 +1027,16 @@ async def trade_ws_api_request(method, params=None, wait_ready=2.0, response_tim
         _trade_ws_stats["timeouts"]+=1
         _trade_ws_stats["fail"]+=1
         _trade_ws_stats["last_error"]=f"{method} timeout"
+        # A timed-out RPC can leave this otherwise-open connection unable to
+        # deliver later responses. Fail closed and recycle only the dedicated
+        # trade transport; formal micro/BUY gates remain unchanged.
+        try:
+            ready.clear()
+            ws=_trade_ws_conn
+            if ws is not None and not ws.closed:
+                await ws.close()
+        except Exception:
+            pass
         return None
     except asyncio.CancelledError:
         raise
@@ -1113,7 +1123,7 @@ async def depth_ws_api_loop():
             ready.clear()
             _depth_ws_conn=None
             _depth_ws_fail_pending("Depth WS API connection reset")
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(.6)
 
 
 async def depth_ws_api_request(method, params=None, wait_ready=2.0, response_timeout=8.0, gate_timeout=2.0):
@@ -1163,6 +1173,15 @@ async def depth_ws_api_request(method, params=None, wait_ready=2.0, response_tim
         _depth_ws_stats["timeouts"]+=1
         _depth_ws_stats["fail"]+=1
         _depth_ws_stats["last_error"]=f"{method} timeout"
+        # Recycle a stalled dedicated depth connection rather than sending the
+        # next sequence-critical snapshot down a socket that just timed out.
+        try:
+            ready.clear()
+            ws=_depth_ws_conn
+            if ws is not None and not ws.closed:
+                await ws.close()
+        except Exception:
+            pass
         return None
     except asyncio.CancelledError:
         raise
@@ -4757,7 +4776,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.79] Ψ SERIALIZED STRICT MICRO active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.80] Ψ TIMEOUT-RESET STRICT MICRO active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
 
 if __name__=="__main__":asyncio.run(main())
