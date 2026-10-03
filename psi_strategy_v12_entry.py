@@ -28,12 +28,9 @@ VERSION = "12.0.0-multi-setup-authority"
 # Candle/volume setups only require fresh candle data for their own timeframes.
 # Microstructure setups still fail closed when live micro data is unavailable.
 
-try:
-    q.QUALIFIER_STATES = ("__V12_LEGACY_EXECUTION_DISABLED__",)
-    q.QUALIFIER_POLICY = "LEGACY_TELEMETRY_ONLY_V12_MULTI_SETUP_AUTHORITY"
-except Exception:
-    pass
-
+# Legacy modules continue producing discovery/microstructure telemetry, but
+# their BUY/PRE labels are non-authoritative. Only this V12 layer is exposed
+# through the public /scan endpoint as signal authority.
 EMA_TOUCH_ATR = float(os.getenv("PSI_V12_EMA_TOUCH_ATR", "0.55"))
 EMA_NEAR_ATR = float(os.getenv("PSI_V12_EMA_NEAR_ATR", "0.90"))
 WEEKLY_TOUCH_ATR = float(os.getenv("PSI_V12_WEEKLY_TOUCH_ATR", "0.80"))
@@ -43,10 +40,10 @@ BREAKOUT_VOLUME_RATIO = float(os.getenv("PSI_V12_BREAKOUT_VOLUME_RATIO", "1.35")
 LOW_LIQUIDITY_QV_MAX = float(os.getenv("PSI_V12_LOW_LIQ_QV_MAX", "50000000"))
 ANTI_CHASE_ATR = float(os.getenv("PSI_V12_ANTI_CHASE_ATR", "0.65"))
 ANTI_CHASE_PCT = float(os.getenv("PSI_V12_ANTI_CHASE_PCT", "1.5"))
-ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "8")))
-PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "8")))
+ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
+PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
-FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "4")), 8))
+FETCH_CONCURRENCY = max(2, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "8")), 12))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
 TF_LIMIT = {"1h": 260, "4h": 260, "1d": 260, "1w": 260}
@@ -952,6 +949,7 @@ def print_board(force=False):
 
 async def strategy_loop():
     global _cycle, _results
+    print("Ψ-V12 STRATEGY_LOOP starting; waiting for Binance session/universe", flush=True)
     while app.session is None:
         await asyncio.sleep(1.0)
     await asyncio.sleep(3.0)
@@ -1035,9 +1033,11 @@ async def v12_health(req):
     })
 
 
-# The inherited HTTP application is constructed inside app.main(), so V12
-# publishes its authoritative board through runtime logs. The existing /health
-# and /scan endpoints remain untouched for backward compatibility.
+# app.main() constructs the aiohttp application later and resolves these
+# module globals at runtime. Replace the public handlers now so /scan and
+# /health expose V12 authority, while inherited modules remain telemetry only.
+app.scan_endpoint = v12_scan
+app.health = v12_health
 
 
 async def main():
