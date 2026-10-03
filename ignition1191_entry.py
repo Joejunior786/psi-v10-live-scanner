@@ -12,7 +12,7 @@ app = base.app
 
 VERSION = "10.19.1-support-liquidity-sweep-riskmap"
 SUPPORT_SAMPLE_SECONDS = 30.0
-SUPPORT_MAX_SYMBOLS = 8
+SUPPORT_MAX_SYMBOLS = 4
 SUPPORT_MAX_AGE = 95.0
 ENTRY_MAX_DISTANCE_PCT = 3.0
 MAX_PLAN_RISK_PCT = 3.5
@@ -296,7 +296,10 @@ async def support_loop():
     sem = asyncio.Semaphore(2)
     async def one(sym):
         async with sem:
-            await build_risk_map(sym)
+            try:
+                await asyncio.wait_for(build_risk_map(sym), timeout=30.0)
+            except asyncio.TimeoutError:
+                risk_stats["errors"] += 1
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
         try:
