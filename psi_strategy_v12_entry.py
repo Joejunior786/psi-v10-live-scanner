@@ -1336,7 +1336,8 @@ async def _v12_close_ws_quick(shard):
 
 async def v12_ws_klines(
     symbol, interval, limit, shard=None, response_timeout=5.0,
-    ready_timeout=0.75, gate_timeout=0.85, send_timeout=0.75
+    ready_timeout=0.75, gate_timeout=0.85, send_timeout=0.75,
+    lock_timeout=0.65,
 ):
     if shard is None:
         shard = (sum(ord(ch) for ch in str(symbol)) + sum(ord(ch) for ch in str(interval))) % V12_WS_SHARDS
@@ -1350,20 +1351,35 @@ async def v12_ws_klines(
         return None
 
     acquired = False
+    lock_acquired = False
     rid = None
     try:
-        await asyncio.wait_for(gate.acquire(), timeout=gate_timeout)
-        acquired = True
-        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(gate.acquire(), timeout=gate_timeout)
+            acquired = True
+        except asyncio.TimeoutError:
+            _stats["ws_gate_timeout"] += 1
+            return None
 
-        async with lock:
-            ws = _v12_ws_conns[shard]
-            if ws is None or ws.closed:
-                return None
-            _v12_ws_ids[shard] += 1
-            rid = f"{shard}-{_v12_ws_ids[shard]}"
-            fut = loop.create_future()
-            _v12_ws_pending[shard][rid] = fut
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=lock_timeout)
+            lock_acquired = True
+        except asyncio.TimeoutError:
+            _stats["ws_lock_timeout"] += 1
+            return None
+
+        ws = _v12_ws_conns[shard]
+        if ws is None or ws.closed:
+            _stats["ws_closed_before_send"] += 1
+            return None
+
+        loop = asyncio.get_running_loop()
+        _v12_ws_ids[shard] += 1
+        rid = f"{shard}-{_v12_ws_ids[shard]}"
+        fut = loop.create_future()
+        _v12_ws_pending[shard][rid] = fut
+
+        try:
             await asyncio.wait_for(
                 ws.send_json({
                     "id": rid,
@@ -1377,6 +1393,13 @@ async def v12_ws_klines(
                 timeout=send_timeout,
             )
             _stats["ws_requests"] += 1
+        except asyncio.TimeoutError:
+            _stats["ws_send_timeout"] += 1
+            return None
+        finally:
+            if lock_acquired:
+                lock.release()
+                lock_acquired = False
 
         payload = await asyncio.wait_for(fut, timeout=response_timeout)
         status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
@@ -1401,13 +1424,18 @@ async def v12_ws_klines(
         if isinstance(exc, asyncio.TimeoutError):
             _stats["ws_timeout_recycles"] += 1
             _record_ws_timeout()
-            # Never block the fetch pipeline waiting for a dead socket to close.
-            # The RPC loop reconnects it independently.
             asyncio.create_task(_v12_close_ws_quick(shard))
         return None
     finally:
+        if lock_acquired:
+            try:
+                lock.release()
+            except Exception:
+                pass
         if rid is not None:
-            _v12_ws_pending[shard].pop(rid, None)
+            fut = _v12_ws_pending[shard].pop(rid, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
         if acquired:
             gate.release()
 
@@ -1977,7 +2005,9 @@ async def strategy_loop():
                 f"{_stats.get('dedicated_1d_miss',0)} H1={_stats.get('dedicated_1h_ok',0)}/"
                 f"{_stats.get('dedicated_1h_miss',0)} H4={_stats.get('dedicated_4h_ok',0)}/"
                 f"{_stats.get('dedicated_4h_miss',0)} rawWS={_stats.get('ws_ok',0)}/"
-                f"{_stats.get('ws_fail',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
+                f"{_stats.get('ws_fail',0)} stageTO={_stats.get('dedicated_stage_timeout',0)} "
+                f"gateTO={_stats.get('ws_gate_timeout',0)} lockTO={_stats.get('ws_lock_timeout',0)} "
+                f"sendTO={_stats.get('ws_send_timeout',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
                 f"{_stats.get('shared_ws_fallback_miss',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)}",
                 flush=True,
             )
