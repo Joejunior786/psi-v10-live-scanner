@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.12-fast-no-outer-timeout"
+VERSION = "12.1.12-worker-budget-headroom"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -2122,7 +2122,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.12] MULTI-SETUP AUTHORITY + FAST INTERNAL-TIMEOUTS ONLY active — legacy BUY/PRE authority disabled; "
+        "[v12.1.12] MULTI-SETUP AUTHORITY + WORKER-BUDGET HEADROOM active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
