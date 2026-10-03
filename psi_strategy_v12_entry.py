@@ -12,7 +12,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.5-serialized-ws-hydration"
+VERSION = "12.0.6-partial-first-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -45,7 +45,7 @@ ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
 FETCH_CONCURRENCY = max(4, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "6")), 8))
-MAX_INFLIGHT_SYMBOLS = max(24, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "48")), 80))
+MAX_INFLIGHT_SYMBOLS = max(12, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "24")), 48))
 BOOTSTRAP_SYMBOLS_PER_CYCLE = max(6, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "12")), 24))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
@@ -1095,51 +1095,71 @@ def _priority_symbols(universe):
 
 
 def _bootstrap_symbols(universe, refresh_tasks):
-    """Fairly select never-ready/core-stale symbols across the whole universe."""
+    """Finish partial MTF symbols first, then rotate fairly through untouched ones."""
     global _cursor
-    out = []
     n = len(universe)
     if not n:
-        return out
+        return []
 
+    now = time.time()
+    out = []
+    chosen = set()
+
+    def core_state(sym):
+        c = _cache.get(sym) or {}
+        ready = 0
+        for tf in ("1h", "4h", "1d"):
+            item = c.get(tf) or {}
+            if item.get("snap") and now - f(item.get("updated")) <= TF_TTL[tf]:
+                ready += 1
+        return ready
+
+    # Highest priority: symbols already carrying 1/3 or 2/3 valid core
+    # timeframes. Completing them turns fragmented fetch success into usable
+    # V12 qualification immediately.
+    partial = []
+    for sym in universe:
+        if sym in refresh_tasks:
+            continue
+        ready = core_state(sym)
+        if 0 < ready < 3:
+            partial.append((ready, sym))
+    partial.sort(reverse=True)
+
+    for _, sym in partial:
+        if len(out) >= BOOTSTRAP_SYMBOLS_PER_CYCLE:
+            break
+        out.append(sym)
+        chosen.add(sym)
+
+    # Fill remaining capacity with fair rotating symbols that do not yet have
+    # all three core timeframes.
     attempts = 0
     while len(out) < BOOTSTRAP_SYMBOLS_PER_CYCLE and attempts < n * 2:
         sym = universe[_cursor % n]
         _cursor = (_cursor + 1) % n
         attempts += 1
-        if sym in refresh_tasks:
+        if sym in refresh_tasks or sym in chosen:
             continue
-
-        c = _cache.get(sym) or {}
-        now = time.time()
-        core_ready = all(
-            (c.get(tf) or {}).get("snap")
-            and now - f((c.get(tf) or {}).get("updated")) <= TF_TTL[tf]
-            for tf in ("1h", "4h", "1d")
-        )
-        if not core_ready:
+        if core_state(sym) < 3:
             out.append(sym)
+            chosen.add(sym)
 
-    # Once core coverage is complete, the same fair cursor enriches Weekly.
+    # Once core coverage is complete, enrich Weekly fast packets.
     if not out:
         attempts = 0
         while len(out) < BOOTSTRAP_SYMBOLS_PER_CYCLE and attempts < n * 2:
             sym = universe[_cursor % n]
             _cursor = (_cursor + 1) % n
             attempts += 1
-            if sym in refresh_tasks:
+            if sym in refresh_tasks or sym in chosen:
                 continue
             c = _cache.get(sym) or {}
-            now = time.time()
-            core_ready = all(
-                (c.get(tf) or {}).get("snap")
-                and now - f((c.get(tf) or {}).get("updated")) <= TF_TTL[tf]
-                for tf in ("1h", "4h", "1d")
-            )
             weekly = c.get("1w") or {}
             weekly_ready = bool(weekly.get("snap")) and now - f(weekly.get("updated")) <= TF_TTL["1w"]
-            if core_ready and not weekly_ready:
+            if core_state(sym) == 3 and not weekly_ready:
                 out.append(sym)
+                chosen.add(sym)
 
     return out
 
@@ -1234,9 +1254,20 @@ async def strategy_loop():
             active = _priority_symbols(universe)
 
             # Active candidates refresh quickly, but never consume every slot.
+            pre_ready = sum(
+                all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d"))
+                for s in universe
+            )
+            if pre_ready < max(50, int(len(universe) * 0.20)):
+                active_cap = 2
+            elif pre_ready < max(200, int(len(universe) * 0.60)):
+                active_cap = 4
+            else:
+                active_cap = ACTIVE_SYMBOLS_PER_CYCLE
+
             active_budget = min(
                 len(active),
-                max(0, min(ACTIVE_SYMBOLS_PER_CYCLE, MAX_INFLIGHT_SYMBOLS // 4))
+                max(0, min(active_cap, MAX_INFLIGHT_SYMBOLS // 4))
             )
             for sym in active[:active_budget]:
                 if sym not in refresh_tasks and len(refresh_tasks) < MAX_INFLIGHT_SYMBOLS:
@@ -1390,7 +1421,7 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     print(
-        "[v12.0.5] MULTI-SETUP AUTHORITY + SERIALIZED SHARDED HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.0.6] MULTI-SETUP AUTHORITY + PARTIAL-FIRST HYDRATION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
