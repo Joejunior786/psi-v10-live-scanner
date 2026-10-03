@@ -12,7 +12,24 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.30-breakout-structural-intelligence"
+VERSION="11.0.5.31-discovery-breadth-rotation"
+
+# Discovery-breadth controls. These change research coverage/visibility only;
+# Pinpoint and every mandatory BUY/risk gate remain fail-closed.
+DISCOVERY_NEW_SLOTS = int(os.environ.get("PSI_DISCOVERY_NEW_SLOTS", "12"))
+DISCOVERY_ROTATE_SLOTS = int(os.environ.get("PSI_DISCOVERY_ROTATE_SLOTS", "12"))
+DISCOVERY_DISPLAY_SLOTS = int(os.environ.get("PSI_DISCOVERY_DISPLAY_SLOTS", "8"))
+DISCOVERY_RECENT_CYCLES = int(os.environ.get("PSI_DISCOVERY_RECENT_CYCLES", "10"))
+DISCOVERY_WATCH_COOLDOWN_CYCLES = int(os.environ.get("PSI_DISCOVERY_WATCH_COOLDOWN_CYCLES", "8"))
+DISCOVERY_WATCH_PENALTY = float(os.environ.get("PSI_DISCOVERY_WATCH_PENALTY", "2.5"))
+RECOVERY_ROTATION_SLOTS = int(os.environ.get("PSI_RECOVERY_ROTATION_SLOTS", "40"))
+RECOVERY_ROTATION_PERIOD_S = float(os.environ.get("PSI_RECOVERY_ROTATION_PERIOD_S", "20"))
+
+_discovery_cycle = 0
+_discovery_cursor = 0
+_discovery_last_seen = {}
+_discovery_watch_streak = defaultdict(int)
+_discovery_recent_promotions = {}
 
 REST_BASES = [
     "https://api.binance.com",
@@ -1266,7 +1283,18 @@ def _balanced_monster_board(candidates):
             r["displayLane"]=name
             selected.append(r);seen.add(sym);lane_counts[name]+=1
 
-    # Reserve capacity so one crowded lane cannot hide another.
+    # Reserve capacity so one crowded lane cannot hide another. Discovery is
+    # deliberately first: it guarantees fresh full-universe names can be seen
+    # without changing their formal state or execution authority.
+    add_lane("DISCOVERY",lambda r:(
+        bool(r.get("discoveryFresh"))
+        and (
+            int(f(r.get("layers")))>=2
+            or f(r.get("eventTape"))>=40
+            or f(r.get("early"))>=28
+            or f(r.get("bsi"))>=48
+        )
+    ),DISCOVERY_DISPLAY_SLOTS)
     add_lane("PRE",lambda r:str(r.get("formal") or "")=="PRE-IGNITION" and int(f(r.get("layers")))>=4,8)
     add_lane("MONSTER",lambda r:str(r.get("state") or "") in {
         "MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED"
@@ -1313,18 +1341,81 @@ def _balanced_monster_board(candidates):
     return selected[:BOARD_ROWS]
 
 def scan_v5():
+    global _discovery_cycle,_discovery_cursor
+    _discovery_cycle += 1
+    cycle=_discovery_cycle
     now=time.time();u=list(getattr(q,"universe",[]) or []);rows=[]
     for sym in u:
         row=q.latest.get(sym) or {};p=base.px(sym,row)
         if p>0 and (not base.price_hist[sym] or now-base.price_hist[sym][-1][0]>=.45):base.price_hist[sym].append((now,p))
-        c=base.cheap(sym,row,now);em,rs=rescue._emergency_promote(c,row);c["rescue_score"]=rs;c["rescue_promote"]=em;rows.append((f(c.get("cheap")),rs,sym,row,c))
-    rows.sort(reverse=True,key=lambda x:x[0]);pool=[(a,s,r,c) for a,_,s,r,c in rows[:base.DEEP_LIMIT]];seen={s for _,s,_,_ in pool}
+        c=base.cheap(sym,row,now);em,rs=rescue._emergency_promote(c,row);c["rescue_score"]=rs;c["rescue_promote"]=em
+        rows.append((f(c.get("cheap")),rs,sym,row,c))
+
+    # Repeated WATCH names gradually lose discovery priority unless they have
+    # materially stronger live evidence. This prevents stale pool lock-in.
+    def discovery_rank(x):
+        a,rs,s,row,c=x
+        streak=int(_discovery_watch_streak.get(s,0))
+        penalty=DISCOVERY_WATCH_PENALTY*max(0,streak-DISCOVERY_WATCH_COOLDOWN_CYCLES)
+        live_bonus=min(12.0,max(0.0,f(c.get("peak"))-100.0)*.08)+min(8.0,max(0.0,f(c.get("r60")))*2.0)
+        return (a+live_bonus-penalty,rs)
+
+    rows.sort(reverse=True,key=discovery_rank)
+    pool=[(a,s,r,c) for a,_,s,r,c in rows[:base.DEEP_LIMIT]]
+    seen={s for _,s,_,_ in pool}
+    row_by_sym={x[2]:x for x in rows}
+
+    # Preserve genuine high-velocity exceptions.
     for a,rs,s,r,c in rows:
-        if s not in seen and (f(c.get("peak"))>=100 or f(c.get("radar_n"))>=.45 or f(c.get("r60"))>=.75):pool.append((a,s,r,c));seen.add(s)
-    emergency=sorted([x for x in rows if x[2] not in seen and x[4].get("rescue_promote")],key=lambda x:(x[1],x[0]),reverse=True)[:rescue.EXTRA_RESCUE_SLOTS]
+        if s not in seen and (f(c.get("peak"))>=100 or f(c.get("radar_n"))>=.45 or f(c.get("r60"))>=.75):
+            if len(pool)>=rescue.MAX_DEEP_POOL: break
+            pool.append((a,s,r,c));seen.add(s)
+
+    emergency=sorted(
+        [x for x in rows if x[2] not in seen and x[4].get("rescue_promote")],
+        key=lambda x:(x[1],x[0]),reverse=True
+    )[:rescue.EXTRA_RESCUE_SLOTS]
     for a,rs,s,r,c in emergency:
         if len(pool)>=rescue.MAX_DEEP_POOL:break
         pool.append((a,s,r,c));seen.add(s);rescue.rescue_stats["emergency_promotions"]+=1
+
+    promoted={}
+
+    # Novelty quota: every cycle reserve deep-analysis capacity for symbols
+    # that have not been in the recent deep pool. They are still ranked by
+    # current live anomaly strength, never promoted to a formal signal.
+    novel=[
+        x for x in rows
+        if x[2] not in seen
+        and cycle-int(_discovery_last_seen.get(x[2],-10_000))>DISCOVERY_RECENT_CYCLES
+    ]
+    novel.sort(key=discovery_rank,reverse=True)
+    for a,rs,s,r,c in novel[:DISCOVERY_NEW_SLOTS]:
+        if len(pool)>=rescue.MAX_DEEP_POOL:break
+        pool.append((a,s,r,c));seen.add(s);promoted[s]="NOVEL"
+
+    # Forced circular exploration guarantees eventual coverage of the whole
+    # Binance universe even when the same high-liquidity names dominate score.
+    if u and len(pool)<rescue.MAX_DEEP_POOL:
+        start_idx=_discovery_cursor%len(u)
+        inspected=0;added=0
+        while inspected<len(u) and added<DISCOVERY_ROTATE_SLOTS and len(pool)<rescue.MAX_DEEP_POOL:
+            s=u[(start_idx+inspected)%len(u)];inspected+=1
+            if s in seen:continue
+            x=row_by_sym.get(s)
+            if not x:continue
+            a,rs,_,r,c=x
+            pool.append((a,s,r,c));seen.add(s);promoted[s]="ROTATE";added+=1
+        _discovery_cursor=(start_idx+max(inspected,DISCOVERY_ROTATE_SLOTS))%len(u)
+
+    for _,s,_,_ in pool:
+        _discovery_last_seen[s]=cycle
+    for s,lane in promoted.items():
+        _discovery_recent_promotions[s]=(cycle,lane)
+    for s,(cy,lane) in list(_discovery_recent_promotions.items()):
+        if cycle-cy>DISCOVERY_RECENT_CYCLES:
+            _discovery_recent_promotions.pop(s,None)
+
     out=[]
     for _,s,row,c in pool:
         ca=base.candidate(s,row,c,base.deep(s))
@@ -1334,6 +1425,9 @@ def scan_v5():
             "monsterPullbackDepth":ex["depth"],
             "monsterPullbackRebound":ex["rebound"],
             "monsterExhaustionScore":ex["score"],
+            "discoveryFresh":s in promoted,
+            "discoveryLane":promoted.get(s),
+            "discoveryCycle":cycle if s in promoted else None,
         })
         if ex["state"]=="PULLBACK_EXHAUSTED":
             rs=list(ca.get("reasons") or [])
@@ -1343,13 +1437,60 @@ def scan_v5():
             rs=list(ca.get("reasons") or [])
             if "SELL_PRESSURE_EXHAUSTING" not in rs: rs.append("SELL_PRESSURE_EXHAUSTING")
             ca["reasons"]=rs
+
+        formal=str(ca.get("formal") or "")
+        state=str(ca.get("state") or "")
+        if formal=="WATCH" and state=="MONSTER-WATCH":
+            _discovery_watch_streak[s]+=1
+        elif formal in {"PRE-IGNITION","EARLY OPPORTUNITY"} or state in {"MONSTER-HOT","MONSTER-IGNITION","MONSTER-RESCUE","MONSTER-MEMORY","MONSTER-SEED"}:
+            _discovery_watch_streak[s]=0
+        else:
+            _discovery_watch_streak[s]=max(0,int(_discovery_watch_streak.get(s,0))-1)
+        ca["watchStreak"]=int(_discovery_watch_streak.get(s,0))
+        ca["watchCooldown"]=bool(
+            ca["watchStreak"]>=DISCOVERY_WATCH_COOLDOWN_CYCLES
+            and int(f(ca.get("layers")))<5
+            and f(ca.get("eventTape"))<72
+            and f(ca.get("bsi"))<70
+        )
+
         base.latest[s]=ca
-        visible=(f(ca.get("early"))>=38 or f(ca.get("dna"))>=50 or f(ca.get("peak"))>=120 or ca.get("state") in {"MONSTER-RESCUE","MONSTER-MEMORY"} or f(ca.get("retentionScore"))>=58 or f(ca.get("bsi"))>=62 or ex["state"] in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING"})
-        if visible:out.append(ca);base.open_obs(ca)
+        discovery_visible=bool(ca.get("discoveryFresh")) and (
+            int(f(ca.get("layers")))>=2
+            or f(ca.get("eventTape"))>=40
+            or f(ca.get("early"))>=28
+            or f(ca.get("bsi"))>=48
+        )
+        visible=(
+            f(ca.get("early"))>=38
+            or f(ca.get("dna"))>=50
+            or f(ca.get("peak"))>=120
+            or ca.get("state") in {"MONSTER-RESCUE","MONSTER-MEMORY"}
+            or f(ca.get("retentionScore"))>=58
+            or f(ca.get("bsi"))>=62
+            or ex["state"] in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING"}
+            or discovery_visible
+        )
+        if visible:
+            out.append(ca);base.open_obs(ca)
+
     priority={"MONSTER-HOT":6,"MONSTER-IGNITION":5,"MONSTER-MEMORY":4,"MONSTER-RESCUE":3,"MONSTER-SEED":2,"MONSTER-EXTENDED":1,"MONSTER-WATCH":0}
-    out.sort(key=lambda x:(priority.get(str(x.get("state")),0),f(x.get("bsi")),f(x.get("retentionScore")),f(x.get("early")),f(x.get("dna")),f(x.get("peak"))),reverse=True)
+    out.sort(
+        key=lambda x:(
+            priority.get(str(x.get("state")),0),
+            0 if x.get("watchCooldown") else 1,
+            1 if x.get("discoveryFresh") else 0,
+            f(x.get("bsi")),f(x.get("retentionScore")),f(x.get("early")),f(x.get("dna")),f(x.get("peak"))
+        ),
+        reverse=True
+    )
     base.stats["cycles"]+=1;base.stats["universe"]=len(u);base.stats["deep"]=len(pool);base.stats["cand"]=len(out);rescue.rescue_stats["last_pool"]=len(pool);rescue.rescue_stats["last_emergency"]=len(emergency)
     base.latest["_all_candidates"]=list(out)
+    base.latest["_discovery_stats"]={
+        "cycle":cycle,"novel":sum(1 for v in promoted.values() if v=="NOVEL"),
+        "rotated":sum(1 for v in promoted.values() if v=="ROTATE"),
+        "recent":len(_discovery_recent_promotions),"cursor":_discovery_cursor,
+    }
     board=_balanced_monster_board(out)
     base.latest["_display_mix"]=dict(Counter(str(r.get("displayLane") or "BEST") for r in board))
     return board
@@ -1593,7 +1734,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 2
+RECOVERY_BATCH = int(os.environ.get("PSI_RECOVERY_BATCH", "3"))
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 285.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"fast_ok":0,"fast_fail":0,"seed_ok":0,"seed_fail":0,"seed_cycles":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
@@ -1611,7 +1752,53 @@ STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11
 _structure_cache_dirty = False
 
 def _recovery_scope():
-    return _recovery_symbols()[:RECOVERY_PRIORITY]
+    # Protect the real execution pool, then reserve a large rotating slice for
+    # discovery. This prevents the same historical 20 names from monopolising
+    # the 80-symbol structure window.
+    universe=list(getattr(q,"universe",[]) or [])
+    universe_set=set(universe)
+    out=[];seen=set()
+    def add(s):
+        s=str(s or "")
+        if s and s in universe_set and s not in seen and len(out)<RECOVERY_PRIORITY:
+            seen.add(s);out.append(s)
+
+    for s in list(getattr(app,"selected_micro_symbols",[]) or []): add(s)
+
+    recent=sorted(
+        ((cy,s,lane) for s,(cy,lane) in _discovery_recent_promotions.items()),
+        reverse=True
+    )
+    for _,s,_ in recent: add(s)
+
+    try:
+        for r in list(base.latest.get("_board") or []): add(r.get("symbol"))
+    except Exception:
+        pass
+
+    try:
+        for _,s in q.hot(min(32,RECOVERY_PRIORITY)): add(s)
+    except Exception:
+        pass
+
+    # Keep only two permanent market anchors; everything else earns/rotates in.
+    for s in ("BTCUSDT","ETHUSDT"): add(s)
+
+    if universe and len(out)<RECOVERY_PRIORITY:
+        slots=min(RECOVERY_ROTATION_SLOTS,RECOVERY_PRIORITY-len(out))
+        bucket=int(time.time()/max(5.0,RECOVERY_ROTATION_PERIOD_S))
+        start=(bucket*max(1,slots))%len(universe)
+        checked=0
+        while checked<len(universe) and slots>0 and len(out)<RECOVERY_PRIORITY:
+            s=universe[(start+checked)%len(universe)];checked+=1
+            if s in seen:continue
+            add(s);slots-=1
+
+    # Fill any remaining capacity from the generic priority list.
+    for s in _recovery_symbols():
+        add(s)
+        if len(out)>=RECOVERY_PRIORITY:break
+    return out
 
 def _execution_structure_batch_symbols():
     scope=_recovery_scope()
@@ -1756,7 +1943,11 @@ def _recovery_symbols():
             seen.add(s);out.append(s)
     # Once continuity is populated, protect the actual execution pool first.
     for s in list(getattr(app,"selected_micro_symbols",[]) or []): add(s)
-    for s in ("BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT","SUIUSDT","LTCUSDT","AVAXUSDT","DOTUSDT","AAVEUSDT","TAOUSDT","FETUSDT","NEARUSDT","ICPUSDT","ONDOUSDT","PEPEUSDT","SHIBUSDT"):
+    # Permanent anchors are intentionally minimal. Other symbols must earn
+    # priority through live discovery, board strength, hot ranking, or rotation.
+    for s in ("BTCUSDT","ETHUSDT"):
+        add(s)
+    for s,(cy,lane) in sorted(_discovery_recent_promotions.items(),key=lambda kv:kv[1][0],reverse=True):
         add(s)
     try:
         for r in list(base.latest.get("_board") or []): add(r.get("symbol"))
@@ -2065,22 +2256,27 @@ async def watchdog_loop():
                     flush=True,
                 )
 
-            # Continuity should populate as soon as enough verified structure exists.
+            # Continuity is no longer allowed to freeze at a small sticky pool.
+            # Whenever verified fresh structure materially exceeds the current
+            # pool, ask the guarded continuity allocator to expand/rotate it.
+            desired_pool=min(int(getattr(base,"POOL_SIZE",80)),total,max(16,fresh_cov))
             if (
                 startup_age>WATCHDOG_STARTUP_GRACE_S
-                and pool==0 and fresh_cov>=min(16,total)
-                and now-_watchdog_last_pool_progress>WATCHDOG_POOL_STALL_S
+                and fresh_cov>=min(16,total)
+                and pool<desired_pool
+                and fresh_cov>=pool+3
+                and now-_watchdog_last_pool_progress>min(WATCHDOG_POOL_STALL_S,35.0)
             ):
                 try:
+                    before_pool=pool
                     await continuity_guard.rebalance_continuity_guarded(force=True)
                     new_pool=len(getattr(app,"selected_micro_symbols",[]) or [])
                     watchdog_stats["pool_kicks"]+=1
                     watchdog_stats["actions"]+=1
-                    actions.append(f"POOL_REBALANCE:{new_pool}")
-                    print(f"Ψ-WATCHDOG ACTION POOL_REBALANCE before=0 after={new_pool} structure={ever_cov}/{total}",flush=True)
-                    if new_pool>0:
-                        _watchdog_last_pool=new_pool
-                        _watchdog_last_pool_progress=now
+                    actions.append(f"POOL_REBALANCE:{before_pool}->{new_pool}")
+                    print(f"Ψ-WATCHDOG ACTION POOL_REBALANCE before={before_pool} after={new_pool} desired={desired_pool} structure={fresh_cov}/{total}",flush=True)
+                    _watchdog_last_pool=max(_watchdog_last_pool,new_pool)
+                    _watchdog_last_pool_progress=now
                 except Exception as exc:
                     watchdog_stats["errors"]+=1
                     actions.append("POOL_REBALANCE_FAIL")
@@ -2131,7 +2327,7 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def main():
-    print("[v11.0.5.1] Ψ BREAKOUT STRUCTURAL INTELLIGENCE active — BSI fuses micro HH/HL structure, MTF alignment, resistance fatigue/attack count, compression, liquidity vacuum/ask depletion, resistance proximity, breakout/retest context, live confirmation, fresh-structure and MA-structure gate state, anti-chase room and false-break risk. BSI changes research ranking/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution gate remains fail-closed. Monster board now emits 30 ranked rows. Production watchdog monitors extension freshness, structure progress, continuity initialization, Pinpoint visibility and Monster shard health with bounded fail-closed self-healing.",flush=True)
+    print("[v11.0.5.31] Ψ DISCOVERY BREADTH + STRUCTURAL INTELLIGENCE active — full-universe novelty quota, circular deep-analysis rotation, discovery display lane, stale-WATCH cooldown, rotating structure recovery and continuity pool expansion are enabled. These features change research coverage/visibility only; Pinpoint remains sole BUY NOW authority and every hard execution/risk gate remains fail-closed. BSI and Monster logic remain active.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
