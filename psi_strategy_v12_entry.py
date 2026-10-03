@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.0.10-nonblocking-ws-recycle"
+VERSION = "12.0.11-transport-circuit-breaker"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -75,6 +75,30 @@ _cycle = 0
 _cursor = 0
 _last_board_print = 0.0
 _stats = defaultdict(int)
+
+_ws_circuit_until = 0.0
+_ws_timeout_events = []
+
+
+def _ws_circuit_open():
+    return time.monotonic() < _ws_circuit_until
+
+
+def _record_ws_timeout():
+    global _ws_circuit_until, _ws_timeout_events
+    now = time.monotonic()
+    _ws_timeout_events = [t for t in _ws_timeout_events if now - t <= 30.0]
+    _ws_timeout_events.append(now)
+    if len(_ws_timeout_events) >= 4:
+        _ws_circuit_until = max(_ws_circuit_until, now + 45.0)
+        _stats["ws_circuit_opens"] += 1
+        _stats["ws_circuit_until_ms"] = int((time.time() + 45.0) * 1000)
+
+
+def _record_ws_success():
+    global _ws_circuit_until, _ws_timeout_events
+    _ws_timeout_events = []
+    _ws_circuit_until = 0.0
 
 # Dedicated V12 Binance Spot WS-API connection for historical candles. This
 # prevents legacy recovery/structure traffic from starving the new strategy
@@ -219,7 +243,7 @@ async def cache_persist_loop():
 def _v12_rest_gate():
     global _v12_fast_rest_gate
     if _v12_fast_rest_gate is None:
-        _v12_fast_rest_gate = asyncio.Semaphore(2)
+        _v12_fast_rest_gate = asyncio.Semaphore(4)
     return _v12_fast_rest_gate
 
 
@@ -1358,6 +1382,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.
         if status == 200 and isinstance(rows, list) and rows:
             _stats["ws_ok"] += 1
             _stats[f"ws_shard_{shard}_ok"] += 1
+            _record_ws_success()
             return rows
 
         _stats["ws_fail"] += 1
@@ -1373,6 +1398,7 @@ async def v12_ws_klines(symbol, interval, limit, shard=None, response_timeout=5.
         _stats["ws_last_error"] = f"shard={shard} {type(exc).__name__}: {exc}"
         if isinstance(exc, asyncio.TimeoutError):
             _stats["ws_timeout_recycles"] += 1
+            _record_ws_timeout()
             # Never block the fetch pipeline waiting for a dead socket to close.
             # The RPC loop reconnects it independently.
             asyncio.create_task(_v12_close_ws_quick(shard))
@@ -1390,23 +1416,29 @@ async def _fetch_tf(sym, tf, deep=False):
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
     rows = None
+    circuit = _ws_circuit_open()
 
-    # 1) Low-overhead WS-API attempt on an exclusively borrowed shard.
-    shard = await _v12_borrow_shard(timeout=1.2)
-    if shard is not None:
-        try:
-            rows = await v12_ws_klines(
-                sym, tf, limit,
-                shard=shard,
-                response_timeout=5.0 if deep else 3.5,
-            )
-        finally:
-            _v12_return_shard(shard)
+    # When WS has timed out repeatedly, bypass it temporarily. The previous
+    # design spent most of the per-fetch deadline waiting on known-bad sockets,
+    # preventing Binance REST fallback from ever running.
+    if circuit:
+        _stats["ws_circuit_bypass"] += 1
+    else:
+        shard = await _v12_borrow_shard(timeout=0.8)
+        if shard is not None:
+            try:
+                rows = await v12_ws_klines(
+                    sym, tf, limit,
+                    shard=shard,
+                    response_timeout=4.0 if deep else 2.8,
+                )
+            finally:
+                _v12_return_shard(shard)
 
-    # 2) If the WS path stalls, use the bounded two-host FAST fallback
-    # already shared with the V11 cache-reuse layer. Deep requests use the
-    # wider official Binance REST race directly.
+    # REST is the primary path while the WS circuit is open, and the immediate
+    # fallback after any ordinary WS miss.
     if not isinstance(rows, list) or len(rows) < 55:
+        _stats["rest_fallback_attempts"] += 1
         if deep:
             rows = await v12_rest_klines(sym, tf, limit)
         else:
@@ -1416,16 +1448,16 @@ async def _fetch_tf(sym, tf, deep=False):
         if isinstance(rows, list) and len(rows) >= 55:
             _stats["fetch_rest_ok"] += 1
 
-    # 3) One final WS attempt can succeed after the timed-out socket has been
-    # recycled by v12_ws_klines.
-    if not isinstance(rows, list) or len(rows) < 55:
-        shard = await _v12_borrow_shard(timeout=1.0)
+    # Probe WS once after REST failure only when the circuit is closed. When
+    # open, the RPC loops reconnect independently and later fetches will probe.
+    if (not circuit) and (not isinstance(rows, list) or len(rows) < 55):
+        shard = await _v12_borrow_shard(timeout=0.6)
         if shard is not None:
             try:
                 rows = await v12_ws_klines(
                     sym, tf, limit,
                     shard=shard,
-                    response_timeout=4.5 if deep else 3.0,
+                    response_timeout=3.5 if deep else 2.4,
                 )
                 if isinstance(rows, list) and len(rows) >= 55:
                     _stats["ws_failover_ok"] += 1
@@ -1467,7 +1499,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 19.0 if deep else 15.0
+                timeout = 16.0 if deep else 12.0
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
