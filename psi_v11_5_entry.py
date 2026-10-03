@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.47-depth-frame-ready-final"
+VERSION="11.0.5.48-structure-recovery-watchdog"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -64,6 +64,7 @@ _rest_depth_gate = None
 _structure_request_ctx = contextvars.ContextVar("psi_structure_request", default=False)
 _risk_plan_request_ctx = contextvars.ContextVar("psi_risk_plan_request", default=False)
 _structure_owner_ctx = contextvars.ContextVar("psi_v11_structure_owner", default=False)
+_structure_watchdog_rest_ctx = contextvars.ContextVar("psi_v11_structure_watchdog_rest", default=False)
 _structure_active = 0
 _rest_good_host = {}
 _rest_host_bad_until = {}
@@ -447,6 +448,7 @@ STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
     "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"ws_refresh":0,"bar_reuse":0,
+    "watchdog_rest_ok":0,"watchdog_rest_fail":0,
 }
 
 def _raw_key(symbol, interval, limit):
@@ -785,8 +787,18 @@ async def structure_kline_ws_loop():
             await asyncio.sleep(2.0)
 
 async def _structure_historical_klines(client, symbol, interval, limit):
-    # Prefer Binance's official request/response WebSocket API for historical
-    # klines. REST host-racing is retained strictly as a bounded fallback.
+    # Watchdog rescue is an independent route. If the normal WS-API structure
+    # lane is stalled, rescue goes directly to the bounded multi-host REST race
+    # instead of repeating the same failed request path.
+    if _structure_watchdog_rest_ctx.get():
+        rows=await _structure_fetch_race(client,symbol,interval,limit)
+        if isinstance(rows,list) and rows:
+            _structure_tf_stats["watchdog_rest_ok"]+=1
+        else:
+            _structure_tf_stats["watchdog_rest_fail"]+=1
+        return rows
+
+    # Normal hydration remains WS-API first with REST host-racing fallback.
     rows=await binance_ws_api_klines(symbol,interval,limit,wait_ready=2.5,response_timeout=7.0)
     if isinstance(rows,list) and rows:
         _ws_api_stats["structure_ok"]+=1
@@ -1879,12 +1891,16 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
 
 
 RECOVERY_BATCH = int(os.environ.get("PSI_RECOVERY_BATCH", "4"))
+WATCHDOG_STRUCTURE_RESCUE_BATCH = int(os.environ.get("PSI_WATCHDOG_STRUCTURE_RESCUE_BATCH", "4"))
+WATCHDOG_STRUCTURE_CRITICAL_BATCH = int(os.environ.get("PSI_WATCHDOG_STRUCTURE_CRITICAL_BATCH", "6"))
+WATCHDOG_STRUCTURE_RESCUE_SEED_SLOTS = int(os.environ.get("PSI_WATCHDOG_STRUCTURE_RESCUE_SEED_SLOTS", "2"))
+WATCHDOG_STRUCTURE_RESCUE_COOLDOWN_S = float(os.environ.get("PSI_WATCHDOG_STRUCTURE_RESCUE_COOLDOWN_S", "30"))
 RECOVERY_PRIORITY = 80
 # Structure may be cached for research, but execution-tier freshness is much
 # tighter than before. This prevents 3-5 minute-old structure from supporting
 # a live PRE/HOT/IGNITION label.
 RECOVERY_STALE_S = INTEGRITY_STRUCTURE_MAX_AGE_S
-recovery_stats = {"passes":0,"ok":0,"fail":0,"fast_ok":0,"fast_fail":0,"seed_ok":0,"seed_fail":0,"seed_cycles":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
+recovery_stats = {"passes":0,"ok":0,"fail":0,"fast_ok":0,"fast_fail":0,"seed_ok":0,"seed_fail":0,"seed_cycles":0,"rescue_ok":0,"rescue_fail":0,"rescue_cycles":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
 _recovery_inflight = set()
 RECOVERY_FAIL_COOLDOWN_S = 20.0
@@ -2063,12 +2079,14 @@ async def structure_cache_loop():
 WATCHDOG_INTERVAL_S = 15.0
 WATCHDOG_STARTUP_GRACE_S = 45.0
 WATCHDOG_STRUCTURE_STALL_S = 75.0
+WATCHDOG_STRUCTURE_CRITICAL_FRESH = 8
 WATCHDOG_POOL_STALL_S = 75.0
 WATCHDOG_SHARD_STALL_S = 45.0
 WATCHDOG_EXT_STALE_S = 50.0
 watchdog_stats = {
     "cycles":0,"healthy":0,"degraded":0,"actions":0,"errors":0,
-    "ext_refresh":0,"structure_kicks":0,"pool_kicks":0,"shard_kicks":0,
+    "ext_refresh":0,"structure_kicks":0,"structure_rescues":0,"structure_rescue_ok":0,
+    "pool_kicks":0,"shard_kicks":0,
 }
 _watchdog_started = time.time()
 _watchdog_last_ever_cov = 0
@@ -2077,6 +2095,7 @@ _watchdog_last_pool = 0
 _watchdog_last_pool_progress = time.time()
 _watchdog_last_shards = 0
 _watchdog_last_shard_progress = time.time()
+_watchdog_last_structure_rescue = 0.0
 
 def _structure_age_recovery(sym):
     ts = int(q.structure_ms.get(sym,0) or 0)
@@ -2257,17 +2276,23 @@ async def _hydrate_one(sym, lane="FAST"):
     if sym in _recovery_inflight:
         return None
     _recovery_inflight.add(sym)
-    if lane=="FAST":
+    high_priority = lane in {"FAST","WATCHDOG"}
+    if high_priority:
         _fast_recovery_active += 1
+    rest_token=None
     try:
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
+        if lane=="WATCHDOG":
+            rest_token=_structure_watchdog_rest_ctx.set(True)
         try:
-            timeout_s=18.0 if lane=="FAST" else 22.0
+            timeout_s=20.0 if lane=="WATCHDOG" else (18.0 if lane=="FAST" else 22.0)
             sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=timeout_s)
         finally:
+            if rest_token is not None:
+                _structure_watchdog_rest_ctx.reset(rest_token)
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
             raise RuntimeError("structure payload incomplete")
@@ -2276,29 +2301,42 @@ async def _hydrate_one(sym, lane="FAST"):
         if not isinstance(app.anomaly_state.get(sym),dict):
             try:
                 an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=3.0)
-                if isinstance(an,dict): app.anomaly_state[sym]=an
+                if isinstance(an,dict):
+                    app.anomaly_state[sym]=an
             except Exception:
                 pass
         row=app.evaluate_symbol(sym)
-        if isinstance(row,dict) and row: q.latest[sym]=row
+        if isinstance(row,dict) and row:
+            q.latest[sym]=row
         _recovery_retry_after.pop(sym,None)
         _structure_cache_dirty=True
         recovery_stats["ok"]+=1
-        recovery_stats["fast_ok" if lane=="FAST" else "seed_ok"]+=1
+        if lane=="FAST":
+            recovery_stats["fast_ok"]+=1
+        elif lane=="WATCHDOG":
+            recovery_stats["rescue_ok"]+=1
+        else:
+            recovery_stats["seed_ok"]+=1
         return True
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        _recovery_retry_after[sym]=time.time()+RECOVERY_FAIL_COOLDOWN_S
+        _recovery_retry_after[sym]=time.time()+(8.0 if lane=="WATCHDOG" else RECOVERY_FAIL_COOLDOWN_S)
         recovery_stats["fail"]+=1
-        recovery_stats["fast_fail" if lane=="FAST" else "seed_fail"]+=1
-        if recovery_stats["fail"]<=40:
+        if lane=="FAST":
+            recovery_stats["fast_fail"]+=1
+        elif lane=="WATCHDOG":
+            recovery_stats["rescue_fail"]+=1
+        else:
+            recovery_stats["seed_fail"]+=1
+        if recovery_stats["fail"]<=60:
             print(f"Ψ-RECOVERY {lane}_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
         return False
     finally:
-        if lane=="FAST":
+        if high_priority:
             _fast_recovery_active=max(0,_fast_recovery_active-1)
         _recovery_inflight.discard(sym)
+
 
 async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
@@ -2324,8 +2362,10 @@ async def structure_recovery_loop():
             and s not in _recovery_inflight
         ]
         scope_pos={s:i for i,s in enumerate(scope)}
+        execution_set=set(getattr(app,"selected_micro_symbols",[]) or [])
         targets.sort(
             key=lambda s:(
+                0 if s in execution_set else 1,
                 0 if _structure_age_recovery(s)<999000 else 1,
                 scope_pos.get(s,9999),
             )
@@ -2465,6 +2505,97 @@ async def _watchdog_refresh_extension():
     return n
 
 
+def _watchdog_structure_priority(scope):
+    """Execution-first stale/missing structure rescue order."""
+    out=[];seen=set()
+    universe_set=set(getattr(q,"universe_set",set()) or set())
+    def add(sym):
+        sym=str(sym or "")
+        if sym and sym in universe_set and sym not in seen:
+            seen.add(sym);out.append(sym)
+
+    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+        add(sym)
+
+    ranked=[]
+    for sym,row in list(getattr(q,"latest",{}).items()):
+        if sym not in universe_set or not isinstance(row,dict):
+            continue
+        state=str(row.get("formal_state") or row.get("state") or "")
+        pstate=str(row.get("pinpoint_state") or "")
+        rank=(
+            3 if state=="BUY NOW" else
+            2 if state=="PRE-IGNITION" else
+            1 if state in {"EARLY OPPORTUNITY","WATCH"} or pstate in {"BUY NOW","PINPOINT ARMED","SETUP READY"} else 0
+        )
+        if rank:
+            ranked.append((rank,f(row.get("score")),str(sym)))
+    for _,_,sym in sorted(ranked,reverse=True):
+        add(sym)
+
+    for sym in scope:
+        add(sym)
+    return out
+
+
+async def _watchdog_structure_rescue(scope, fresh_cov):
+    """Direct multi-host REST rescue for critically stale execution structure."""
+    global _watchdog_last_structure_rescue
+    now=time.time()
+    if now-_watchdog_last_structure_rescue<WATCHDOG_STRUCTURE_RESCUE_COOLDOWN_S:
+        return {"attempted":0,"ok":0,"symbols":[],"cooldown":True}
+
+    priority=_watchdog_structure_priority(scope)
+    batch_size=(
+        WATCHDOG_STRUCTURE_CRITICAL_BATCH
+        if fresh_cov<min(len(scope),WATCHDOG_STRUCTURE_CRITICAL_FRESH)
+        else WATCHDOG_STRUCTURE_RESCUE_BATCH
+    )
+    chosen=[]
+    unseeded=0
+    for sym in priority:
+        if len(chosen)>=batch_size:
+            break
+        if sym in _recovery_inflight:
+            continue
+        if _structure_age_recovery(sym)<=RECOVERY_STALE_S:
+            continue
+        seeds=_raw_seed_count(sym)
+        if seeds<3:
+            if unseeded>=WATCHDOG_STRUCTURE_RESCUE_SEED_SLOTS:
+                continue
+            unseeded+=1
+        chosen.append(sym)
+
+    if not chosen:
+        _watchdog_last_structure_rescue=now
+        return {"attempted":0,"ok":0,"symbols":[],"cooldown":False}
+
+    for sym in chosen:
+        _recovery_retry_after.pop(sym,None)
+        route_key=f"structure_klines:{sym}"
+        _rest_good_host.pop(route_key,None)
+        for key in list(_rest_host_bad_until.keys()):
+            if isinstance(key,tuple) and key and str(key[0])==route_key:
+                _rest_host_bad_until.pop(key,None)
+
+    _watchdog_last_structure_rescue=now
+    recovery_stats["rescue_cycles"]+=1
+    started=time.time()
+    results=await asyncio.gather(*[_hydrate_one(sym,"WATCHDOG") for sym in chosen])
+    ok=sum(r is True for r in results)
+    watchdog_stats["structure_rescues"]+=1
+    watchdog_stats["structure_rescue_ok"]+=ok
+    _save_structure_raw_cache()
+    print(
+        f"Ψ-WATCHDOG STRUCTURE_RESCUE attempted={len(chosen)} ok={ok} "
+        f"fail={len(chosen)-ok} symbols={chosen} sec={time.time()-started:.2f} "
+        f"restOK={_structure_tf_stats['watchdog_rest_ok']} restFail={_structure_tf_stats['watchdog_rest_fail']}",
+        flush=True,
+    )
+    return {"attempted":len(chosen),"ok":ok,"symbols":chosen,"cooldown":False}
+
+
 def _watchdog_pinpoint_count():
     n=0
     for sym,row in list(getattr(q,"latest",{}).items()):
@@ -2478,6 +2609,7 @@ async def watchdog_loop():
     global _watchdog_last_ever_cov,_watchdog_last_cov_progress
     global _watchdog_last_pool,_watchdog_last_pool_progress
     global _watchdog_last_shards,_watchdog_last_shard_progress
+    global _watchdog_last_structure_rescue
 
     while app.session is None or not getattr(q,"universe",None):
         await asyncio.sleep(.5)
@@ -2521,31 +2653,37 @@ async def watchdog_loop():
                     actions.append("EXT_REFRESH_FAIL")
                     print(f"Ψ-WATCHDOG ERROR EXT_REFRESH {type(exc).__name__}: {exc}",flush=True)
 
-            # If structure coverage stops advancing, rotate the preferred kline route
-            # and release only expired recovery cooldowns. The normal recovery loop
-            # remains the sole hydrator, preventing duplicate request storms.
+            # If structure is critically low or progress stalls, directly
+            # hydrate execution-priority symbols over an independent multi-host
+            # REST route. This can also bootstrap a limited number of missing
+            # raw seeds and never changes signal thresholds.
+            structure_critical=fresh_cov<min(total,WATCHDOG_STRUCTURE_CRITICAL_FRESH)
+            structure_stalled=now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
             if (
                 startup_age>WATCHDOG_STARTUP_GRACE_S
                 and fresh_cov<min(total,(16 if pool==0 else 32))
-                and now-_watchdog_last_cov_progress>WATCHDOG_STRUCTURE_STALL_S
+                and (structure_critical or structure_stalled)
+                and now-_watchdog_last_structure_rescue>=WATCHDOG_STRUCTURE_RESCUE_COOLDOWN_S
             ):
-                rotated=0
-                for key in list(_rest_good_host.keys()):
-                    if str(key).startswith("structure_klines:"):
-                        _rest_good_host.pop(key,None);rotated+=1
-                released=0
-                for sym,until in list(_recovery_retry_after.items()):
-                    if until<=now:
-                        _recovery_retry_after.pop(sym,None);released+=1
-                _watchdog_last_cov_progress=now
-                watchdog_stats["structure_kicks"]+=1
-                watchdog_stats["actions"]+=1
-                actions.append(f"STRUCTURE_ROUTE_ROTATE:{rotated}")
-                print(
-                    f"Ψ-WATCHDOG ACTION STRUCTURE_ROUTE_ROTATE coverage={ever_cov}/{total} "
-                    f"routesRotated={rotated} expiredReleased={released} activeCooldowns={len(_recovery_retry_after)}",
-                    flush=True,
-                )
+                try:
+                    before_fresh=fresh_cov
+                    before_ever=ever_cov
+                    rescue=await asyncio.wait_for(
+                        _watchdog_structure_rescue(scope,fresh_cov),
+                        timeout=24.0,
+                    )
+                    fresh_cov=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
+                    ever_cov=sum(1 for s in scope if _structure_age_recovery(s)<999000)
+                    if fresh_cov>before_fresh or ever_cov>before_ever:
+                        _watchdog_last_cov_progress=now
+                        _watchdog_last_ever_cov=max(_watchdog_last_ever_cov,ever_cov)
+                    watchdog_stats["structure_kicks"]+=1
+                    watchdog_stats["actions"]+=1
+                    actions.append(f"STRUCTURE_RESCUE:{rescue.get('ok',0)}/{rescue.get('attempted',0)}")
+                except Exception as exc:
+                    watchdog_stats["errors"]+=1
+                    actions.append("STRUCTURE_RESCUE_FAIL")
+                    print(f"Ψ-WATCHDOG ERROR STRUCTURE_RESCUE {type(exc).__name__}: {exc}",flush=True)
 
             # Continuity is no longer allowed to freeze at a small sticky pool.
             # Whenever verified fresh structure materially exceeds the current
@@ -2598,7 +2736,28 @@ async def watchdog_loop():
             rest_recent_ok=(_rest_last_fail<=0 or now-_rest_last_fail>60.0)
             continuity_ok=(startup_age<=WATCHDOG_STARTUP_GRACE_S or pool>0)
             shard_ok=(pool==0 or shards==tape.SHARDS or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S)
-            healthy=ext_live and structure_ready and rest_recent_ok and continuity_ok and shard_ok
+
+            live_micro=0
+            for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+                try:
+                    if bool(app.micro_metrics(sym).get("micro_ready")):
+                        live_micro+=1
+                except Exception:
+                    pass
+            execution_micro_ok=(
+                startup_age<=WATCHDOG_STARTUP_GRACE_S
+                or pool==0
+                or live_micro>0
+            )
+
+            health_reasons=[]
+            if not structure_ready: health_reasons.append("STRUCTURE_COVERAGE")
+            if not execution_micro_ok: health_reasons.append("EXECUTION_MICRO")
+            if not shard_ok: health_reasons.append("MONSTER_SHARDS")
+            if not ext_live: health_reasons.append("EXTENSION")
+            if not rest_recent_ok: health_reasons.append("REST_HEALTH")
+            if not continuity_ok: health_reasons.append("CONTINUITY")
+            healthy=not health_reasons
 
             # RiskMap diagnostics: report actual live map/cache state. The old
             # "riskCache" field was only a cache-hit counter and could show 0
@@ -2617,12 +2776,13 @@ async def watchdog_loop():
             if healthy: watchdog_stats["healthy"]+=1
             else: watchdog_stats["degraded"]+=1
             status="HEALTHY" if healthy else "RECOVERING"
+            reason="OK" if healthy else ",".join(health_reasons)
             print(
-                f"Ψ-WATCHDOG status={status} cycle={watchdog_stats['cycles']} "
+                f"Ψ-WATCHDOG status={status} reason={reason} cycle={watchdog_stats['cycles']} "
                 f"structureFresh={fresh_cov}/{total} structureEver={ever_cov}/{total} "
-                f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} "
+                f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} liveMicro={live_micro}/{pool} "
                 f"monsterShards={shards}/{tape.SHARDS} extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wdStructRestOK={_structure_tf_stats['watchdog_rest_ok']} wdStructRestFail={_structure_tf_stats['watchdog_rest_fail']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )
@@ -2638,7 +2798,7 @@ async def main():
     for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
         try: mod.VERSION=VERSION
         except Exception: pass
-    print("[v11.0.5.47] Ψ DEPTH-FRAME READY EXECUTION + RELIABLE RISKMAP active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
+    print("[v11.0.5.48] Ψ STRUCTURE RECOVERY WATCHDOG + DEPTH-FRAME EXECUTION active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog now reports the failing subsystem explicitly and can rescue critically stale execution structure through a bounded direct multi-host REST lane, including limited bootstrap of missing structure seeds. Signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
