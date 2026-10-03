@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.12-worker-budget-headroom"
+VERSION = "12.1.13-circuit-failover"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1461,45 +1461,50 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["fetch_v11_cache_ok"] += 1
             _stats[f"v11_{tf}_ok"] += 1
 
-    # 1) FAST core hydration uses exactly one bounded transport: the isolated
-    # V12 Binance WS-API socket. v12_ws_klines already owns ready/gate/send/
-    # response timeouts, so do NOT wrap it in another asyncio.wait_for.
+    # 1) Primary FAST transport: isolated V12 Binance WS. If repeated raw
+    # timeouts/status failures trip the existing circuit breaker, temporarily
+    # bypass the unhealthy dedicated socket instead of repeatedly hammering it.
     if not isinstance(rows, list) or len(rows) < need:
-        try:
-            rows = await v12_ws_klines(
-                sym,
-                tf,
-                limit,
-                shard=0,
-                response_timeout=5.0 if deep else 4.8,
-                ready_timeout=0.8,
-                gate_timeout=1.0,
-                send_timeout=0.9,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            rows = None
+        if not _ws_circuit_open():
+            try:
+                rows = await v12_ws_klines(
+                    sym,
+                    tf,
+                    limit,
+                    shard=0,
+                    response_timeout=5.0 if deep else 4.8,
+                    ready_timeout=0.8,
+                    gate_timeout=1.0,
+                    send_timeout=0.9,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                rows = None
 
-        if isinstance(rows, list) and len(rows) >= need:
-            _stats["dedicated_ws_ok"] += 1
-            _stats[f"dedicated_{tf}_ok"] += 1
+            if isinstance(rows, list) and len(rows) >= need:
+                _stats["dedicated_ws_ok"] += 1
+                _stats[f"dedicated_{tf}_ok"] += 1
+            else:
+                _stats["dedicated_ws_miss"] += 1
+                _stats[f"dedicated_{tf}_miss"] += 1
+                rows = None
         else:
-            _stats["dedicated_ws_miss"] += 1
-            _stats[f"dedicated_{tf}_miss"] += 1
+            _stats["dedicated_circuit_skip"] += 1
             rows = None
 
-    # 2) Only DEEP history may use fallbacks. FAST misses return immediately so
-    # the scheduler never pins a worker behind multiple transports.
-    if rows is None and deep:
+    # 2) During FAST, use the proven legacy WS only while the dedicated
+    # circuit is open. This keeps normal FAST isolated, but preserves progress
+    # during a temporary dedicated-socket outage. DEEP may always use fallback.
+    if rows is None and (deep or _ws_circuit_open()):
         try:
             rows = await legacy.binance_ws_api_klines(
                 sym,
                 tf,
                 limit,
-                wait_ready=0.8,
-                response_timeout=4.0,
-                gate_timeout=0.7,
+                wait_ready=0.7,
+                response_timeout=3.2 if deep else 2.4,
+                gate_timeout=0.6,
             )
         except asyncio.CancelledError:
             raise
@@ -1508,10 +1513,13 @@ async def _fetch_tf(sym, tf, deep=False):
 
         if isinstance(rows, list) and len(rows) >= need:
             _stats["shared_ws_fallback_ok"] += 1
+            _stats[f"shared_{tf}_ok"] += 1
         else:
             _stats["shared_ws_fallback_miss"] += 1
+            _stats[f"shared_{tf}_miss"] += 1
             rows = None
 
+    # 3) REST remains DEEP-only; FAST circuit failover never touches REST.
     if rows is None and deep:
         try:
             rows = await v12_rest_klines(sym, tf, limit)
@@ -2009,7 +2017,10 @@ async def strategy_loop():
                 f"{_stats.get('ws_fail',0)} stageTO={_stats.get('dedicated_stage_timeout',0)} "
                 f"gateTO={_stats.get('ws_gate_timeout',0)} lockTO={_stats.get('ws_lock_timeout',0)} "
                 f"sendTO={_stats.get('ws_send_timeout',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
-                f"{_stats.get('shared_ws_fallback_miss',0)} fetchRestOK={_stats.get('fetch_rest_ok',0)}",
+                f"{_stats.get('shared_ws_fallback_miss',0)} sharedD1={_stats.get('shared_1d_ok',0)}/{_stats.get('shared_1d_miss',0)} "
+                f"sharedH1={_stats.get('shared_1h_ok',0)}/{_stats.get('shared_1h_miss',0)} "
+                f"sharedH4={_stats.get('shared_4h_ok',0)}/{_stats.get('shared_4h_miss',0)} "
+                f"fetchRestOK={_stats.get('fetch_rest_ok',0)} lastWS={_stats.get('ws_last_error','-')}",
                 flush=True,
             )
 
