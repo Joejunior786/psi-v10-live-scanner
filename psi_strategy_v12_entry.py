@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.6-dedicated-hydration-ws"
+VERSION = "12.1.7-parallel-core-completion"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1584,10 +1584,14 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
             if not item.get("snap") or stale or needs_deep:
                 needed.append(tf)
 
-    # Complete each symbol rather than spraying 1/3 snapshots across many
-    # symbols. Eight symbol workers map cleanly to eight physical RPC shards.
-    for tf in needed:
-        await one(tf, deep=(force_deep or active))
+    # Complete the symbol's missing core timeframes together. The global
+    # FETCH_CONCURRENCY semaphore still caps Binance load at six requests, so
+    # this improves completion latency without increasing total concurrency.
+    if needed:
+        await asyncio.gather(
+            *(one(tf, deep=(force_deep or active)) for tf in needed),
+            return_exceptions=True,
+        )
 
     if active and not needed:
         weekly = _cache.get(sym, {}).get("1w") or {}
@@ -2092,7 +2096,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.6] MULTI-SETUP AUTHORITY + DEDICATED HYDRATION WS active — legacy BUY/PRE authority disabled; "
+        "[v12.1.7] MULTI-SETUP AUTHORITY + PARALLEL CORE COMPLETION active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
