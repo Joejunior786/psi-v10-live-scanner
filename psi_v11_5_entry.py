@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.12-breakout-structural-intelligence"
+VERSION="11.0.5.13-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -73,7 +73,7 @@ async def resilient_api_get(client, path, params=None):
     route_key = "structure_klines" if is_structure else ("risk_klines" if is_risk else ("background_klines" if lane=="klines" else lane))
 
     if lane=="klines":
-        timeout_s,max_hosts=(6.5,5) if is_structure else ((6.5,3) if is_risk else (5.5,3))
+        timeout_s,max_hosts=(4.0,2) if is_structure else ((6.5,3) if is_risk else (5.5,3))
     elif lane=="depth":
         timeout_s,max_hosts=3.5,2
     elif lane=="ticker24":
@@ -227,7 +227,8 @@ app.api_get = resilient_api_get
 _original_load_klines = app.load_klines
 _structure_tf_cache = {}
 STRUCTURE_TF_CACHE_S = 30.0
-STRUCTURE_TF_RETRY_DELAY_S = 0.20
+STRUCTURE_TF_RETRY_DELAY_S = 0.12
+STRUCTURE_TF_ATTEMPTS = 3
 _structure_tf_stats = {"cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0}
 
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
@@ -241,21 +242,19 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
         _structure_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    rows=await _original_load_klines(client, symbol, interval, limit)
-    if isinstance(rows,list) and rows:
-        _structure_tf_cache[key]=(time.time(),rows)
-        _structure_tf_stats["fetch_ok"]+=1
-        return rows
-
-    # The first resilient route attempt marks failed hosts temporarily bad.
-    # A second call therefore uses the remaining healthy endpoints instead of
-    # repeating already-failed routes.
-    await asyncio.sleep(STRUCTURE_TF_RETRY_DELAY_S)
-    rows=await _original_load_klines(client, symbol, interval, limit)
-    if isinstance(rows,list) and rows:
-        _structure_tf_cache[key]=(time.time(),rows)
-        _structure_tf_stats["retry_ok"]+=1
-        return rows
+    for attempt in range(STRUCTURE_TF_ATTEMPTS):
+        rows=await _original_load_klines(client, symbol, interval, limit)
+        if isinstance(rows,list) and rows:
+            _structure_tf_cache[key]=(time.time(),rows)
+            if attempt==0:
+                _structure_tf_stats["fetch_ok"]+=1
+            else:
+                _structure_tf_stats["retry_ok"]+=1
+            return rows
+        if attempt+1<STRUCTURE_TF_ATTEMPTS:
+            # Failed hosts are temporarily quarantined by resilient_api_get,
+            # so each round naturally advances to a different endpoint group.
+            await asyncio.sleep(STRUCTURE_TF_RETRY_DELAY_S)
 
     _structure_tf_stats["fail"]+=1
     print(
@@ -630,7 +629,7 @@ RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 240.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
-RECOVERY_FAIL_COOLDOWN_S = 18.0
+RECOVERY_FAIL_COOLDOWN_S = 16.0
 RECOVERY_CYCLE_SLEEP_S = 1.5
 STRUCTURE_CACHE_MAX_AGE_S = 300.0
 STRUCTURE_CACHE_PATH = os.environ.get("PSI_STRUCTURE_CACHE_PATH", "/data/psi_v11_structure_cache.json" if os.path.isdir("/data") else "/app/psi_v11_structure_cache.json")
@@ -801,7 +800,7 @@ async def _hydrate_one(sym):
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=42.0)
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=30.0)
         finally:
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
