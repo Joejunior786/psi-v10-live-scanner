@@ -1049,10 +1049,10 @@ async def _risk_load_klines(client, symbol, interval, limit):
         rows=await asyncio.wait_for(
             binance_ws_api_klines(
                 symbol,interval,limit,
-                wait_ready=0.8,
-                response_timeout=3.0,
+                wait_ready=0.5,
+                response_timeout=1.8,
             ),
-            timeout=4.2,
+            timeout=2.6,
         )
     except asyncio.TimeoutError:
         rows=None
@@ -1066,7 +1066,7 @@ async def _risk_load_klines(client, symbol, interval, limit):
     try:
         rows=await asyncio.wait_for(
             _risk_fetch_race(client, symbol, interval, limit),
-            timeout=8.5,
+            timeout=4.8,
         )
     except asyncio.TimeoutError:
         _risk_tf_stats["fail"]+=1
