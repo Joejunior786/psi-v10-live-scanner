@@ -1278,7 +1278,7 @@ def _live_pullback_exhaustion(sym,ca):
         score+=min(28.0,8.0+depth*8.0)
     score+=min(18.0,max(0.0,(buy-.50)*90.0))
     score+=min(16.0,max(0.0,cvd*16.0))
-    score+=min(15.0,tape*.15)
+    score+=min(15.0,tape_score*.15)
     score+=min(12.0,layers*2.0)
     score+=min(8.0,rebound*18.0)
     if "OFI_POS" in reasons: score+=5.0
@@ -1288,7 +1288,7 @@ def _live_pullback_exhaustion(sym,ca):
         "depth":round(depth,3),
         "rebound":round(rebound,3),
         "score":round(cl(score,0,100),1),
-        "buy":buy,"cvd":cvd,"tape":tape,
+        "buy":buy,"cvd":cvd,"tape":tape_score,
     }
 
 def _balanced_monster_board(candidates):
