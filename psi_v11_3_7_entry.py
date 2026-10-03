@@ -262,6 +262,8 @@ async def _rest_fetch_agg(sym):
                     tape_stats['rest_micro_trade_bridge_fail']+=1
             added+=1
         tape_stats['rest_trades']+=added
+        if added:
+            tape_stats['rest_last_trade_ms']=int(time.time()*1000)
         return added
     except asyncio.CancelledError:
         raise
@@ -277,6 +279,7 @@ async def _rest_fetch_depth(sym):
         try:
             app.process_partial_depth_snapshot(sym,d)
             tape_stats['rest_depth_ok']+=1
+            tape_stats['rest_last_depth_ms']=int(time.time()*1000)
             return 1
         except Exception:
             tape_stats['rest_depth_process_fail']+=1
@@ -317,6 +320,8 @@ async def _rest_book_snapshot():
                 pass
             n+=1
         _rest_last_book_snapshot=now
+        if n:
+            tape_stats['rest_last_book_ms']=int(now*1000)
         tape_stats['rest_books']+=n
         tape_stats['rest_book_snapshots']+=1
         return n
