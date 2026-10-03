@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.32-hard-live-integrity"
+VERSION="11.0.5.33-integrity-sync-risk-recovery"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -28,11 +28,16 @@ RECOVERY_ROTATION_PERIOD_S = float(os.environ.get("PSI_RECOVERY_ROTATION_PERIOD_
 # Hard live-integrity thresholds. Elevated states are fail-closed if any
 # mandatory feed is outside these bounds.
 INTEGRITY_STRUCTURE_MAX_AGE_S = float(os.environ.get("PSI_INTEGRITY_STRUCTURE_MAX_AGE_S", "120"))
-INTEGRITY_TAPE_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_TAPE_MAX_AGE_MS", "1800"))
-INTEGRITY_BBO_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_BBO_MAX_AGE_MS", "2500"))
-INTEGRITY_MICRO_TRADE_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_MICRO_TRADE_MAX_AGE_MS", "5000"))
-INTEGRITY_MICRO_BOOK_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_MICRO_BOOK_MAX_AGE_MS", "3000"))
-INTEGRITY_RISK_MAX_AGE_S = float(os.environ.get("PSI_INTEGRITY_RISK_MAX_AGE_S", "45"))
+# Integrity freshness is aligned with the native micro engine: aggTrade data
+# remains live for 15s and depth/BBO for 5s. The event-tape lane is a separate
+# fast signal and is only mandatory for states that explicitly depend on it.
+INTEGRITY_TAPE_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_TAPE_MAX_AGE_MS", "5000"))
+INTEGRITY_BBO_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_BBO_MAX_AGE_MS", "5000"))
+INTEGRITY_MICRO_TRADE_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_MICRO_TRADE_MAX_AGE_MS", "15000"))
+INTEGRITY_MICRO_BOOK_MAX_AGE_MS = float(os.environ.get("PSI_INTEGRITY_MICRO_BOOK_MAX_AGE_MS", "5000"))
+INTEGRITY_RISK_MAX_AGE_S = float(os.environ.get("PSI_INTEGRITY_RISK_MAX_AGE_S", "90"))
+INTEGRITY_CACHE_TTL_S = float(os.environ.get("PSI_INTEGRITY_CACHE_TTL_S", "0.25"))
+_integrity_cache = {}
 
 _discovery_cycle = 0
 _discovery_cursor = 0
@@ -1025,6 +1030,13 @@ async def _risk_fetch_race(client, symbol, interval, limit):
     return []
 
 async def _risk_load_klines(client, symbol, interval, limit):
+    """Fast bounded risk-plan candle loader.
+
+    Risk-map builds previously chained multiple WS waits and a multi-host REST
+    walk, allowing one symbol to consume the full 75s outer timeout. A risk
+    timeframe now gets one short WS attempt followed by a bounded REST race.
+    Three timeframes are still fetched concurrently by the RiskMap builder.
+    """
     global _risk_last_ok
     symbol=str(symbol); interval=str(interval); limit=int(limit)
     key=(symbol,interval,limit)
@@ -1033,25 +1045,33 @@ async def _risk_load_klines(client, symbol, interval, limit):
         _risk_tf_stats["cache_hit"]+=1
         return cached[1]
 
-    for attempt in range(RISK_WS_ATTEMPTS):
-        rows=await binance_ws_api_klines(
-            symbol,interval,limit,
-            wait_ready=2.5 if attempt==0 else 1.25,
-            response_timeout=6.0,
+    try:
+        rows=await asyncio.wait_for(
+            binance_ws_api_klines(
+                symbol,interval,limit,
+                wait_ready=0.8,
+                response_timeout=3.0,
+            ),
+            timeout=4.2,
         )
-        if isinstance(rows,list) and rows:
-            _risk_tf_cache[key]=(time.time(),rows)
-            _risk_last_ok=time.time()
-            _ws_api_stats["risk_ok"]+=1
-            if attempt==0:
-                _risk_tf_stats["ws_ok"]+=1
-            else:
-                _risk_tf_stats["ws_retry_ok"]+=1
-            return rows
-        if attempt+1<RISK_WS_ATTEMPTS:
-            await asyncio.sleep(RISK_WS_RETRY_DELAY_S)
+    except asyncio.TimeoutError:
+        rows=None
+    if isinstance(rows,list) and rows:
+        _risk_tf_cache[key]=(time.time(),rows)
+        _risk_last_ok=time.time()
+        _ws_api_stats["risk_ok"]+=1
+        _risk_tf_stats["ws_ok"]+=1
+        return rows
 
-    return await _risk_fetch_race(client, symbol, interval, limit)
+    try:
+        rows=await asyncio.wait_for(
+            _risk_fetch_race(client, symbol, interval, limit),
+            timeout=8.5,
+        )
+    except asyncio.TimeoutError:
+        _risk_tf_stats["fail"]+=1
+        return []
+    return rows if isinstance(rows,list) else []
 
 # V10.19.1 resolves this attribute at call time. Risk-plan candles use their
 # own bounded host races and cannot be crowded out by structure/background work.
@@ -1197,7 +1217,10 @@ def candidate_v5(sym,row,c,d):
     # Final integrity overlay is deliberately applied after every inherited
     # scorer. It may only downgrade elevated labels; it can never promote.
     try:
-        integ=_integrity_status(sym,row)
+        require_event_tape=str(out.get("state") or "") in {
+            "MONSTER-HOT","MONSTER-IGNITION","MONSTER-RESCUE","MONSTER-SEED"
+        }
+        integ=_integrity_status(sym,row,require_event_tape=require_event_tape)
     except Exception:
         integ={"verified":False,"blockers":["INTEGRITY_CHECK_ERROR"],"ages":{}}
     out["integrityVerified"]=bool(integ.get("verified"))
@@ -1217,7 +1240,17 @@ def candidate_v5(sym,row,c,d):
 base.candidate=candidate_v5
 
 def _live_pullback_exhaustion(sym,ca):
-    if not bool(ca.get("integrityVerified")):
+    # Pullback exhaustion needs native live micro plus a recent event-tape/BBO
+    # observation, but does not require the ultra-fast 1.5s Monster tape-ready
+    # condition or a pre-existing Monster execution label.
+    integ=_integrity_status(sym,q.latest.get(sym) or {},require_event_tape=False)
+    tm=tape.tape_metric(sym)
+    event_live=(
+        f(tm.get("age_ms"),999999)<=INTEGRITY_TAPE_MAX_AGE_MS
+        and f(tm.get("book_age_ms"),999999)<=INTEGRITY_BBO_MAX_AGE_MS
+        and int(f(tm.get("trades_5s")))>=1
+    )
+    if not bool(integ.get("verified")) or not event_live:
         return {"state":"DATA_WAIT","depth":0.0,"rebound":0.0,"score":0.0}
     h=base.price_hist.get(sym)
     if not h or len(h)<8:
@@ -1544,6 +1577,26 @@ def _candidate_move_plan(r):
     shadow=move_engine.expected_move_shadow(sym,ref_entry)
 
     plans=[]
+    # A live Pinpoint trigger/stop is already an execution risk plan. Convert
+    # it into deterministic R-multiple targets so RiskMap outages cannot erase
+    # an otherwise valid execution plan.
+    pin_entry=f(row.get("pinpoint_trigger"))
+    pin_stop=f(row.get("pinpoint_stop"))
+    pin_risk=f(row.get("pinpoint_risk_pct"))
+    pin_status=str(row.get("pinpoint_entry_status") or "")
+    if pin_entry>0 and pin_stop>0 and pin_stop<pin_entry and pin_risk>0 and pin_status in {"PINPOINT_ARMED","PINPOINT_TRIGGERED"}:
+        rr=pin_entry-pin_stop
+        pin_updated=f(row.get("updated_ms"))/1000.0 if f(row.get("updated_ms"))>0 else time.time()
+        pin_plan={
+            "updated":pin_updated,
+            "entry_trigger":pin_entry,
+            "stop_loss":pin_stop,
+            "tp1":pin_entry+rr,
+            "tp2":pin_entry+2.0*rr,
+            "tp3":pin_entry+3.0*rr,
+            "plan_state":"PINPOINT_R_PLAN",
+        }
+        plans.append((pin_updated,"PINPOINT_R",pin_plan))
     try:
         ri=move_engine.riskmap.risk_intel(sym)
         if isinstance(ri,dict):
@@ -1981,14 +2034,22 @@ def _structure_age_recovery(sym):
     ts = int(q.structure_ms.get(sym,0) or 0)
     return 999999.0 if ts <= 0 else max(0.0,(q.ms()-ts)/1000.0)
 
-def _integrity_status(sym,row=None,require_risk=False):
-    """Return hard current-data integrity for elevated execution states.
+def _integrity_status(sym,row=None,require_risk=False,require_event_tape=False):
+    """One authoritative hard-live integrity check.
 
-    This checks independent timestamps rather than trusting a score/label.
-    Discovery can continue when this fails, but PRE/HOT/IGNITION/BUY may not.
+    Native micro readiness is taken from app.micro_metrics(), the same source
+    used by the formal evaluator. Event tape is only mandatory for Monster
+    states that explicitly depend on that fast lane. BUY accepts the Pinpoint
+    trigger/stop risk plan first, with RiskMap as a structural fallback.
     """
     sym=str(sym or "")
     row=row if isinstance(row,dict) else (q.latest.get(sym) or {})
+    cache_key=(sym,bool(require_risk),bool(require_event_tape))
+    cached=_integrity_cache.get(cache_key)
+    now=time.time()
+    if cached and now-f(cached.get("t"))<=INTEGRITY_CACHE_TTL_S:
+        return dict(cached.get("v") or {})
+
     blockers=[]
     ages={}
 
@@ -1996,16 +2057,6 @@ def _integrity_status(sym,row=None,require_risk=False):
     ages["structure_s"]=round(structure_age,3)
     if structure_age>INTEGRITY_STRUCTURE_MAX_AGE_S:
         blockers.append("STALE_STRUCTURE")
-
-    tm=tape.tape_metric(sym)
-    tape_age=f(tm.get("age_ms"),999999.0)
-    bbo_age=f(tm.get("book_age_ms"),999999.0)
-    ages["tape_ms"]=round(tape_age,1)
-    ages["bbo_ms"]=round(bbo_age,1)
-    if not tm.get("ready") or tape_age>INTEGRITY_TAPE_MAX_AGE_MS:
-        blockers.append("STALE_OR_UNREADY_TAPE")
-    if bbo_age>INTEGRITY_BBO_MAX_AGE_MS:
-        blockers.append("STALE_BBO")
 
     micro=(getattr(app,"micro_state",{}) or {}).get(sym) or {}
     now_ms=q.ms()
@@ -2015,34 +2066,76 @@ def _integrity_status(sym,row=None,require_risk=False):
     micro_book_age=(now_ms-last_book) if last_book>0 else 999999999.0
     ages["micro_trade_ms"]=round(micro_trade_age,1)
     ages["micro_book_ms"]=round(micro_book_age,1)
+
+    try:
+        mm=app.micro_metrics(sym)
+    except Exception:
+        mm={}
+    native_ready=bool(mm.get("micro_ready"))
+    trade_seq=bool(mm.get("sequence_verified"))
+    book_seq=bool(mm.get("book_sequence_verified"))
+    ages["native_micro_ready"]=native_ready
+    ages["trade_seq"]=trade_seq
+    ages["book_seq"]=book_seq
+
     if micro_trade_age>INTEGRITY_MICRO_TRADE_MAX_AGE_MS:
         blockers.append("STALE_DEPTH_TRADE")
     if micro_book_age>INTEGRITY_MICRO_BOOK_MAX_AGE_MS:
         blockers.append("STALE_DEPTH_BOOK")
-
-    if row and not bool(row.get("micro_ready")):
+    if not native_ready:
         blockers.append("MICRO_NOT_READY")
+    if not trade_seq:
+        blockers.append("TRADE_SEQUENCE_INVALID")
+    if not book_seq:
+        blockers.append("BOOK_SEQUENCE_INVALID")
+
+    tm=tape.tape_metric(sym)
+    tape_age=f(tm.get("age_ms"),999999.0)
+    bbo_age=f(tm.get("book_age_ms"),999999.0)
+    ages["tape_ms"]=round(tape_age,1)
+    ages["bbo_ms"]=round(bbo_age,1)
+    if require_event_tape:
+        if tape_age>INTEGRITY_TAPE_MAX_AGE_MS or int(f(tm.get("trades_5s")))<1:
+            blockers.append("STALE_EVENT_TAPE")
+        if bbo_age>INTEGRITY_BBO_MAX_AGE_MS:
+            blockers.append("STALE_EVENT_BBO")
 
     if require_risk:
-        try:
-            ri=move_engine.riskmap.risk_intel(sym)
-        except Exception:
-            ri=None
-        if not isinstance(ri,dict):
-            blockers.append("NO_FRESH_RISK_PLAN")
-            ages["risk_s"]=999999.0
+        pin_entry=f(row.get("pinpoint_trigger"))
+        pin_stop=f(row.get("pinpoint_stop"))
+        pin_risk=f(row.get("pinpoint_risk_pct"))
+        pin_status=str(row.get("pinpoint_entry_status") or "")
+        pin_ok=(
+            pin_entry>0 and pin_stop>0 and pin_stop<pin_entry and pin_risk>0
+            and pin_status in {"PINPOINT_TRIGGERED","PINPOINT_ARMED"}
+        )
+        if pin_ok:
+            ages["risk_s"]=0.0
+            ages["risk_source"]="PINPOINT"
         else:
-            updated=f(ri.get("updated"))
-            risk_age=(time.time()-updated) if updated>0 else 999999.0
-            ages["risk_s"]=round(risk_age,3)
-            en=f(ri.get("entry_trigger"));st=f(ri.get("stop_loss"))
-            t1=f(ri.get("tp1"));t2=f(ri.get("tp2"));t3=f(ri.get("tp3"))
-            if risk_age>INTEGRITY_RISK_MAX_AGE_S:
-                blockers.append("STALE_RISK_PLAN")
-            if not (en>0 and st>0 and st<en and t1>en and t2>t1 and t3>t2):
-                blockers.append("INVALID_RISK_PLAN")
+            try:
+                ri=move_engine.riskmap.risk_intel(sym)
+            except Exception:
+                ri=None
+            if not isinstance(ri,dict):
+                blockers.append("NO_FRESH_RISK_PLAN")
+                ages["risk_s"]=999999.0
+                ages["risk_source"]="NONE"
+            else:
+                updated=f(ri.get("updated"))
+                risk_age=(time.time()-updated) if updated>0 else 999999.0
+                ages["risk_s"]=round(risk_age,3)
+                ages["risk_source"]="RISKMAP"
+                en=f(ri.get("entry_trigger"));st=f(ri.get("stop_loss"))
+                t1=f(ri.get("tp1"));t2=f(ri.get("tp2"));t3=f(ri.get("tp3"))
+                if risk_age>INTEGRITY_RISK_MAX_AGE_S:
+                    blockers.append("STALE_RISK_PLAN")
+                if not (en>0 and st>0 and st<en and t1>en and t2>t1 and t3>t2):
+                    blockers.append("INVALID_RISK_PLAN")
 
-    return {"verified":not blockers,"blockers":list(dict.fromkeys(blockers)),"ages":ages}
+    result={"verified":not blockers,"blockers":list(dict.fromkeys(blockers)),"ages":ages}
+    _integrity_cache[cache_key]={"t":now,"v":dict(result)}
+    return result
 
 # Wrap the sole formal evaluator. Elevated states are preserved only if their
 # mandatory live feeds pass the independent integrity check at evaluation time.
@@ -2055,17 +2148,32 @@ def evaluate_symbol_integrity(sym):
     row=dict(row)
     raw=str(row.get("state") or "REJECT")
     integ=_integrity_status(sym,row,require_risk=(raw=="BUY NOW"))
+    raw_formal=str(row.get("formal_state") or raw)
     row["integrity_raw_state"]=raw
+    row["integrity_raw_formal"]=raw_formal
     row["integrity_verified"]=bool(integ.get("verified"))
     row["integrity_blockers"]=list(integ.get("blockers") or [])
     row["integrity_ages"]=dict(integ.get("ages") or {})
-    if raw in {"EARLY OPPORTUNITY","PRE-IGNITION","BUY NOW"} and not row["integrity_verified"]:
+    elevated=raw in {"EARLY OPPORTUNITY","PRE-IGNITION","BUY NOW"} or raw_formal in {"EARLY OPPORTUNITY","PRE-IGNITION","BUY NOW"}
+    if elevated and not row["integrity_verified"]:
+        # Keep every downstream/reporting alias in sync. Previously only
+        # row["state"] was downgraded, allowing the Pinpoint board to continue
+        # printing stale PRE-IGNITION from formal_state.
         row["state"]="COLLECTING DATA"
-        row["micro_ready"]=False
+        row["formal_state"]="COLLECTING DATA"
+        row["pre_warmup_state"]="COLLECTING DATA"
+        row["pinpoint_state"]="WATCH"
+        row["pinpoint_buy"]=False
+        row["strict_buy_gate_passed"]=False
         fh=list(row.get("failed_hard") or [])
         fh.extend(row["integrity_blockers"])
         fh.append("LIVE_DATA_INTEGRITY")
         row["failed_hard"]=list(dict.fromkeys(fh))
+        pb=list(row.get("pinpoint_blockers") or [])
+        pb.extend(row["integrity_blockers"])
+        pb.append("LIVE_DATA_INTEGRITY")
+        row["pinpoint_blockers"]=list(dict.fromkeys(pb))
+        row["combined_blockers"]=list(dict.fromkeys(list(row.get("combined_blockers") or [])+pb))
     return row
 
 app.evaluate_symbol=evaluate_symbol_integrity
@@ -2462,7 +2570,12 @@ async def watchdog_loop():
             print(f"Ψ-WATCHDOG ERROR LOOP {type(exc).__name__}: {exc}",flush=True)
 
 async def main():
-    print("[v11.0.5.32] Ψ HARD LIVE INTEGRITY active — elevated labels now require independently fresh structure, aggTrade tape, BBO, depth-book/depth-trade micro data and micro readiness; BUY NOW additionally requires a fresh valid risk plan. Stale elevated states are downgraded to COLLECTING DATA/MONSTER-WATCH. Discovery remains broad and Pinpoint remains sole BUY authority.",flush=True)
+    # Expose one integrated runtime version even though historical feature
+    # modules keep their own lineage versions.
+    for mod in (scanner,base,rescue,move_engine,stable_core,target_core,qualifier_core):
+        try: mod.VERSION=VERSION
+        except Exception: pass
+    print("[v11.0.5.33] Ψ INTEGRITY SYNC + RISK RECOVERY active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. Risk-map candle fetches are bounded to prevent build starvation.",flush=True)
     await asyncio.gather(rescue.main(), binance_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop())
 
 if __name__=="__main__":asyncio.run(main())
