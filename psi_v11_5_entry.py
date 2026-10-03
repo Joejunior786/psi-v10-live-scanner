@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.18-breakout-structural-intelligence"
+VERSION="11.0.5.19-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -337,6 +337,96 @@ def _structure_symbol_gate(symbol):
         _structure_symbol_gates[key]=gate
     return gate
 
+STRUCTURE_RACE_HOSTS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+    "https://data-api.binance.vision",
+]
+
+async def _structure_fetch_race(client, symbol, interval, limit):
+    symbol=str(symbol); interval=str(interval); limit=int(limit)
+    route_key=f"structure_klines:{symbol}"
+    hosts=list(STRUCTURE_RACE_HOSTS)
+    preferred=_rest_good_host.get(route_key)
+    if preferred in hosts:
+        hosts=[preferred]+[h for h in hosts if h!=preferred]
+    elif symbol:
+        offset=sum(ord(ch) for ch in symbol)%len(hosts)
+        hosts=hosts[offset:]+hosts[:offset]
+
+    now=time.time()
+    healthy=[h for h in hosts if _rest_host_bad_until.get((route_key,h),0)<=now]
+    ordered=healthy+[h for h in hosts if h not in healthy]
+    timeout_s=3.8 if limit<=10 else 6.2
+    global_gate,lane_gate=_rest_gates("/api/v3/klines")
+
+    async def one(host):
+        g=l=False
+        try:
+            await asyncio.wait_for(global_gate.acquire(),timeout=2.5);g=True
+            await asyncio.wait_for(lane_gate.acquire(),timeout=2.5);l=True
+            async with client.get(
+                f"{host}/api/v3/klines",
+                params={"symbol":symbol,"interval":interval,"limit":limit},
+                timeout=aiohttp.ClientTimeout(total=timeout_s,connect=min(1.8,timeout_s)),
+            ) as response:
+                body=await response.text()
+                if response.status!=200:
+                    raise RuntimeError(f"{host} HTTP {response.status}: {body[:160]}")
+                payload=json.loads(body)
+                if not isinstance(payload,list) or not payload:
+                    raise RuntimeError(f"{host} empty kline payload")
+                return host,payload
+        finally:
+            if l: lane_gate.release()
+            if g: global_gate.release()
+
+    last_exc=None
+    for round_idx in range(0,len(ordered),2):
+        pair=ordered[round_idx:round_idx+2]
+        tasks=[asyncio.create_task(one(host)) for host in pair]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    host,payload=await fut
+                    for t in tasks:
+                        if not t.done(): t.cancel()
+                    await asyncio.gather(*tasks,return_exceptions=True)
+                    _rest_good_host[route_key]=host
+                    _rest_host_bad_until.pop((route_key,host),None)
+                    _rest_stats["ok"]+=1
+                    _rest_stats["host_ok"][host]=_rest_stats["host_ok"].get(host,0)+1
+                    if round_idx>0: _rest_stats["failover"]+=1
+                    app.rest_connected=True
+                    app.last_error=None
+                    return payload
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_exc=exc
+            # Both hosts in the pair failed.
+            for host in pair:
+                _rest_stats["attempt_fail"]+=1
+                _rest_stats["host_fail"][host]=_rest_stats["host_fail"].get(host,0)+1
+                _rest_host_bad_until[(route_key,host)]=time.time()+15.0
+        finally:
+            for t in tasks:
+                if not t.done(): t.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
+
+    _rest_stats["fail"]+=1
+    app.rest_connected=False
+    app.last_error=f"STRUCTURE_RACE_FAIL {symbol} {interval} {limit}: {type(last_exc).__name__}: {last_exc}"
+    print(
+        f"Ψ-REST FAIL lane=structure_race:{symbol} path=/api/v3/klines "
+        f"params={{'symbol':'{symbol}','interval':'{interval}','limit':{limit}}} err={type(last_exc).__name__}:{last_exc}",
+        flush=True,
+    )
+    return None
+
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
     global _structure_raw_dirty
     if not _structure_request_ctx.get():
@@ -380,7 +470,7 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
 
         rows=None
         for attempt in range(STRUCTURE_TF_ATTEMPTS):
-            rows=await _original_load_klines(client, symbol, interval, request_limit)
+            rows=await _structure_fetch_race(client, symbol, interval, request_limit)
             if isinstance(rows,list) and rows:
                 if attempt==0:
                     _structure_tf_stats["fetch_ok"]+=1
@@ -406,7 +496,7 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
             # An old/incomplete persisted series is never promoted as live structure.
             if incremental:
                 full_limit=_bootstrap_structure_limit(interval,limit)
-                full=await _original_load_klines(client,symbol,interval,full_limit)
+                full=await _structure_fetch_race(client,symbol,interval,full_limit)
                 if isinstance(full,list) and full:
                     merged=_merge_kline_rows([],full,limit)
                     incremental=False
@@ -782,7 +872,7 @@ for mod in (rescue,tape,base,getattr(base,"scientist",None),scanner):
     except Exception:pass
 
 
-RECOVERY_BATCH = 5
+RECOVERY_BATCH = 4
 RECOVERY_PRIORITY = 80
 RECOVERY_STALE_S = 285.0
 recovery_stats = {"passes":0,"ok":0,"fail":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
@@ -959,7 +1049,7 @@ async def _hydrate_one(sym):
         client=app.session
         owner_token=_structure_owner_ctx.set(True)
         try:
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=32.0)
+            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=28.0)
         finally:
             _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
