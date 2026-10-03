@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.1.10-ws-budget-aligned"
+VERSION = "12.1.11-fastcore-isolated-ws"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1465,8 +1465,9 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats[f"dedicated_{tf}_miss"] += 1
             rows = None
 
-    # 2) Short shared-WS fallback only.
-    if rows is None:
+    # 2) Shared-WS fallback is DEEP-only. FAST_CORE stays entirely on the
+    # isolated V12 socket; a miss returns quickly so fair rotation advances.
+    if rows is None and deep:
         try:
             rows = await legacy.binance_ws_api_klines(
                 sym,
@@ -1540,7 +1541,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     async def one(tf, deep=False):
         async with sem:
             try:
-                timeout = 14.0 if deep else 8.0
+                timeout = 14.0 if deep else 5.2
                 return await asyncio.wait_for(_fetch_tf(sym, tf, deep=deep), timeout=timeout)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
@@ -1972,7 +1973,7 @@ async def strategy_loop():
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
                 f"restFail={_stats.get('rest_race_fail',0)} fetchFail={_stats.get('fetch_fail',0)} "
                 f"fetchTO={_stats.get('fetch_timeout',0)} dedicatedWS={_stats.get('dedicated_ws_ok',0)}/"
-                f"{_stats.get('dedicated_ws_miss',0)} D1={_stats.get('dedicated_1d_ok',0)}/"
+                f"{_stats.get('dedicated_ws_miss',0)} stageTO={_stats.get('dedicated_stage_timeout',0)} D1={_stats.get('dedicated_1d_ok',0)}/"
                 f"{_stats.get('dedicated_1d_miss',0)} H1={_stats.get('dedicated_1h_ok',0)}/"
                 f"{_stats.get('dedicated_1h_miss',0)} H4={_stats.get('dedicated_4h_ok',0)}/"
                 f"{_stats.get('dedicated_4h_miss',0)} rawWS={_stats.get('ws_ok',0)}/"
@@ -2090,7 +2091,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.1.10] MULTI-SETUP AUTHORITY + WS-BUDGET-ALIGNED HYDRATION active — legacy BUY/PRE authority disabled; "
+        "[v12.1.11] MULTI-SETUP AUTHORITY + FASTCORE ISOLATED WS active — legacy BUY/PRE authority disabled; "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
