@@ -11,7 +11,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.5-breakout-structural-intelligence"
+VERSION="11.0.5.6-breakout-structural-intelligence"
 
 REST_BASES = [
     "https://api.binance.com",
@@ -447,8 +447,16 @@ def _candidate_move_plan(r):
     except Exception: pass
 
     source="SHADOW_ONLY";plan={}
+    risk_state="NOT_TRACKED"
+    try:
+        ri_state=move_engine.riskmap.risk_intel(sym)
+        if isinstance(ri_state,dict):
+            risk_state=str(ri_state.get("plan_state") or "WAIT")
+    except Exception:
+        pass
     if plans:
         _,source,plan=max(plans,key=lambda z:z[0])
+        risk_state=str(plan.get("plan_state") or plan.get("state") or risk_state)
     entry=f(plan.get("entry_trigger"),f(plan.get("entry"),conditional))
     stop=f(plan.get("stop_loss"),f(plan.get("stop")))
     tp1=f(plan.get("tp1"));tp2=f(plan.get("tp2"));tp3=f(plan.get("tp3"))
@@ -456,6 +464,7 @@ def _candidate_move_plan(r):
     valid=entry>0 and stop>0 and stop<entry and tp1>entry and tp2>tp1 and tp3>tp2
     return {
         "source":source,
+        "risk_state":risk_state,
         "valid":valid,
         "entry":entry if entry>0 else conditional,
         "stop":stop if valid else 0.0,
@@ -465,6 +474,16 @@ def _candidate_move_plan(r):
         "runner":runner if valid and runner>tp3 else 0.0,
         "shadow":shadow,
     }
+
+def _monster_risk_priority():
+    out=[];seen=set()
+    for r in list(base.latest.get("_all_candidates") or []):
+        sym=str(r.get("symbol") or "")
+        if sym and sym not in seen:
+            out.append(sym);seen.add(sym)
+    return out
+
+move_engine.riskmap.priority_symbols_provider = _monster_risk_priority
 
 def _bsi_learning():
     src=[x for x in base.resolved if isinstance(x,dict) and isinstance(x.get("features"),dict) and "bsi_n" in x["features"]]
@@ -498,7 +517,8 @@ async def board_loop_v5():
                     f"tp1={_fmt_px(mp.get('tp1'))} tp2={_fmt_px(mp.get('tp2'))} tp3={_fmt_px(mp.get('tp3'))} "
                     f"runner={_fmt_px(mp.get('runner'))} proj5={_fmt_px(sh.get('projection5'))} "
                     f"proj10={_fmt_px(sh.get('projection10'))} proj15={_fmt_px(sh.get('projection15'))} "
-                    f"proj20={_fmt_px(sh.get('projection20'))} plan={'VALID' if mp.get('valid') else 'SHADOW_ONLY'} src={mp.get('source')}",
+                    f"proj20={_fmt_px(sh.get('projection20'))} plan={'VALID' if mp.get('valid') else 'SHADOW_ONLY'} "
+                    f"riskState={mp.get('risk_state')} src={mp.get('source')}",
                     flush=True,
                 )
             exrows=[r for r in all_rows if str(r.get("monsterPullbackState")) in {"PULLBACK_EXHAUSTED","SELL_PRESSURE_EXHAUSTING","PULLBACK_ONLY"}]

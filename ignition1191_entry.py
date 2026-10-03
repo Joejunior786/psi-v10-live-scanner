@@ -20,6 +20,7 @@ MIN_PLAN_RISK_PCT = 0.20
 
 risk_cache = {}
 risk_stats = {"samples": 0, "errors": 0, "sweep_reclaimed": 0, "sweep_risk": 0, "support_lost": 0, "plans": 0}
+priority_symbols_provider = None
 
 _old_main = scanner.v7.main
 _old_diag = b17.diag_pool
@@ -299,7 +300,20 @@ async def support_loop():
     while True:
         await asyncio.sleep(SUPPORT_SAMPLE_SECONDS)
         try:
-            syms = list(base.candidate_symbols(SUPPORT_MAX_SYMBOLS))
+            syms=[];seen=set()
+            try:
+                if callable(priority_symbols_provider):
+                    for sym in priority_symbols_provider() or []:
+                        if sym and sym not in seen:
+                            syms.append(sym);seen.add(sym)
+                        if len(syms)>=SUPPORT_MAX_SYMBOLS: break
+            except Exception:
+                pass
+            if len(syms)<SUPPORT_MAX_SYMBOLS:
+                for sym in base.candidate_symbols(SUPPORT_MAX_SYMBOLS*2):
+                    if sym not in seen:
+                        syms.append(sym);seen.add(sym)
+                    if len(syms)>=SUPPORT_MAX_SYMBOLS: break
             await asyncio.gather(*(one(sym) for sym in syms))
             risk_stats["samples"] += 1
         except asyncio.CancelledError:
@@ -387,7 +401,10 @@ async def print_risk_loop():
             lost = sum(str(x.get("sweep_state")) == "SUPPORT_LOST" for _, x in fresh)
             plans = sum(f(x.get("entry_trigger")) > 0 and f(x.get("stop_loss")) > 0 for _, x in fresh)
             risk_stats.update({"sweep_reclaimed": sweeps, "sweep_risk": risks, "support_lost": lost, "plans": plans})
-            print(f"Ψ-V10.19.1 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} errors={risk_stats['errors']}", flush=True)
+            states={}
+            for _,x in fresh:
+                st=str(x.get("plan_state") or "WAIT");states[st]=states.get(st,0)+1
+            print(f"Ψ-V10.19.1 RISKMAP tracked={len(fresh)} sweeps={sweeps} sweepRisk={risks} supportLost={lost} plans={plans} samples={risk_stats['samples']} states={states} errors={risk_stats['errors']}", flush=True)
             ranked = sorted(fresh, key=lambda item: (1 if str(item[1].get("sweep_state")) == "SWEEP_RECLAIMED" else 0, f(item[1].get("sweep_score")), f(item[1].get("support1_strength")), -f(item[1].get("support1_distance_pct"), 99)), reverse=True)[:10]
             for i, (sym, x) in enumerate(ranked, 1):
                 risk_text = "-" if x.get("risk_pct") is None else f"{f(x.get('risk_pct')):.3f}%"
