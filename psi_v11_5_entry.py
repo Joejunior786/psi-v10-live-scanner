@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.54-dark-horse-quality-top5"
+VERSION="11.0.5.55-dark-horse-tape-price-fallback"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -1821,14 +1821,19 @@ def _dark_horse_board(exclude_symbols=None):
             if sym in exclude_symbols:
                 continue
             row=q.latest.get(sym) or {}
-            price=base.px(sym,row)
-            if price<=0:
-                continue
 
             # Fast prefilter: do not run the heavier tape metric when this
-            # symbol has not had any recent aggregate trades.
+            # symbol has not had any recent aggregate trades. For this
+            # diagnostic lane only, live aggTrade is also an allowed price
+            # source so a symbol can surface before the main q.latest cache
+            # has hydrated it.
             dq=getattr(tape,"trade_events",{}).get(sym)
             if not dq:
+                continue
+            price=base.px(sym,row)
+            if price<=0:
+                price=f(dq[-1][1],0)
+            if price<=0:
                 continue
             trade_age_ms=(now-f(dq[-1][0],0))*1000.0
             if trade_age_ms>DARK_HORSE_MAX_TRADE_AGE_MS:
