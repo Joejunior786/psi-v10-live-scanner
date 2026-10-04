@@ -8,7 +8,7 @@ from typing import List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.0-distributed-micro-2"
+WORKER_VERSION = "12.3.0-distributed-micro-3"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -430,37 +430,91 @@ async def publish_heartbeat(r, symbols: List[str], events: int, host: str, error
     await r.set(HEARTBEAT_KEY, json.dumps(payload, separators=(",", ":")), ex=15)
 
 
+async def _subscription_change(ws, method: str, symbols, request_id: int):
+    symbols=sorted({str(s).upper() for s in symbols if str(s).upper().endswith("USDT")})
+    if not symbols:
+        return request_id
+    params=[stream_name(s) for s in symbols]
+    await ws.send_json({"method":method,"params":params,"id":request_id})
+    return request_id+1
+
+
 async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], host: str):
-    url = combined_url(host, symbols)
+    # Use Binance's raw /ws endpoint so control-pool changes can be applied
+    # incrementally. Unchanged symbols retain their sequence/history instead of
+    # being reset every time V12 re-ranks the 80-symbol micro pool.
+    url = f"{host}/ws"
     events = 0
     last_hb = 0.0
     last_snapshot = 0.0
+    last_control = 0.0
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
-    timeout = aiohttp.ClientTimeout(total=None, sock_connect=12, sock_read=25)
+    active = {str(s).upper() for s in symbols if str(s).upper().endswith("USDT")}
+    request_id = 1
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=12, sock_read=30)
 
     async with session.ws_connect(
         url,
         heartbeat=15,
-        receive_timeout=25,
+        receive_timeout=30,
         autoping=True,
         timeout=timeout,
         max_msg_size=4 * 1024 * 1024,
     ) as ws:
+        request_id=await _subscription_change(ws,"SUBSCRIBE",active,request_id)
         print(
-            f"PSI-DISTRIBUTED-MICRO connected role={ROLE} symbols={len(symbols)} host={host}",
+            f"PSI-DISTRIBUTED-MICRO connected role={ROLE} symbols={len(active)} "
+            f"host={host} mode=INCREMENTAL",
             flush=True,
         )
-        await publish_heartbeat(r, symbols, events, host)
+        await publish_heartbeat(r, sorted(active), events, host)
+        last_control=time.monotonic()
+
         async for msg in ws:
+            now = time.monotonic()
+
+            # Apply pool membership changes on the existing socket. A ranking
+            # reorder alone does nothing; only true additions/removals alter
+            # subscriptions. Host rotation is reserved for real socket failure.
+            if now-last_control>=CONTROL_POLL_SECONDS:
+                wanted_list=await selected_symbols(r)
+                if wanted_list:
+                    wanted=set(wanted_list)
+                    added=wanted-active
+                    removed=active-wanted
+                    if removed:
+                        request_id=await _subscription_change(ws,"UNSUBSCRIBE",removed,request_id)
+                    if added:
+                        request_id=await _subscription_change(ws,"SUBSCRIBE",added,request_id)
+                    if added or removed:
+                        for sym in removed:
+                            states.pop(sym,None)
+                        active=wanted
+                        print(
+                            f"PSI-DISTRIBUTED-MICRO incremental_update role={ROLE} "
+                            f"symbols={len(active)} add={len(added)} remove={len(removed)} "
+                            f"preview={','.join(sorted(active)[:8])}",
+                            flush=True,
+                        )
+                else:
+                    # A transient control-key gap must never tear down a healthy
+                    # Binance stream or erase strict sequence history.
+                    await publish_heartbeat(
+                        r, sorted(active), events, host, "control_stale_holding_last_pool"
+                    )
+                last_control=now
+
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     envelope = json.loads(msg.data)
-                    data = envelope.get("data") if isinstance(envelope, dict) else None
+                    if isinstance(envelope,dict) and envelope.get("id") is not None and "result" in envelope:
+                        continue
+                    data = envelope.get("data") if isinstance(envelope, dict) and isinstance(envelope.get("data"),dict) else envelope
                     if not isinstance(data, dict):
                         continue
-                    stream = str(envelope.get("stream") or "")
+                    stream = str(envelope.get("stream") or "") if isinstance(envelope,dict) else ""
                     symbol = str(data.get("s") or stream.split("@", 1)[0]).upper()
-                    if not symbol.endswith("USDT"):
+                    if not symbol.endswith("USDT") or symbol not in active:
                         continue
                     accepted=False
                     if ROLE == "TRADE":
@@ -481,17 +535,21 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                         )
                         await r.publish(CHANNEL, payload)
                     events += 1
-                    now = time.monotonic()
                     if now - last_snapshot >= SNAPSHOT_INTERVAL:
-                        await publish_snapshot(r, symbols, states, events, host)
+                        await publish_snapshot(r, sorted(active), states, events, host)
                         last_snapshot = now
                     if now - last_hb >= 3.0:
-                        await publish_heartbeat(r, symbols, events, host)
+                        await publish_heartbeat(r, sorted(active), events, host)
                         last_hb = now
                 except Exception as exc:
-                    print(f"PSI-DISTRIBUTED-MICRO event_error role={ROLE} {type(exc).__name__}: {exc}", flush=True)
+                    print(
+                        f"PSI-DISTRIBUTED-MICRO event_error role={ROLE} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
+
     raise RuntimeError(f"websocket closed role={ROLE} host={host}")
 
 
@@ -509,69 +567,42 @@ async def main():
                 flush=True,
             )
             await asyncio.sleep(RECONNECT_BACKOFF)
+
     print(f"PSI-DISTRIBUTED-MICRO START version={WORKER_VERSION} role={ROLE}", flush=True)
     host_index = 0
-
     timeout = aiohttp.ClientTimeout(total=None)
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        active: Tuple[str, ...] = tuple()
-        task = None
         while True:
             try:
-                wanted = tuple(await selected_symbols(r))
+                wanted=await selected_symbols(r)
                 if not wanted:
-                    if active and task is not None and not task.done():
-                        await publish_heartbeat(
-                            r, list(active), 0, "", "control_stale_holding_last_pool"
-                        )
-                        await asyncio.sleep(CONTROL_POLL_SECONDS)
-                        continue
-                    if active:
-                        print(f"PSI-DISTRIBUTED-MICRO control_update role={ROLE} symbols=0", flush=True)
-                    if task:
-                        task.cancel()
-                        try:
-                            await task
-                        except BaseException:
-                            pass
-                        task = None
-                    active = tuple()
                     await publish_heartbeat(r, [], 0, "", "waiting_for_control_pool")
                     await asyncio.sleep(CONTROL_POLL_SECONDS)
                     continue
 
-                if wanted != active or task is None or task.done():
-                    if wanted != active:
-                        preview=",".join(wanted[:8])
-                        print(
-                            f"PSI-DISTRIBUTED-MICRO control_update role={ROLE} symbols={len(wanted)} preview={preview}",
-                            flush=True,
-                        )
-                    if task:
-                        task.cancel()
-                        try:
-                            await task
-                        except BaseException:
-                            pass
-                    active = wanted
-                    host = WS_HOSTS[host_index % len(WS_HOSTS)]
-                    host_index += 1
-                    task = asyncio.create_task(stream_once(r, session, list(active), host))
-
-                await asyncio.sleep(CONTROL_POLL_SECONDS)
-                if task and task.done():
-                    try:
-                        task.result()
-                    except Exception as exc:
-                        print(f"PSI-DISTRIBUTED-MICRO reconnect role={ROLE} {type(exc).__name__}: {exc}", flush=True)
-                    task = None
+                host=WS_HOSTS[host_index % len(WS_HOSTS)]
+                try:
+                    await stream_once(r,session,wanted,host)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    print(
+                        f"PSI-DISTRIBUTED-MICRO reconnect role={ROLE} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    # Rotate hosts only on a real connection failure.
+                    host_index=(host_index+1)%len(WS_HOSTS)
                     await asyncio.sleep(RECONNECT_BACKOFF)
             except asyncio.CancelledError:
-                if task:
-                    task.cancel()
                 raise
             except Exception as exc:
-                print(f"PSI-DISTRIBUTED-MICRO loop_error role={ROLE} {type(exc).__name__}: {exc}", flush=True)
+                print(
+                    f"PSI-DISTRIBUTED-MICRO loop_error role={ROLE} "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
                 await asyncio.sleep(RECONNECT_BACKOFF)
 
 
