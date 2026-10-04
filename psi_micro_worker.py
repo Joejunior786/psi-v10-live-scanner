@@ -158,6 +158,12 @@ async def main():
             try:
                 wanted = tuple(await selected_symbols(r))
                 if not wanted:
+                    if active and task is not None and not task.done():
+                        await publish_heartbeat(
+                            r, list(active), 0, "", "control_stale_holding_last_pool"
+                        )
+                        await asyncio.sleep(CONTROL_POLL_SECONDS)
+                        continue
                     if active:
                         print(f"PSI-DISTRIBUTED-MICRO control_update role={ROLE} symbols=0", flush=True)
                     if task:
