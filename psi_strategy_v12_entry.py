@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.22-direct-late-commit"
+VERSION = "12.2.23-latency-margin"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -194,6 +194,18 @@ def _v12_ws_claim(symbol, interval):
 def _v12_ws_release(shard):
     shard = int(shard) % V12_WS_SHARDS
     _v12_ws_claims[shard] = max(0, int(_v12_ws_claims[shard]) - 1)
+
+
+def _v12_ws_response_budget(deep=False):
+    """Use measured Railway→Binance WS latency with a bounded safety margin."""
+    observed_ms = max(
+        float(_stats.get("ws_max_latency_ms", 0.0) or 0.0),
+        float(_stats.get("ws_late_max_latency_ms", 0.0) or 0.0),
+    )
+    observed_s = observed_ms / 1000.0
+    floor = 18.0 if deep else 14.5
+    ceiling = 24.0 if deep else 20.0
+    return min(ceiling, max(floor, observed_s + 2.0))
 
 V12_CACHE_PATH = os.getenv("PSI_V12_CACHE_PATH", "/data/v12_hydration_cache.pkl")
 V12_CACHE_SAVE_SECONDS = max(20.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "30")))
@@ -1492,6 +1504,12 @@ async def v12_ws_rpc_loop(shard):
                                         "limit": requested,
                                         "received": time.time(),
                                     }
+                                # A valid late response proves the shard/socket
+                                # is healthy; do not let a narrow caller timeout
+                                # poison the per-shard circuit breaker.
+                                _record_ws_success(shard)
+                                _stats["ws_late_shard_recovered"] += 1
+                                _stats[f"ws_shard_{shard}_late_recovered"] += 1
                                 _stats["ws_late_salvaged"] += 1
                                 _stats[f"ws_late_{tf}_salvaged"] += 1
                 elif msg.type in {
@@ -1710,7 +1728,7 @@ async def _fetch_tf(sym, tf, deep=False):
                 try:
                     rows = await v12_ws_klines(
                         sym, tf, limit, shard=ws_shard,
-                        response_timeout=15.0 if deep else 12.0,
+                        response_timeout=_v12_ws_response_budget(deep),
                         ready_timeout=0.8,
                         gate_timeout=1.6,
                         send_timeout=0.9,
@@ -2388,7 +2406,9 @@ async def strategy_loop():
                 f"sendTO={_stats.get('ws_send_timeout',0)} respTO={_stats.get('ws_response_timeouts',0)} "
                 f"rx={_stats.get('ws_rx_frames',0)} orphan={_stats.get('ws_orphan_frames',0)} "
                 f"lat={_stats.get('ws_last_latency_ms',0)}/{int(float(_stats.get('ws_max_latency_ms',0) or 0))}ms "
+                f"wsBudget={_v12_ws_response_budget(False):.1f}s "
                 f"late={_stats.get('ws_late_salvaged',0)}/{_stats.get('ws_late_committed',0)}/{_stats.get('ws_late_used',0)} "
+                f"lateRecover={_stats.get('ws_late_shard_recovered',0)} "
                 f"lateLat={_stats.get('ws_late_last_latency_ms',0)}/{int(float(_stats.get('ws_late_max_latency_ms',0) or 0))}ms "
                 f"sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
                 f"{_stats.get('shared_ws_fallback_miss',0)} circuitFB={_stats.get('circuit_fallback_ok',0)}/{_stats.get('circuit_fallback_miss',0)} "
