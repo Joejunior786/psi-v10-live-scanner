@@ -4587,10 +4587,18 @@ async def ws_api_micro_trade_loop():
                                 winner_source=src
                                 break
                 finally:
+                    # Do not block the strict-micro scheduler while losing
+                    # sockets/HTTP requests tear down. Some aiohttp cancellations
+                    # can take longer than the race budget and previously froze
+                    # the whole refresh loop after its first attempt.
                     for task in pending:
                         task.cancel()
-                    if pending:
-                        await asyncio.gather(*pending,return_exceptions=True)
+                        def _consume_done(t):
+                            try:
+                                t.exception()
+                            except (asyncio.CancelledError,Exception):
+                                pass
+                        task.add_done_callback(_consume_done)
 
                 if isinstance(rows,list):
                     if winner_source=="TRADE_WS":
@@ -4735,10 +4743,18 @@ async def ws_api_micro_depth_loop():
                                 source=src
                                 break
                 finally:
+                    # Do not block the strict-micro scheduler while losing
+                    # sockets/HTTP requests tear down. Some aiohttp cancellations
+                    # can take longer than the race budget and previously froze
+                    # the whole refresh loop after its first attempt.
                     for task in pending:
                         task.cancel()
-                    if pending:
-                        await asyncio.gather(*pending,return_exceptions=True)
+                        def _consume_done(t):
+                            try:
+                                t.exception()
+                            except (asyncio.CancelledError,Exception):
+                                pass
+                        task.add_done_callback(_consume_done)
 
                 if not isinstance(row,dict):
                     _micro_rest_stats["depth_budget_timeout"]+=1
