@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.93-strict-rest-micro-priority"
+VERSION="11.0.5.94-bounded-strict-rest-race"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -4886,61 +4886,229 @@ async def ws_api_micro_log_loop():
 
 
 async def strict_rest_micro_bridge_loop():
-    """Prioritise the tiny strict execution core on the proven REST fallback.
+    """Fast bounded Binance REST race for the tiny strict execution core.
 
-    Uses the existing tape._rest_fetch_agg/_rest_fetch_depth functions, which
-    already feed canonical app micro validators. This changes scheduling only.
+    The former bridge called tape._direct_rest_json(), which may try four hosts
+    serially at five seconds each. That can exceed both the 15s trade freshness
+    gate and the 5s book freshness gate. This bridge races two official Binance
+    REST hosts at a time and feeds only verified exchange payloads through the
+    existing canonical app micro validators. No signal or integrity threshold
+    is relaxed.
     """
+    hosts=(
+        "https://api.binance.com",
+        "https://data-api.binance.vision",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+    )
+    host_cursor=0
+
+    async def fetch_race(path, params, kind):
+        nonlocal host_cursor
+        if getattr(app,"session",None) is None or getattr(app.session,"closed",True):
+            return None,None
+
+        # Rotate the pair so a persistently bad first route does not monopolise
+        # every cycle, while keeping total request fan-out bounded.
+        n=len(hosts)
+        pair=(hosts[host_cursor % n],hosts[(host_cursor+1) % n])
+        host_cursor=(host_cursor+1) % n
+
+        async def fetch_one(host):
+            try:
+                async with app.session.get(
+                    f"{host}{path}",
+                    params=dict(params or {}),
+                    timeout=aiohttp.ClientTimeout(total=2.35,connect=.85,sock_read=1.65),
+                ) as resp:
+                    if resp.status!=200:
+                        return host,None
+                    payload=await resp.json(content_type=None)
+                    if kind=="trade":
+                        valid=isinstance(payload,list) and bool(payload)
+                    else:
+                        valid=(
+                            isinstance(payload,dict)
+                            and bool(payload.get("bids"))
+                            and bool(payload.get("asks"))
+                            and int(payload.get("lastUpdateId") or 0)>0
+                        )
+                    return host,payload if valid else None
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return host,None
+
+        tasks={asyncio.create_task(fetch_one(host)) for host in pair}
+        pending=set(tasks)
+        winner=None
+        winner_host=None
+        deadline=asyncio.get_running_loop().time()+2.65
+        try:
+            while pending and winner is None:
+                remaining=deadline-asyncio.get_running_loop().time()
+                if remaining<=0:
+                    break
+                done,pending=await asyncio.wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        host,payload=task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        host,payload=None,None
+                    if payload is not None:
+                        winner=payload
+                        winner_host=host
+                        break
+        finally:
+            # Never wait for a losing connection teardown. Waiting here was the
+            # exact pattern that previously turned a bounded race into a stall.
+            for task in pending:
+                task.cancel()
+                def _consume(t):
+                    try:
+                        t.exception()
+                    except (asyncio.CancelledError,Exception):
+                        pass
+                task.add_done_callback(_consume)
+
+        if winner is not None:
+            _strict_rest_stats[f"{kind}_host"] = winner_host or "-"
+        return winner_host,winner
+
+    async def hydrate_trade(sym):
+        _,rows=await fetch_race(
+            "/api/v3/aggTrades",
+            {"symbol":sym,"limit":40},
+            "trade",
+        )
+        if not isinstance(rows,list):
+            _strict_rest_stats["trade_miss"]+=1
+            return 0
+
+        st=app.ensure_micro_state(sym)
+        last_app=st.get("last_agg_id")
+        try:
+            last_app=int(last_app) if last_app is not None else -1
+        except Exception:
+            last_app=-1
+
+        added=0
+        now=time.time()
+        ordered=sorted(
+            (d for d in rows if isinstance(d,dict)),
+            key=lambda d:int(d.get("a",-1) or -1),
+        )
+        for d in ordered:
+            try:
+                aid=int(d.get("a",-1))
+            except Exception:
+                continue
+            if aid<0 or aid<=last_app:
+                continue
+            event_ms=int(f(d.get("T"),0))
+            price=f(d.get("p"))
+            qty=f(d.get("q"))
+            if event_ms<=0 or price<=0 or qty<=0:
+                continue
+            # Do not inject stale rows into a live freshness window.
+            if event_ms/1000.0 < now-180.0:
+                continue
+
+            payload=dict(d)
+            payload["E"]=event_ms
+            app.process_agg_trade(sym,payload)
+            last_app=aid
+            added+=1
+
+            # Mirror to the event-tape store only when newer than its own
+            # independent cursor; this avoids duplicate order-flow accounting.
+            try:
+                last_tape=int(tape._rest_agg_last_id.get(sym,-1))
+            except Exception:
+                last_tape=-1
+            if aid>last_tape:
+                tape.trade_events[sym].append(
+                    (event_ms/1000.0,price,price*qty,not bool(d.get("m")),event_ms)
+                )
+                tape._rest_agg_last_id[sym]=aid
+
+        if added:
+            ms=int(time.time()*1000)
+            _strict_rest_stats["trade_ok"]+=1
+            _strict_rest_stats["trade_rows"]=_strict_rest_stats.get("trade_rows",0)+added
+            _ws_market_stats["last_trade_ms"]=ms
+            _ws_market_stats["trade_rows"]+=added
+            tape.tape_stats["rest_last_trade_ms"]=ms
+            tape.tape_stats["wsapi_last_trade_ms"]=ms
+        else:
+            _strict_rest_stats["trade_miss"]+=1
+        return added
+
+    async def hydrate_depth(sym):
+        _,row=await fetch_race(
+            "/api/v3/depth",
+            {"symbol":sym,"limit":20},
+            "depth",
+        )
+        if not isinstance(row,dict):
+            _strict_rest_stats["depth_miss"]+=1
+            return 0
+
+        st=app.ensure_micro_state(sym)
+        before_id=int(st.get("last_book_update_id",0) or 0)
+        before_updates=int(st.get("book_updates",0) or 0)
+        app.process_partial_depth_snapshot(sym,row)
+        after=app.ensure_micro_state(sym)
+        after_id=int(after.get("last_book_update_id",0) or 0)
+        after_updates=int(after.get("book_updates",0) or 0)
+        changed=(after_id>before_id or after_updates>before_updates)
+        if changed:
+            ms=int(time.time()*1000)
+            _strict_rest_stats["depth_ok"]+=1
+            _ws_market_stats["last_depth_ms"]=ms
+            _ws_market_stats["last_book_ms"]=ms
+            _ws_market_stats["depth_ok"]+=1
+            tape.tape_stats["rest_last_depth_ms"]=ms
+            tape.tape_stats["wsapi_last_depth_ms"]=ms
+            return 1
+
+        _strict_rest_stats["depth_miss"]+=1
+        return 0
+
     while True:
         try:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(.85)
             core=list(_micro_fallback_core_symbols())[:MICRO_FALLBACK_CORE_SIZE]
             if not core:
                 continue
+
             _strict_rest_stats["cycles"]+=1
             _strict_rest_stats["last_core"]=",".join(core)
 
-            async def one(sym):
-                agg_task=asyncio.create_task(tape._rest_fetch_agg(sym))
-                depth_task=asyncio.create_task(tape._rest_fetch_depth(sym))
-                agg=0
-                dep=0
-                try:
-                    agg,dep=await asyncio.wait_for(
-                        asyncio.gather(agg_task,depth_task,return_exceptions=True),
-                        timeout=6.0,
-                    )
-                except asyncio.TimeoutError:
-                    _strict_rest_stats["timeouts"]+=1
-                    for task in (agg_task,depth_task):
-                        if not task.done():
-                            task.cancel()
-                    return 0,0
-                except Exception:
-                    _strict_rest_stats["errors"]+=1
-                    return 0,0
-
-                agg=agg if isinstance(agg,int) else 0
-                dep=dep if isinstance(dep,int) else 0
-                now_ms=int(time.time()*1000)
-
-                if agg>0:
-                    _strict_rest_stats["trade_ok"]+=1
-                    _ws_market_stats["last_trade_ms"]=now_ms
-                    _ws_market_stats["trade_rows"]+=agg
-                else:
-                    _strict_rest_stats["trade_miss"]+=1
-
-                if dep>0:
-                    _strict_rest_stats["depth_ok"]+=1
-                    _ws_market_stats["last_depth_ms"]=now_ms
-                    _ws_market_stats["depth_ok"]+=dep
-                else:
-                    _strict_rest_stats["depth_miss"]+=1
-
-                return agg,dep
-
-            await asyncio.gather(*(one(sym) for sym in core),return_exceptions=True)
+            # Two symbols x two endpoints remains a tiny, bounded request set.
+            jobs=[]
+            for sym in core:
+                jobs.append(asyncio.create_task(hydrate_trade(sym)))
+                jobs.append(asyncio.create_task(hydrate_depth(sym)))
+            done,pending=await asyncio.wait(jobs,timeout=3.2)
+            if pending:
+                _strict_rest_stats["timeouts"]+=len(pending)
+                for task in pending:
+                    task.cancel()
+                    def _consume(t):
+                        try:
+                            t.exception()
+                        except (asyncio.CancelledError,Exception):
+                            pass
+                    task.add_done_callback(_consume)
 
         except asyncio.CancelledError:
             raise
@@ -5111,7 +5279,13 @@ async def direct_strict_micro_stream_loop():
                     f"nextHost={hosts[host_cursor]}",
                     flush=True,
                 )
-                await asyncio.sleep(.35)
+                # All three public stream routes are blocked from this Railway
+                # egress. Back off after a full cycle so the verified REST race
+                # owns recovery without needless handshake pressure.
+                if _direct_micro_stats["errors"] % len(hosts) == 0:
+                    await asyncio.sleep(45.0)
+                else:
+                    await asyncio.sleep(.35)
             finally:
                 if ws is not None and not ws.closed:
                     try:
