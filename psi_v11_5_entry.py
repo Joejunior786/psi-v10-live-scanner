@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.102-stable-preconnected-raw"
+VERSION="11.0.5.103-canonical-trade-ingest"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -101,6 +101,57 @@ _ws_market_stats = {
 _ws_market_trade_cursor=0
 _ws_market_depth_cursor=0
 _ws_market_universe_cursor=0
+
+# Canonical multi-source aggregate-trade ingestion.
+# Several verified Binance lanes can observe the same aggTrade. Duplicate or
+# out-of-order aggregate IDs are expected under failover and must be discarded
+# rather than appended or used to invalidate a good sequence.
+_original_process_agg_trade = app.process_agg_trade
+_trade_ingest_stats={"accepted":0,"duplicate_drop":0,"errors":0}
+
+def _canonical_process_agg_trade(symbol,data):
+    sym=str(symbol or "").upper()
+    try:
+        st=app.ensure_micro_state(sym)
+        aid_raw=(data or {}).get("a") if isinstance(data,dict) else None
+        aid=None
+        if aid_raw is not None:
+            try:
+                aid=int(aid_raw)
+            except (TypeError,ValueError):
+                aid=None
+        last=st.get("last_agg_id")
+        try:
+            last=int(last) if last is not None else None
+        except (TypeError,ValueError):
+            last=None
+
+        if aid is not None and last is not None and aid<=last:
+            _trade_ingest_stats["duplicate_drop"]+=1
+            return False
+
+        before_ms=int(st.get("last_trade_ms",0) or 0)
+        _original_process_agg_trade(sym,data)
+        after=app.ensure_micro_state(sym)
+        after_ms=int(after.get("last_trade_ms",0) or 0)
+
+        # Never allow a delayed secondary source to move freshness backward.
+        if after_ms<before_ms:
+            after["last_trade_ms"]=before_ms
+            after_ms=before_ms
+
+        _trade_ingest_stats["accepted"]+=1
+        if after_ms>0:
+            _ws_market_stats["last_trade_ms"]=max(
+                int(_ws_market_stats.get("last_trade_ms",0) or 0),
+                after_ms,
+            )
+        return True
+    except Exception:
+        _trade_ingest_stats["errors"]+=1
+        raise
+
+app.process_agg_trade=_canonical_process_agg_trade
 
 # Dedicated public WS-API transport for market failover. Structure/risk klines
 # keep the original WS-API connection; market discovery/micro cannot starve it
@@ -4926,6 +4977,7 @@ async def ws_api_micro_log_loop():
                 f"rawAck={_strict_raw_stats.get('acks',0)}/{_strict_raw_stats.get('ack_nonnull',0)} "
                 f"rawSym={_strict_raw_stats.get('lane0_symbol','-')},{_strict_raw_stats.get('lane1_symbol','-')} "
                 f"rawErr={_strict_raw_stats.get('errors',0)} "
+                f"canonTrade={_trade_ingest_stats.get('accepted',0)}/{_trade_ingest_stats.get('duplicate_drop',0)} "
                 f"rawSkip={_micro_rest_stats.get('trade_raw_skip',0)}/{_micro_rest_stats.get('depth_raw_skip',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
