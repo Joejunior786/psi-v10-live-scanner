@@ -2,6 +2,7 @@ import asyncio, json, math, statistics, time, os, contextvars
 from collections import defaultdict, Counter
 import aiohttp
 import redis.asyncio as redis_async
+import redis as redis_sync
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
 import psi_v11_3_1_entry as continuity_guard
@@ -1496,6 +1497,8 @@ STRUCTURE_WORKER_REDIS_PREFIX = os.environ.get("PSI_STRUCTURE_REDIS_PREFIX", "ps
 STRUCTURE_WORKER_MAX_AGE_S = max(10.0, float(os.environ.get("PSI_STRUCTURE_WORKER_MAX_AGE_S", "90")))
 STRUCTURE_WORKER_MODE = bool(STRUCTURE_WORKER_REDIS_URL)
 _structure_worker_redis = None
+_structure_worker_sync = None
+_structure_worker_symbol_cache = {}
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
     "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"ws_refresh":0,"bar_reuse":0,
@@ -1508,53 +1511,76 @@ def _raw_key(symbol, interval, limit):
 
 
 async def _structure_worker_rows(symbol, interval):
-    global _structure_worker_redis
+    global _structure_worker_sync
     if not STRUCTURE_WORKER_REDIS_URL:
         return None
-    try:
-        if _structure_worker_redis is None:
-            _structure_worker_redis = redis_async.from_url(
-                STRUCTURE_WORKER_REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True,
-                socket_connect_timeout=1.2,
-                socket_timeout=1.2,
-                health_check_interval=15,
-                max_connections=64,
-            )
-        key=f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:{interval}"
-        raw=await asyncio.wait_for(_structure_worker_redis.get(key),timeout=1.5)
-        if not raw:
-            _structure_tf_stats["worker_miss"]+=1
-            return None
-        payload=json.loads(raw)
-        if not isinstance(payload,dict):
-            _structure_tf_stats["worker_miss"]+=1
-            return None
-        fetched_ms=float(payload.get("fetched_ms") or 0.0)
-        age_s=(time.time()*1000.0-fetched_ms)/1000.0 if fetched_ms>0 else 999999.0
-        if age_s<0:
-            age_s=0.0
-        if age_s>STRUCTURE_WORKER_MAX_AGE_S:
-            _structure_tf_stats["worker_stale"]+=1
-            return None
-        rows=payload.get("rows")
-        if not isinstance(rows,list) or len(rows)<_minimum_structure_rows(interval):
-            _structure_tf_stats["worker_miss"]+=1
-            return None
-        _structure_tf_stats["worker_hit"]+=1
-        return rows
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        _structure_tf_stats["worker_error"]+=1
+    symbol=str(symbol)
+    interval=str(interval)
+    now=time.time()
+    cached=_structure_worker_symbol_cache.get(symbol)
+    if isinstance(cached,dict) and now-float(cached.get("_loaded",0.0))<=1.5:
+        payload=cached.get(interval)
+    else:
         try:
-            if _structure_worker_redis is not None:
-                await _structure_worker_redis.aclose()
-        except Exception:
-            pass
-        _structure_worker_redis=None
+            if _structure_worker_sync is None:
+                _structure_worker_sync = redis_sync.from_url(
+                    STRUCTURE_WORKER_REDIS_URL,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    socket_connect_timeout=1.5,
+                    socket_timeout=1.5,
+                    health_check_interval=15,
+                    max_connections=32,
+                )
+            keys=[
+                f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:15m",
+                f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:1h",
+                f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:4h",
+            ]
+            raws=await asyncio.wait_for(
+                asyncio.to_thread(_structure_worker_sync.mget,keys),
+                timeout=2.0,
+            )
+            bundle={"_loaded":time.time()}
+            for tf,raw in zip(("15m","1h","4h"),raws or []):
+                if not raw:
+                    bundle[tf]=None
+                    continue
+                try:
+                    bundle[tf]=json.loads(raw)
+                except Exception:
+                    bundle[tf]=None
+            _structure_worker_symbol_cache[symbol]=bundle
+            payload=bundle.get(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _structure_tf_stats["worker_error"]+=1
+            _structure_tf_stats["worker_last_error"]=f"{type(exc).__name__}: {exc}"
+            try:
+                if _structure_worker_sync is not None:
+                    _structure_worker_sync.close()
+            except Exception:
+                pass
+            _structure_worker_sync=None
+            return None
+
+    if not isinstance(payload,dict):
+        _structure_tf_stats["worker_miss"]+=1
         return None
+    fetched_ms=float(payload.get("fetched_ms") or 0.0)
+    age_s=(time.time()*1000.0-fetched_ms)/1000.0 if fetched_ms>0 else 999999.0
+    if age_s<0:
+        age_s=0.0
+    if age_s>STRUCTURE_WORKER_MAX_AGE_S:
+        _structure_tf_stats["worker_stale"]+=1
+        return None
+    rows=payload.get("rows")
+    if not isinstance(rows,list) or len(rows)<_minimum_structure_rows(interval):
+        _structure_tf_stats["worker_miss"]+=1
+        return None
+    _structure_tf_stats["worker_hit"]+=1
+    return rows
 
 
 def _interval_ms(interval):
@@ -3759,6 +3785,7 @@ async def structure_recovery_loop():
                 f"tfCache={_structure_tf_stats['cache_hit']} rawHit={_structure_tf_stats['raw_hit']} "
                 f"worker={_structure_tf_stats['worker_hit']}/{_structure_tf_stats['worker_miss']}/{_structure_tf_stats['worker_stale']}/{_structure_tf_stats['worker_error']} "
                 f"workerReqMiss={_structure_tf_stats['worker_required_miss']} "
+                f"workerErr={str(_structure_tf_stats.get('worker_last_error','-'))[:80]} "
                 f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} reuse={_structure_tf_stats['bar_reuse']} "
                 f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
