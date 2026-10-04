@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.103-canonical-trade-ingest"
+VERSION="11.0.5.104-liquidity-aware-micro-core"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -4446,8 +4446,11 @@ def _micro_fallback_core_symbols():
         _micro_fallback_core_since=now
         return []
 
-    # Build a priority pool from the live board/hot set, but rank scarce
-    # strict-micro capacity by verified 24h quote liquidity.
+    # Research/discovery visibility remains unchanged. This liquidity floor is
+    # only for the two scarce execution-micro slots, where a symbol must be
+    # active enough to accumulate >=10 real trades/60s and maintain fresh tape.
+    liquidity_floor=MICRO_FALLBACK_CORE_REPLACE_MIN_QV
+
     priority=set()
     try:
         for row in list(base.latest.get("_board") or []):
@@ -4465,26 +4468,69 @@ def _micro_fallback_core_symbols():
     except Exception:
         pass
 
-    primary=sorted(
-        [s for s in selected if s in priority],
-        key=lambda s:(qv(s),s),
-        reverse=True,
-    )
-    fallback=sorted(
-        [s for s in selected if s not in priority],
-        key=lambda s:(qv(s),s),
-        reverse=True,
-    )
-    ranked=primary+fallback
+    liquid=[s for s in selected if qv(s)>=liquidity_floor]
+    thin=[s for s in selected if s not in set(liquid)]
 
-    # Preserve continuity while the core is healthy. After a minimum dwell,
-    # allow an early replacement only for a genuinely trade-starved symbol and
-    # only when an already-selected alternative has materially higher verified
-    # quote liquidity. This prevents thin cold-start names from monopolising
-    # both strict slots for the full 180-second hold.
+    # Hard ordering rule for scarce live-micro capacity:
+    #   liquid priority -> liquid non-priority -> thin priority -> thin fallback.
+    # Low-liquidity names are never removed from discovery or V12 evaluation;
+    # they fill strict slots only when selected liquid alternatives are absent.
+    liquid_primary=sorted(
+        [s for s in liquid if s in priority],
+        key=lambda s:(qv(s),s),
+        reverse=True,
+    )
+    liquid_fallback=sorted(
+        [s for s in liquid if s not in priority],
+        key=lambda s:(qv(s),s),
+        reverse=True,
+    )
+    thin_primary=sorted(
+        [s for s in thin if s in priority],
+        key=lambda s:(qv(s),s),
+        reverse=True,
+    )
+    thin_fallback=sorted(
+        [s for s in thin if s not in priority],
+        key=lambda s:(qv(s),s),
+        reverse=True,
+    )
+    ranked=liquid_primary+liquid_fallback+thin_primary+thin_fallback
+
     core_age=max(0.0,now-_micro_fallback_core_since)
     if len(current)>=required and core_age<MICRO_FALLBACK_CORE_HOLD_S:
         current=current[:required]
+
+        # A thin slot does not receive the normal minimum-hold protection when
+        # an already-selected liquid alternative is waiting. This is a
+        # transport-capacity decision, not a signal promotion.
+        liquid_waiting=[s for s in ranked if s not in current and qv(s)>=liquidity_floor]
+        thin_positions=[i for i,s in enumerate(current) if qv(s)<liquidity_floor]
+        if thin_positions and liquid_waiting:
+            new_core=list(current)
+            replacements=[]
+            used=set(new_core)
+            for pos in thin_positions:
+                repl=next((s for s in liquid_waiting if s not in used),None)
+                if repl is None:
+                    break
+                old=new_core[pos]
+                new_core[pos]=repl
+                used.discard(old);used.add(repl)
+                replacements.append((old,repl,round(qv(old),0),round(qv(repl),0)))
+            if replacements:
+                _micro_fallback_core=new_core[:required]
+                _micro_fallback_core_since=now
+                _micro_fallback_core_rotations+=1
+                print(
+                    f"Ψ-WSAPI MICRO-CORE-ROTATE reason=LIQUIDITY_SLOT "
+                    f"floor={liquidity_floor:.0f} rotations={_micro_fallback_core_rotations} "
+                    f"replacements={replacements} "
+                    f"symbols={[(s,round(qv(s),0)) for s in _micro_fallback_core]}",
+                    flush=True,
+                )
+                return list(_micro_fallback_core)
+
         if core_age<MICRO_FALLBACK_CORE_MIN_HOLD_S:
             _micro_fallback_core=current
             return list(_micro_fallback_core)
@@ -4507,7 +4553,7 @@ def _micro_fallback_core_symbols():
             replacements=[]
             for old,age_s,old_qv in sorted(starved,key=lambda x:(x[2],x[0])):
                 threshold=max(
-                    MICRO_FALLBACK_CORE_REPLACE_MIN_QV,
+                    liquidity_floor,
                     max(0.0,old_qv)*MICRO_FALLBACK_CORE_REPLACE_MULT,
                 )
                 repl=next(
@@ -4530,7 +4576,8 @@ def _micro_fallback_core_symbols():
                 _micro_fallback_core_rotations+=1
                 print(
                     f"Ψ-WSAPI MICRO-CORE-ROTATE reason=TRADE_STARVATION "
-                    f"rotations={_micro_fallback_core_rotations} replacements={replacements} "
+                    f"floor={liquidity_floor:.0f} rotations={_micro_fallback_core_rotations} "
+                    f"replacements={replacements} "
                     f"symbols={[(s,round(qv(s),0)) for s in _micro_fallback_core]}",
                     flush=True,
                 )
@@ -4547,6 +4594,7 @@ def _micro_fallback_core_symbols():
             f"hold={MICRO_FALLBACK_CORE_HOLD_S:.0f}s "
             f"minHold={MICRO_FALLBACK_CORE_MIN_HOLD_S:.0f}s "
             f"starve={MICRO_FALLBACK_CORE_STARVE_S:.0f}s "
+            f"liqFloor={liquidity_floor:.0f} liquidSelected={len(liquid)}/{len(selected)} "
             f"symbols={[(s,round(qv(s),0)) for s in _micro_fallback_core]}",
             flush=True,
         )
