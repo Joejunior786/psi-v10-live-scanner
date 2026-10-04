@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.27-reactive-fast-core"
+VERSION = "12.3.0-strict-buy-now-gate"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1245,6 +1245,212 @@ def build_plan(sym, current, best, setups, s1, s4, sd, sw):
 
 
 
+# ---------------------------------------------------------------------------
+# V12.3 strict executable BUY NOW authority
+# ---------------------------------------------------------------------------
+# V12 setup families remain the sole STRUCTURAL authority. A structural BUY is
+# discovery/qualification only. Executable BUY NOW is a separate fail-closed
+# state that requires the inherited Pinpoint/live-execution engine to approve
+# every mandatory market-data, order-flow, sequence, spread/slippage,
+# persistence, anti-chase and risk gate.
+EXECUTION_AUTHORITY_CHAIN = "V12_STRUCTURE->PINPOINT_EXECUTION_GATE->BUY_NOW"
+_EXECUTION_HARD_KEYS = {
+    "LIVE_MICRO_DATA": ("LIVE_MICRO_DATA", "live_micro_data"),
+    "TRADE_SEQUENCE_VALID": ("TRADE_SEQUENCE_VALID", "trade_sequence_valid"),
+    "BOOK_SEQUENCE_VALID": ("BOOK_SEQUENCE_VALID", "book_sequence_valid"),
+    "SPREAD_FILTER": ("SPREAD_FILTER", "spread_filter"),
+    "SLIPPAGE_FILTER": ("SLIPPAGE_FILTER", "slippage_filter"),
+    "CUMULATIVE_EXTENSION_GUARD": ("CUMULATIVE_EXTENSION_GUARD", "cumulative_extension_guard"),
+    "MARKET_REGIME_SAFETY": ("MARKET_REGIME_SAFETY", "market_regime_safety"),
+    "QUALIFIED_MICRO_WARMUP": ("QUALIFIED_MICRO_WARMUP", "qualified_micro_warmup"),
+    "FRESH_STRUCTURE": ("FRESH_STRUCTURE", "fresh_structure"),
+}
+
+
+def _bool_hard(hard, aliases):
+    if not isinstance(hard, dict):
+        return False
+    for key in aliases:
+        if key in hard:
+            return bool(hard.get(key))
+    return False
+
+
+def _persistence_passes(row):
+    raw = row.get("pinpoint_persistence_passes")
+    if isinstance(raw, (list, tuple)):
+        return sum(bool(x) for x in raw)
+    if isinstance(raw, dict):
+        return sum(bool(x) for x in raw.values())
+    return int(f(raw, f(row.get("pinpoint_persistence_count"), 0.0)))
+
+
+def _risk_plan_valid(structural_row, legacy_row):
+    trigger = f(legacy_row.get("pinpoint_trigger"))
+    stop = f(legacy_row.get("pinpoint_stop"))
+    risk_pct = f(legacy_row.get("pinpoint_risk_pct"))
+    tp1 = f(structural_row.get("tp1"))
+    tp2 = f(structural_row.get("tp2"))
+    tp3 = f(structural_row.get("tp3"))
+    entry = trigger if trigger > 0 else f(structural_row.get("entry"))
+    return (
+        entry > 0 and stop > 0 and stop < entry and risk_pct > 0
+        and tp1 > entry and tp2 > tp1 and tp3 > tp2
+    )
+
+
+def _strict_execution_gate(structural_row, legacy_row=None, micro_metrics=None, integrity=None):
+    """Pure fail-closed BUY NOW gate.
+
+    Missing, stale or unverifiable evidence is a blocker. This function never
+    upgrades a structural state by inference: final approval must already exist
+    in the live Pinpoint row and all mandatory hard gates must independently
+    verify.
+    """
+    structural_row = structural_row if isinstance(structural_row, dict) else {}
+    legacy_row = legacy_row if isinstance(legacy_row, dict) else {}
+    micro_metrics = micro_metrics if isinstance(micro_metrics, dict) else {}
+    integrity = integrity if isinstance(integrity, dict) else {}
+
+    blockers = []
+
+    if structural_row.get("state") != "BUY":
+        blockers.append("V12_STRUCTURAL_BUY")
+    if bool(structural_row.get("anti_chase")):
+        blockers.append("V12_ANTI_CHASE")
+    current = f(structural_row.get("current"))
+    max_chase = f(structural_row.get("max_chase"))
+    if current > 0 and max_chase > 0 and current > max_chase:
+        blockers.append("CUMULATIVE_EXTENSION_GUARD")
+
+    hard = legacy_row.get("pinpoint_hard_status") or {}
+    for name, aliases in _EXECUTION_HARD_KEYS.items():
+        if not _bool_hard(hard, aliases):
+            blockers.append(name)
+
+    # Native micro/sequence checks are repeated here so a stale/malformed
+    # Pinpoint row can never pass by carrying old hard-status booleans.
+    if not bool(micro_metrics.get("micro_ready")):
+        blockers.append("LIVE_MICRO_DATA")
+    if not bool(micro_metrics.get("sequence_verified")):
+        blockers.append("TRADE_SEQUENCE_VALID")
+    if not bool(micro_metrics.get("book_sequence_verified")):
+        blockers.append("BOOK_SEQUENCE_VALID")
+
+    # Force the strict integrity function to include fresh event tape/BBO and
+    # a current risk plan for EVERY executable setup, regardless of which V12
+    # family produced the structural BUY.
+    if not bool(integrity.get("verified")):
+        blockers.extend(list(integrity.get("blockers") or []))
+        blockers.append("LIVE_DATA_INTEGRITY")
+    ages = integrity.get("ages") if isinstance(integrity.get("ages"), dict) else {}
+    trade_age = f(ages.get("micro_trade_ms"), 999999999.0)
+    book_age = f(ages.get("micro_book_ms"), 999999999.0)
+    tape_age = f(ages.get("tape_ms"), 999999999.0)
+    bbo_age = f(ages.get("bbo_ms"), 999999999.0)
+    if trade_age > f(getattr(legacy, "INTEGRITY_MICRO_TRADE_MAX_AGE_MS", 15000), 15000):
+        blockers.append("STALE_DEPTH_TRADE")
+    if book_age > f(getattr(legacy, "INTEGRITY_MICRO_BOOK_MAX_AGE_MS", 5000), 5000):
+        blockers.append("STALE_DEPTH_BOOK")
+    if tape_age > f(getattr(legacy, "INTEGRITY_TAPE_MAX_AGE_MS", 5000), 5000):
+        blockers.append("LIVE_TAPE")
+    if bbo_age > f(getattr(legacy, "INTEGRITY_BBO_MAX_AGE_MS", 5000), 5000):
+        blockers.append("LIVE_TAPE")
+
+    # One authoritative flow gate in Pinpoint already requires the OBI/OFI,
+    # CVD, buying acceleration, buyer-dominance and L1-L10/book-integrity
+    # cluster. It is mandatory for every BUY NOW in V12.3.
+    if not bool(legacy_row.get("pinpoint_live_tape_pass")):
+        blockers.append("OFI_CVD_VOLUME_BOOK_CONFIRMATION")
+
+    if not bool(legacy_row.get("pinpoint_anti_chase_ok")):
+        blockers.append("CUMULATIVE_EXTENSION_GUARD")
+
+    passes = _persistence_passes(legacy_row)
+    if not bool(legacy_row.get("pinpoint_persistence_ok")) or passes < 2:
+        blockers.append(f"PINPOINT_PERSISTENCE_{passes}/2")
+
+    if not _risk_plan_valid(structural_row, legacy_row):
+        blockers.append("VALID_RISK_PLAN")
+
+    # Final Pinpoint approval is intentionally redundant: all aliases must
+    # agree so no stale secondary label can promote a trade.
+    if legacy_row.get("pinpoint_buy") is not True:
+        blockers.append("PINPOINT_BUY_APPROVAL")
+    if legacy_row.get("strict_buy_gate_passed") is not True:
+        blockers.append("STRICT_BUY_GATE")
+    if str(legacy_row.get("pinpoint_state") or "") != "BUY NOW":
+        blockers.append("PINPOINT_STATE_BUY_NOW")
+    if str(legacy_row.get("pinpoint_entry_status") or "") != "PINPOINT_TRIGGERED":
+        blockers.append("PINPOINT_TRIGGERED")
+    if "BUY NOW" not in {
+        str(legacy_row.get("state") or ""),
+        str(legacy_row.get("formal_state") or ""),
+    }:
+        blockers.append("FORMAL_BUY_NOW")
+
+    # Any authoritative blocker still present keeps execution fail-closed.
+    blockers.extend(list(legacy_row.get("integrity_blockers") or []))
+    blockers.extend(list(legacy_row.get("pinpoint_blockers") or []))
+    blockers.extend(list(legacy_row.get("combined_blockers") or []))
+    blockers = list(dict.fromkeys(str(x) for x in blockers if str(x)))
+
+    buy_now = not blockers
+    entry_status = str(legacy_row.get("pinpoint_entry_status") or "")
+    if buy_now:
+        execution_state = "BUY NOW"
+    elif structural_row.get("state") == "BUY" and entry_status == "PINPOINT_ARMED":
+        execution_state = "EXECUTION_ARMED"
+    elif structural_row.get("state") == "BUY":
+        execution_state = "COLLECTING DATA"
+    else:
+        execution_state = "NOT_ELIGIBLE"
+
+    return {
+        "buy_now": buy_now,
+        "execution_state": execution_state,
+        "blockers": blockers,
+        "persistence_passes": passes,
+        "authority_chain": EXECUTION_AUTHORITY_CHAIN,
+        "pinpoint_entry_status": entry_status or "NO_SETUP",
+        "pinpoint_state": str(legacy_row.get("pinpoint_state") or "WATCH"),
+    }
+
+
+def _attach_execution_gate(sym, structural_row):
+    legacy_row = q.latest.get(sym) or {}
+    try:
+        mm = app.micro_metrics(sym)
+    except Exception:
+        mm = {}
+    try:
+        integrity = legacy._integrity_status(
+            sym,
+            legacy_row,
+            require_risk=True,
+            require_event_tape=True,
+        )
+    except Exception as exc:
+        integrity = {
+            "verified": False,
+            "blockers": [f"INTEGRITY_CHECK_ERROR:{type(exc).__name__}"],
+            "ages": {},
+        }
+
+    gate = _strict_execution_gate(structural_row, legacy_row, mm, integrity)
+    row = dict(structural_row)
+    row["structural_state"] = row.get("state")
+    row["structural_only"] = not bool(gate["buy_now"])
+    row["execution_state"] = gate["execution_state"]
+    row["buy_now"] = bool(gate["buy_now"])
+    row["execution_blockers"] = list(gate["blockers"])
+    row["execution_persistence_passes"] = int(gate["persistence_passes"])
+    row["execution_authority_chain"] = gate["authority_chain"]
+    row["pinpoint_entry_status"] = gate["pinpoint_entry_status"]
+    row["pinpoint_state"] = gate["pinpoint_state"]
+    return row
+
+
 
 def _v12_get_shard_pool():
     global _v12_shard_pool
@@ -2148,11 +2354,20 @@ def print_board(force=False):
     weekly_ready = sum(bool((_cache.get(s, {}).get("1w") or {}).get("snap")) for s in universe)
     rows = _board()
     counts = {st: sum(r.get("state") == st for r in rows) for st in ("BUY", "ARMED", "WATCH")}
+    exec_buy = [r for r in rows if r.get("execution_state") == "BUY NOW"]
+    exec_armed = [r for r in rows if r.get("execution_state") == "EXECUTION_ARMED"]
+    exec_collecting = [r for r in rows if r.get("state") == "BUY" and r.get("execution_state") == "COLLECTING DATA"]
+
+    _stats["structural_buy_count"] = counts["BUY"]
+    _stats["executable_buy_now_count"] = len(exec_buy)
+    _stats["execution_armed_count"] = len(exec_armed)
 
     print(
         f"Ψ-V12 SIGNAL BOARD universe={len(universe)} mtfReady={ready}/{len(universe)} "
-        f"weeklyReady={weekly_ready}/{len(universe)} BUY={counts['BUY']} ARMED={counts['ARMED']} "
-        f"WATCH={counts['WATCH']} legacyBuyAuthority=DISABLED setupAuthority=V12",
+        f"weeklyReady={weekly_ready}/{len(universe)} STRUCTURAL_BUY={counts['BUY']} "
+        f"ARMED={counts['ARMED']} WATCH={counts['WATCH']} BUY_NOW={len(exec_buy)} "
+        f"EXEC_ARMED={len(exec_armed)} legacyBuyAuthority=DISABLED "
+        f"setupAuthority=V12 executionAuthority=PINPOINT_FAIL_CLOSED",
         flush=True,
     )
 
@@ -2173,6 +2388,24 @@ def print_board(force=False):
                 f"why={r['reason']}",
                 flush=True,
             )
+
+    print(
+        f"Ψ-V12 EXECUTION BOARD structuralBuy={counts['BUY']} buyNow={len(exec_buy)} "
+        f"armed={len(exec_armed)} collecting={len(exec_collecting)} "
+        f"authority={EXECUTION_AUTHORITY_CHAIN}",
+        flush=True,
+    )
+    exec_watch = exec_buy + exec_armed + exec_collecting
+    for i, r in enumerate(exec_watch[:MAX_BOARD_PER_STATE], 1):
+        blockers = list(r.get("execution_blockers") or [])
+        print(
+            f"EX{i:02d}. {r['symbol']:<14} structural={r.get('state')} "
+            f"exec={r.get('execution_state')} setup={r.get('setup')} "
+            f"persist={int(r.get('execution_persistence_passes') or 0)}/2 "
+            f"entryStatus={r.get('pinpoint_entry_status')} "
+            f"blockers={blockers[:12]}",
+            flush=True,
+        )
 
 
 async def strategy_loop():
@@ -2451,6 +2684,7 @@ async def strategy_loop():
                     _stats["eval_fail"] += 1
                     continue
                 if row:
+                    row = _attach_execution_gate(sym, row)
                     new_results[sym] = row
 
             _results = new_results
@@ -2482,20 +2716,50 @@ async def v12_scan(req):
         limit = max(1, min(int(req.query.get("limit", "60")), 100))
     except Exception:
         limit = 60
-    state = str(req.query.get("state", "")).upper().strip()
+
+    state = str(req.query.get("state", "")).upper().strip().replace("_", " ")
     if state in STATE_RANK:
         rows = [r for r in rows if r.get("state") == state]
+    elif state == "BUY NOW":
+        rows = [r for r in rows if r.get("execution_state") == "BUY NOW"]
+    elif state in {"EXECUTION ARMED", "EXEC ARMED"}:
+        rows = [r for r in rows if r.get("execution_state") == "EXECUTION_ARMED"]
+
     universe = list(getattr(q, "universe", []) or [])
+    all_rows = _board()
+    structural_counts = {
+        st: sum(r.get("state") == st for r in all_rows)
+        for st in ("BUY", "ARMED", "WATCH")
+    }
+    execution_counts = {
+        "BUY_NOW": sum(r.get("execution_state") == "BUY NOW" for r in all_rows),
+        "EXECUTION_ARMED": sum(r.get("execution_state") == "EXECUTION_ARMED" for r in all_rows),
+        "COLLECTING_DATA": sum(
+            r.get("state") == "BUY" and r.get("execution_state") == "COLLECTING DATA"
+            for r in all_rows
+        ),
+    }
+
     return app.web.json_response({
         "ok": True,
-        "scanner": "Ψ-V12 Multi-Setup Authority",
+        "scanner": "Ψ-V12 Strict Structural + Pinpoint Execution Authority",
         "version": VERSION,
         "legacy_buy_authority": False,
-        "signal_authority": "V12_SETUP_FAMILIES",
-        "colour_map": {"BUY": "green", "ARMED": "orange", "WATCH": "yellow"},
+        "structural_authority": "V12_SETUP_FAMILIES",
+        "execution_authority": "PINPOINT_FAIL_CLOSED",
+        "authority_chain": EXECUTION_AUTHORITY_CHAIN,
+        "structural_buy_is_executable": False,
+        "colour_map": {
+            "STRUCTURAL_BUY": "green",
+            "ARMED": "orange",
+            "WATCH": "yellow",
+            "BUY_NOW": "execution-approved",
+        },
         "universe": len(universe),
         "returned": min(limit, len(rows)),
-        "state_counts": {st: sum(r.get("state") == st for r in rows) for st in ("BUY", "ARMED", "WATCH")},
+        "state_counts": structural_counts,
+        "execution_counts": execution_counts,
+        "buy_now": [r for r in all_rows if r.get("execution_state") == "BUY NOW"][:limit],
         "results": rows[:limit],
         "stats": dict(_stats),
         "generated_ms": int(time.time() * 1000),
@@ -2518,6 +2782,13 @@ async def v12_health(req):
         "ok": True,
         "version": VERSION,
         "legacy_buy_authority": False,
+        "structural_authority": "V12_SETUP_FAMILIES",
+        "execution_authority": "PINPOINT_FAIL_CLOSED",
+        "authority_chain": EXECUTION_AUTHORITY_CHAIN,
+        "structural_buy_is_executable": False,
+        "structural_buy_count": sum(r.get("state") == "BUY" for r in _board()),
+        "executable_buy_now_count": sum(r.get("execution_state") == "BUY NOW" for r in _board()),
+        "execution_armed_count": sum(r.get("execution_state") == "EXECUTION_ARMED" for r in _board()),
         "universe": len(universe),
         "mtf_ready": ready,
         "weekly_ready": weekly_ready,
@@ -2546,12 +2817,12 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.24] MULTI-SETUP AUTHORITY + BREADTH-FIRST FAST CORE {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.3.0] STRICT BUY NOW GATE + MULTI-SETUP AUTHORITY + BREADTH-FIRST FAST CORE {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
         "breakout-retest, VWAP reclaim, volume-climax, higher-low and trend-continuation "
-        "engines now own 🟢 BUY / 🟠 ARMED / 🟡 WATCH. Entry, max-chase, invalidation and "
+        "engines own structural BUY / ARMED / WATCH only. Executable BUY NOW additionally requires the fail-closed Pinpoint gate. Entry, max-chase, invalidation and "
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
