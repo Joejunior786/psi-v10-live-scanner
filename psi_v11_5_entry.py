@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.99-sticky-prewarmed-rest"
+VERSION="11.0.5.100-preconnected-raw-micro"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -174,6 +174,12 @@ _strict_rest_stats={
     "trade_diag":"-","depth_diag":"-",
 }
 _strict_io_session=None
+_strict_raw_sessions=[None,None]
+_strict_raw_stats={
+    "connects":0,"reconnects":0,"errors":0,"subscribes":0,
+    "trade_events":0,"depth_events":0,"last_trade_ms":0,"last_depth_ms":0,
+    "lane0_host":"-","lane1_host":"-","lane0_symbol":"-","lane1_symbol":"-",
+}
 
 def _strict_micro_session():
     """Reserved connector for execution-critical micro telemetry.
@@ -4899,6 +4905,9 @@ async def ws_api_micro_log_loop():
                 f"strictDiag={_strict_rest_stats.get('trade_diag','-')}|{_strict_rest_stats.get('depth_diag','-')} "
                 f"strictConn={_strict_rest_stats.get('reserved_connectors',0)} "
                 f"warm={_strict_rest_stats.get('warm_ok',0)}/{_strict_rest_stats.get('warm_fail',0)}:{_strict_rest_stats.get('warm_diag','-')} "
+                f"rawStrict={_strict_raw_stats.get('trade_events',0)}/{_strict_raw_stats.get('depth_events',0)} "
+                f"rawSym={_strict_raw_stats.get('lane0_symbol','-')},{_strict_raw_stats.get('lane1_symbol','-')} "
+                f"rawErr={_strict_raw_stats.get('errors',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -4913,6 +4922,207 @@ async def ws_api_micro_log_loop():
             )
         except Exception as exc:
             print(f"Ψ-WSAPI MICRO-LOG ERROR {type(exc).__name__}: {exc}",flush=True)
+
+
+async def strict_raw_ws_backbone_lane(lane_idx):
+    """Persistent raw Binance micro socket opened before scanner load ramps up.
+
+    One lane follows one strict-core symbol. Because a partial depth20 payload
+    does not identify its symbol, each lane owns only one symbol at a time.
+    SUBSCRIBE/UNSUBSCRIBE happens in-frame on the already-open /ws connection,
+    so core rotation never requires a new TLS/WebSocket handshake.
+    """
+    global _strict_raw_sessions
+    lane_idx=int(lane_idx)
+    hosts=(
+        "wss://stream.binance.com:443",
+        "wss://data-stream.binance.vision",
+        "wss://stream.binance.com:9443",
+    )
+    host_cursor=lane_idx
+    first=True
+    request_id=9000+(lane_idx*1000)
+
+    while True:
+        session=None
+        try:
+            session=aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=12,connect=4),
+                connector=aiohttp.TCPConnector(
+                    limit=1,
+                    limit_per_host=1,
+                    ttl_dns_cache=300,
+                    keepalive_timeout=60,
+                    family=2,
+                ),
+                headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-strict-raw")},
+            )
+            _strict_raw_sessions[lane_idx]=session
+            host=hosts[host_cursor % len(hosts)]
+            url=f"{host}/ws"
+
+            ws=await asyncio.wait_for(
+                session.ws_connect(
+                    url,
+                    heartbeat=20,
+                    receive_timeout=None,
+                    max_msg_size=0,
+                ),
+                timeout=6.0,
+            )
+            _strict_raw_stats["connects"]+=1
+            if not first:
+                _strict_raw_stats["reconnects"]+=1
+            first=False
+            _strict_raw_stats[f"lane{lane_idx}_host"]=host
+            print(
+                f"Ψ-STRICT-RAW lane={lane_idx} connected host={host} preconnected=1",
+                flush=True,
+            )
+
+            active=None
+            while True:
+                core=tuple(_micro_fallback_core_symbols())
+                target=core[lane_idx] if len(core)>lane_idx else None
+
+                if target!=active:
+                    if active:
+                        request_id+=1
+                        old=active.lower()
+                        try:
+                            await ws.send_json({
+                                "method":"UNSUBSCRIBE",
+                                "params":[f"{old}@aggTrade",f"{old}@depth20@100ms"],
+                                "id":request_id,
+                            })
+                        except Exception:
+                            pass
+
+                    active=target
+                    _strict_raw_stats[f"lane{lane_idx}_symbol"]=active or "-"
+                    if active:
+                        request_id+=1
+                        low=active.lower()
+                        await ws.send_json({
+                            "method":"SUBSCRIBE",
+                            "params":[f"{low}@aggTrade",f"{low}@depth20@100ms"],
+                            "id":request_id,
+                        })
+                        _strict_raw_stats["subscribes"]+=1
+                        print(
+                            f"Ψ-STRICT-RAW lane={lane_idx} subscribe symbol={active}",
+                            flush=True,
+                        )
+
+                try:
+                    msg=await asyncio.wait_for(ws.receive(),timeout=.75)
+                except asyncio.TimeoutError:
+                    continue
+
+                if msg.type==aiohttp.WSMsgType.TEXT:
+                    try:
+                        d=json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if not isinstance(d,dict):
+                        continue
+                    if "result" in d and d.get("id") is not None:
+                        continue
+                    if not active:
+                        continue
+
+                    event=str(d.get("e") or "")
+                    now_ms=int(time.time()*1000)
+
+                    if event=="aggTrade":
+                        sym=str(d.get("s") or "").upper()
+                        if sym!=active:
+                            continue
+                        event_ms=int(f(d.get("T"),f(d.get("E"),0)))
+                        price=f(d.get("p"))
+                        qty=f(d.get("q"))
+                        if event_ms<=0 or price<=0 or qty<=0:
+                            continue
+                        st=app.ensure_micro_state(sym)
+                        try:
+                            aid=int(d.get("a",-1))
+                            last_id=int(st.get("last_agg_id")) if st.get("last_agg_id") is not None else -1
+                        except Exception:
+                            aid,last_id=-1,-1
+                        if aid>=0 and aid<=last_id:
+                            continue
+
+                        app.process_agg_trade(sym,d)
+
+                        try:
+                            last_tape=int(tape._rest_agg_last_id.get(sym,-1))
+                        except Exception:
+                            last_tape=-1
+                        if aid<0 or aid>last_tape:
+                            tape.trade_events[sym].append(
+                                (event_ms/1000.0,price,price*qty,not bool(d.get("m")),event_ms)
+                            )
+                            if aid>=0:
+                                tape._rest_agg_last_id[sym]=aid
+
+                        _strict_raw_stats["trade_events"]+=1
+                        _strict_raw_stats["last_trade_ms"]=now_ms
+                        _ws_market_stats["last_trade_ms"]=now_ms
+                        _ws_market_stats["trade_rows"]+=1
+                        tape.tape_stats["wsapi_last_trade_ms"]=now_ms
+                        continue
+
+                    # Partial depth20 frames contain lastUpdateId/bids/asks but
+                    # no symbol. The lane's active symbol is therefore the
+                    # authoritative routing key.
+                    if (
+                        int(f(d.get("lastUpdateId"),0))>0
+                        and isinstance(d.get("bids"),list)
+                        and isinstance(d.get("asks"),list)
+                        and d.get("bids")
+                        and d.get("asks")
+                    ):
+                        sym=active
+                        st=app.ensure_micro_state(sym)
+                        before_id=int(st.get("last_book_update_id",0) or 0)
+                        before_updates=int(st.get("book_updates",0) or 0)
+                        app.process_partial_depth_snapshot(sym,d)
+                        after=app.ensure_micro_state(sym)
+                        after_id=int(after.get("last_book_update_id",0) or 0)
+                        after_updates=int(after.get("book_updates",0) or 0)
+                        if after_id>before_id or after_updates>before_updates:
+                            _strict_raw_stats["depth_events"]+=1
+                            _strict_raw_stats["last_depth_ms"]=now_ms
+                            _ws_market_stats["last_depth_ms"]=now_ms
+                            _ws_market_stats["last_book_ms"]=now_ms
+                            _ws_market_stats["depth_ok"]+=1
+                            tape.tape_stats["wsapi_last_depth_ms"]=now_ms
+                        continue
+
+                elif msg.type in (
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    raise RuntimeError(f"strict raw ws closed type={msg.type}")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _strict_raw_stats["errors"]+=1
+            print(
+                f"Ψ-STRICT-RAW lane={lane_idx} ERROR {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            host_cursor=(host_cursor+1)%len(hosts)
+            await asyncio.sleep(1.0)
+        finally:
+            if session is not None and not session.closed:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+            _strict_raw_sessions[lane_idx]=None
 
 
 async def strict_micro_transport_warmup_loop():
@@ -5657,6 +5867,6 @@ async def main():
         try: mod.VERSION=VERSION
         except Exception: pass
     print("[v11.0.5.90] Ψ PARALLEL TRADE FAILOVER RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(strict_micro_transport_warmup_loop(), rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), strict_rest_micro_bridge_loop())
+    await asyncio.gather(strict_raw_ws_backbone_lane(0), strict_raw_ws_backbone_lane(1), strict_micro_transport_warmup_loop(), rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), strict_rest_micro_bridge_loop())
 
 if __name__=="__main__":asyncio.run(main())
