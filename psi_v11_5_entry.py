@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.90-parallel-trade-failover-race"
+VERSION="11.0.5.91-direct-strict-micro-stream"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -162,6 +162,12 @@ _depth_ws_stats={
 _micro_rest_trade_gate=None
 _micro_rest_depth_gate=None
 _micro_rest_host_cursor={"trade":0,"depth":0}
+_direct_micro_stats={
+    "connects":0,"reconnects":0,"events":0,"trade_events":0,"depth_events":0,
+    "trade_accepted":0,"depth_accepted":0,"errors":0,"last_error":"",
+    "last_trade_ms":0,"last_depth_ms":0,"last_core":"",
+}
+_direct_micro_last_core=()
 _micro_rest_stats={
     "trade_ok":0,"trade_fail":0,"trade_host":"-",
     "depth_ok":0,"depth_fail":0,"depth_host":"-",
@@ -4854,6 +4860,8 @@ async def ws_api_micro_log_loop():
                 f"microTradeFB={_micro_rest_stats['trade_micro_ws_ok']}/{_micro_rest_stats['trade_micro_ws_fail']} "
                 f"tradeRace={_micro_rest_stats.get('trade_race_dedicated_win',0)}/{_micro_rest_stats['trade_race_ws_win']}/{_micro_rest_stats['trade_race_rest_win']}/{_micro_rest_stats['trade_race_fail']} "
                 f"parallelOK={_micro_rest_stats.get('trade_parallel_symbols_ok',0)}/{_micro_rest_stats.get('depth_parallel_symbols_ok',0)} "
+                f"direct={_direct_micro_stats.get('trade_accepted',0)}/{_direct_micro_stats.get('depth_accepted',0)} "
+                f"directErr={_direct_micro_stats.get('errors',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -4868,6 +4876,169 @@ async def ws_api_micro_log_loop():
             )
         except Exception as exc:
             print(f"Ψ-WSAPI MICRO-LOG ERROR {type(exc).__name__}: {exc}",flush=True)
+
+
+async def direct_strict_micro_stream_loop():
+    """Direct Binance stream bridge for the tiny strict execution core.
+
+    This is transport-only resilience. It feeds Binance aggTrade and partial
+    depth20 snapshots through the existing canonical validators; no execution,
+    freshness, sequence, setup, or BUY threshold is relaxed.
+    """
+    global _direct_micro_last_core
+    hosts=(
+        "wss://data-stream.binance.vision/stream",
+        "wss://stream.binance.com:9443/stream",
+        "wss://stream.binance.com:443/stream",
+    )
+    host_cursor=0
+    first=True
+
+    while True:
+        try:
+            while getattr(app,"session",None) is None or getattr(app.session,"closed",True):
+                await asyncio.sleep(.25)
+
+            core=tuple(_micro_fallback_core_symbols())
+            if not core:
+                await asyncio.sleep(.5)
+                continue
+
+            streams=[]
+            for sym in core:
+                base_sym=str(sym).lower()
+                streams.append(f"{base_sym}@aggTrade")
+                streams.append(f"{base_sym}@depth20@100ms")
+            url=f"{hosts[host_cursor % len(hosts)]}?streams={'/'.join(streams)}"
+            _direct_micro_last_core=core
+            _direct_micro_stats["last_core"]=",".join(core)
+
+            try:
+                async with app.session.ws_connect(
+                    url,
+                    heartbeat=20,
+                    receive_timeout=35,
+                    max_msg_size=0,
+                ) as ws:
+                    _direct_micro_stats["connects"]+=1
+                    if not first:
+                        _direct_micro_stats["reconnects"]+=1
+                    first=False
+                    print(
+                        f"Ψ-DIRECT-MICRO connected host={hosts[host_cursor % len(hosts)]} "
+                        f"core={list(core)} streams={len(streams)}",
+                        flush=True,
+                    )
+
+                    while True:
+                        # Reconnect immediately when continuity rotates the core.
+                        current=tuple(_micro_fallback_core_symbols())
+                        if current!=core:
+                            print(
+                                f"Ψ-DIRECT-MICRO rotate old={list(core)} new={list(current)}",
+                                flush=True,
+                            )
+                            break
+
+                        try:
+                            msg=await asyncio.wait_for(ws.receive(),timeout=2.0)
+                        except asyncio.TimeoutError:
+                            continue
+
+                        if msg.type==aiohttp.WSMsgType.TEXT:
+                            try:
+                                payload=json.loads(msg.data)
+                            except Exception:
+                                continue
+                            data=payload.get("data") if isinstance(payload,dict) else None
+                            stream=str(payload.get("stream") or "") if isinstance(payload,dict) else ""
+                            if not isinstance(data,dict):
+                                continue
+                            _direct_micro_stats["events"]+=1
+
+                            if stream.endswith("@aggTrade") or str(data.get("e") or "")=="aggTrade":
+                                sym=str(data.get("s") or "").upper()
+                                if sym not in core:
+                                    continue
+                                try:
+                                    aid=int(data.get("a",-1))
+                                except Exception:
+                                    continue
+                                st=app.ensure_micro_state(sym)
+                                last_app=st.get("last_agg_id")
+                                if last_app is not None and aid<=int(last_app):
+                                    continue
+                                event_ms=int(f(data.get("T"),f(data.get("E"),0)))
+                                price=f(data.get("p"))
+                                qty=f(data.get("q"))
+                                if aid<0 or event_ms<=0 or price<=0 or qty<=0:
+                                    continue
+                                app.process_agg_trade(sym,data)
+                                # Mirror into event tape only when this aggregate
+                                # id is newer than any fallback/native bridge id.
+                                last_tape=int(tape._rest_agg_last_id.get(sym,-1))
+                                if aid>last_tape:
+                                    tape.trade_events[sym].append(
+                                        (event_ms/1000.0,price,price*qty,not bool(data.get("m")),event_ms)
+                                    )
+                                    tape._rest_agg_last_id[sym]=aid
+                                ms=int(time.time()*1000)
+                                _direct_micro_stats["trade_events"]+=1
+                                _direct_micro_stats["trade_accepted"]+=1
+                                _direct_micro_stats["last_trade_ms"]=ms
+                                _ws_market_stats["last_trade_ms"]=ms
+                                _ws_market_stats["trade_rows"]+=1
+                                tape.tape_stats["wsapi_last_trade_ms"]=ms
+                                continue
+
+                            if "@depth20" in stream or ("lastUpdateId" in data and data.get("bids") and data.get("asks")):
+                                # Combined stream name is authoritative even if
+                                # the partial-depth payload omits a symbol field.
+                                stream_sym=stream.split("@",1)[0].upper() if "@" in stream else ""
+                                sym=str(data.get("s") or stream_sym).upper()
+                                if sym not in core:
+                                    continue
+                                st=app.ensure_micro_state(sym)
+                                before_id=int(st.get("last_book_update_id",0) or 0)
+                                app.process_partial_depth_snapshot(sym,data)
+                                after=app.ensure_micro_state(sym)
+                                after_id=int(after.get("last_book_update_id",0) or 0)
+                                if after_id>before_id:
+                                    ms=int(time.time()*1000)
+                                    _direct_micro_stats["depth_events"]+=1
+                                    _direct_micro_stats["depth_accepted"]+=1
+                                    _direct_micro_stats["last_depth_ms"]=ms
+                                    _ws_market_stats["last_depth_ms"]=ms
+                                    _ws_market_stats["depth_ok"]+=1
+                                    tape.tape_stats["wsapi_last_depth_ms"]=ms
+                                continue
+
+                        elif msg.type in (
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.ERROR,
+                        ):
+                            raise RuntimeError(f"direct micro stream closed type={msg.type}")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _direct_micro_stats["errors"]+=1
+                _direct_micro_stats["last_error"]=f"{type(exc).__name__}: {exc}"
+                host_cursor=(host_cursor+1)%len(hosts)
+                print(
+                    f"Ψ-DIRECT-MICRO ERROR {type(exc).__name__}: {exc} "
+                    f"nextHost={hosts[host_cursor]}",
+                    flush=True,
+                )
+                await asyncio.sleep(.5)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _direct_micro_stats["errors"]+=1
+            _direct_micro_stats["last_error"]=f"outer {type(exc).__name__}: {exc}"
+            await asyncio.sleep(.5)
 
 
 async def ws_api_micro_fallback_loop():
@@ -5112,6 +5283,6 @@ async def main():
         try: mod.VERSION=VERSION
         except Exception: pass
     print("[v11.0.5.90] Ψ PARALLEL TRADE FAILOVER RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop())
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), direct_strict_micro_stream_loop())
 
 if __name__=="__main__":asyncio.run(main())
