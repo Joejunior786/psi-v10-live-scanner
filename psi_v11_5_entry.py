@@ -3665,19 +3665,21 @@ def _integrity_status(sym,row=None,require_risk=False,require_event_tape=False):
     if structure_age>INTEGRITY_STRUCTURE_MAX_AGE_S:
         blockers.append("STALE_STRUCTURE")
 
-    micro=(getattr(app,"micro_state",{}) or {}).get(sym) or {}
-    now_ms=q.ms()
-    last_trade=int(micro.get("last_trade_ms",0) or 0)
-    last_book=int(micro.get("last_book_ms",0) or 0)
-    micro_trade_age=(now_ms-last_trade) if last_trade>0 else 999999999.0
-    micro_book_age=(now_ms-last_book) if last_book>0 else 999999999.0
-    ages["micro_trade_ms"]=round(micro_trade_age,1)
-    ages["micro_book_ms"]=round(micro_book_age,1)
-
+    # Resolve authoritative micro metrics first. The distributed V12
+    # snapshot adapter updates/returns current worker timestamps here, so
+    # integrity freshness is measured from the same source as micro readiness.
     try:
         mm=app.micro_metrics(sym)
     except Exception:
         mm={}
+    micro=(getattr(app,"micro_state",{}) or {}).get(sym) or {}
+    now_ms=q.ms()
+    last_trade=int(f(mm.get("last_trade_ms"),micro.get("last_trade_ms",0)) or 0)
+    last_book=int(f(mm.get("last_book_ms"),micro.get("last_book_ms",0)) or 0)
+    micro_trade_age=(now_ms-last_trade) if last_trade>0 else 999999999.0
+    micro_book_age=(now_ms-last_book) if last_book>0 else 999999999.0
+    ages["micro_trade_ms"]=round(micro_trade_age,1)
+    ages["micro_book_ms"]=round(micro_book_age,1)
     native_ready=bool(mm.get("micro_ready"))
     trade_seq=bool(mm.get("sequence_verified"))
     book_seq=bool(mm.get("book_sequence_verified"))
