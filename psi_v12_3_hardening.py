@@ -5,10 +5,11 @@ import time
 from collections import Counter
 
 import redis.asyncio as redis_async
+import psi_outcome_learning as outcome_learning
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3.4_LANES->V12.3.4_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.4-lowcap-early-explosion+rapid-guaranteed-promotion"
+HARDENING_REVISION = "12.3.4-lowcap+outcome-learning+rapid-guaranteed-promotion"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -1182,6 +1183,7 @@ def _augment_response(response):
     data["authority_ready"] = bool(lane_health.get("all_ready"))
     data["legacy_pinpoint_role"] = "INPUT_TELEMETRY_ONLY"
     data["low_cap_early_explosion"] = _lowcap_summary()
+    data["outcome_learning"] = outcome_learning.summary()
     distributed = data.setdefault("distributed_micro", {})
     distributed["coverage"] = micro_coverage()
     if _last_micro_diag:
@@ -1360,6 +1362,6 @@ def install(core):
     core.app.health = _health_wrapper
 
     print(
-        f"Ψ-V12.3.4 HARDENING installed — {HARDENING_REVISION} + low-cap early explosion promotion + guaranteed RAPID challenger access + guarded workers + live gate diagnostics + fail-closed authority",
+        f"Ψ-V12.3.4 HARDENING installed — {HARDENING_REVISION} + low-cap early explosion promotion + persistent outcome calibration shadow learner + guaranteed RAPID challenger access + guarded workers + live gate diagnostics + fail-closed authority",
         flush=True,
     )
