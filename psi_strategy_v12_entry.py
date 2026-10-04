@@ -176,6 +176,64 @@ def _snapshot_tape_metric(symbol):
 
 
 tape.tape_metric = _snapshot_tape_metric
+_legacy_discovery_hot = q.hot
+
+
+def _snapshot_discovery_hot(limit=None):
+    """Full-universe research ranking using current distributed tape snapshots.
+
+    This only changes discovery order / visibility. It never creates PRE, ARMED
+    or BUY states and cannot bypass V12 execution gates.
+    """
+    if limit is None:
+        limit=getattr(q,"HOT_COUNT",80)
+    limit=max(1,int(limit))
+    scores={}
+    try:
+        for score,sym in list(_legacy_discovery_hot(limit=max(limit,240)) or []):
+            try:
+                scores[str(sym).upper()]=float(score)
+            except (TypeError,ValueError):
+                pass
+    except Exception:
+        pass
+
+    _refresh_tape_snapshots_sync()
+    for sym in list(getattr(q,"universe",[]) or []):
+        tm=tape.tape_metric(sym) or {}
+        if str(tm.get("snapshot_source") or "")!="DISTRIBUTED":
+            continue
+        try:
+            age=float(tm.get("age_ms",999999.0))
+            book_age=float(tm.get("book_age_ms",999999.0))
+            score=float(tm.get("score",0.0))
+            pv5=float(tm.get("price_velocity_5s_pct",0.0))
+            spread=float(tm.get("spread_bps",999.0))
+        except (TypeError,ValueError):
+            continue
+        if age>15000.0:
+            continue
+        if age>5000.0:
+            score*=0.55
+        if book_age>5000.0:
+            score-=5.0
+        if pv5>=3.0:
+            score-=30.0
+        if spread>30.0:
+            score-=12.0
+        scores[str(sym).upper()]=max(scores.get(str(sym).upper(),-1e9),score)
+
+    rows=[(score,sym) for sym,score in scores.items()]
+    rows.sort(reverse=True)
+    return rows[:limit]
+
+
+q.hot = _snapshot_discovery_hot
+print(
+    "Ψ-V12 SNAPSHOT_DISCOVERY active — distributed tape can seed full-universe "
+    "research rotation immediately after restart; formal PRE/BUY gates unchanged",
+    flush=True,
+)
 
 
 def _version_lock_snapshot():
