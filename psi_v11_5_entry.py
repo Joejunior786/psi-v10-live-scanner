@@ -2862,6 +2862,29 @@ def _monster_tape_health():
             trade_fresh+=1
         if f(tm.get('book_age_ms'),999999)<=5000:
             book_fresh+=1
+    now=time.time()
+    dq_symbols=0
+    fresh_tail=0
+    future_tail=0
+    oldest_fresh_age=0.0
+    for sym in syms:
+        dq=tape.trade_events.get(sym)
+        if not dq:
+            continue
+        dq_symbols+=1
+        try:
+            age_ms=(now-f(dq[-1][0]))*1000.0
+            if age_ms<0:
+                future_tail+=1
+            if 0<=age_ms<=5000:
+                fresh_tail+=1
+                oldest_fresh_age=max(oldest_fresh_age,age_ms)
+        except Exception:
+            pass
+    tape.tape_stats["health_dq_symbols"]=dq_symbols
+    tape.tape_stats["health_fresh_tail"]=fresh_tail
+    tape.tape_stats["health_future_tail"]=future_tail
+    tape.tape_stats["health_oldest_fresh_age_ms"]=oldest_fresh_age
     return strict,trade_fresh,book_fresh
 
 def _dark_horse_board(exclude_symbols=None):
@@ -3008,7 +3031,7 @@ async def board_loop_v5():
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready,trade_fresh,book_fresh=_monster_tape_health()
             integrity_live=sum(bool(r.get("integrityVerified")) for r in all_rows)
             dist_up=int(f(tape.tape_stats.get("distributed_shards_up"),0));dist_req=max(1,int(os.environ.get("PSI_TAPE_WORKERS","2")))
-            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} legacyShards={ups}/{tape.SHARDS} distTape={dist_up}/{dist_req} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} distTrades={int(f(tape.tape_stats.get('distributed_trades'),0))} distBooks={int(f(tape.tape_stats.get('distributed_books'),0))} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
+            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} legacyShards={ups}/{tape.SHARDS} distTape={dist_up}/{dist_req} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} distTrades={int(f(tape.tape_stats.get('distributed_trades'),0))} distBooks={int(f(tape.tape_stats.get('distributed_books'),0))} tapeDq={int(f(tape.tape_stats.get('health_dq_symbols'),0))} freshTail={int(f(tape.tape_stats.get('health_fresh_tail'),0))} futureTail={int(f(tape.tape_stats.get('health_future_tail'),0))} distSkewMs={int(f(tape.tape_stats.get('distributed_event_skew_ms'),0))} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
             dark_exclude={
                 str(r.get("symbol") or "")
                 for r in all_rows
