@@ -1494,6 +1494,7 @@ STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
 STRUCTURE_WORKER_REDIS_URL = os.environ.get("REDIS_URL", "").strip()
 STRUCTURE_WORKER_REDIS_PREFIX = os.environ.get("PSI_STRUCTURE_REDIS_PREFIX", "psi:v12:structure").strip()
 STRUCTURE_WORKER_MAX_AGE_S = max(10.0, float(os.environ.get("PSI_STRUCTURE_WORKER_MAX_AGE_S", "90")))
+STRUCTURE_WORKER_MODE = bool(STRUCTURE_WORKER_REDIS_URL)
 _structure_worker_redis = None
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
@@ -3720,7 +3721,7 @@ async def structure_recovery_loop():
         ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
         targets=[
             s for s in scope
-            if (_raw_seed_count(s)>=3 or _core_structure_seed_ready(s))
+            if (STRUCTURE_WORKER_MODE or _raw_seed_count(s)>=3 or _core_structure_seed_ready(s))
             and _structure_age_recovery(s)>RECOVERY_STALE_S
             and _recovery_retry_after.get(s,0)<=now
             and s not in _recovery_inflight
@@ -3816,7 +3817,7 @@ async def cold_seed_loop():
 
             fast_pending=[
                 s for s in scope
-                if (_raw_seed_count(s)>=3 or _core_structure_seed_ready(s))
+                if (STRUCTURE_WORKER_MODE or _raw_seed_count(s)>=3 or _core_structure_seed_ready(s))
                 and _structure_age_recovery(s)>RECOVERY_STALE_S
                 and _recovery_retry_after.get(s,0)<=now
                 and s not in _recovery_inflight
@@ -3826,7 +3827,8 @@ async def cold_seed_loop():
 
             candidates=[
                 s for s in scope
-                if _raw_seed_count(s)<3
+                if not STRUCTURE_WORKER_MODE
+                and _raw_seed_count(s)<3
                 and not _core_structure_seed_ready(s)
                 and _recovery_retry_after.get(s,0)<=now
                 and s not in _recovery_inflight
@@ -3999,12 +4001,13 @@ async def _watchdog_structure_rescue(scope, fresh_cov):
     stale_seeded=[
         sym for sym in priority
         if sym not in _recovery_inflight
-        and _raw_seed_count(sym)>=3
+        and (STRUCTURE_WORKER_MODE or _raw_seed_count(sym)>=3)
         and _structure_age_recovery(sym)>RECOVERY_STALE_S
     ]
     missing=[
         sym for sym in priority
         if sym not in _recovery_inflight
+        and not STRUCTURE_WORKER_MODE
         and _raw_seed_count(sym)<3
         and _structure_age_recovery(sym)>RECOVERY_STALE_S
     ]
@@ -4164,7 +4167,7 @@ async def watchdog_loop():
                 and _watchdog_structure_rescue_task is None
                 and now-_watchdog_last_structure_rescue>=WATCHDOG_STRUCTURE_RESCUE_COOLDOWN_S
             ):
-                seeded=sum(_raw_seed_count(s)>=3 for s in rescue_candidates)
+                seeded=sum(STRUCTURE_WORKER_MODE or _raw_seed_count(s)>=3 for s in rescue_candidates)
                 _watchdog_structure_rescue_task=asyncio.create_task(
                     _watchdog_structure_rescue(exec_scope,exec_fresh)
                 )
