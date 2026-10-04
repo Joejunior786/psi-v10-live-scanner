@@ -4,7 +4,7 @@ import aiohttp
 import psi_v11_3_6_entry as base
 
 app,q,scanner=base.app,base.q,base.scanner
-VERSION='11.0.3.11-resilient-rest-tape'
+VERSION='11.0.3.12-canonical-tape-dedup-bookticker'
 SHARDS=8
 WINDOW=35.0
 WS_HEARTBEAT=20.0
@@ -137,24 +137,54 @@ async def _shard_loop(idx):
                         if not sym:
                             continue
                         is_trade=(event=='aggTrade' or stream.endswith('@aggTrade'))
-                        is_book=(event=='bookTicker' or stream.endswith('@bookTicker'))
+                        # Raw /ws SUBSCRIBE bookTicker payloads do not include
+                        # an event-type field and are not wrapped with a stream
+                        # name. Identify the documented payload by its update id
+                        # plus bid/ask fields. This restores real BBO ingestion
+                        # without accepting arbitrary dicts as book data.
+                        is_raw_book=(
+                            not event and not stream
+                            and d.get('u') is not None and d.get('s')
+                            and d.get('b') is not None and d.get('B') is not None
+                            and d.get('a') is not None and d.get('A') is not None
+                            and d.get('p') is None
+                        )
+                        is_book=(event=='bookTicker' or stream.endswith('@bookTicker') or is_raw_book)
                         if is_trade:
                             price=f(d.get('p'));qty=f(d.get('q'))
                             if price>0 and qty>0:
                                 event_ts=f(d.get('T') or d.get('E'))/1000.0
                                 stamp=event_ts if event_ts>0 else now
                                 if stamp>=now-WINDOW-5:
+                                    # One canonical aggregate-trade cursor is
+                                    # shared by shard, strict-raw and REST lanes.
+                                    # The first verified source wins; duplicate
+                                    # or out-of-order frames are discarded before
+                                    # they can double CVD/OFI or poison sequence.
+                                    try:
+                                        aid=int(d.get('a',-1))
+                                    except Exception:
+                                        aid=-1
+                                    last_aid=int(_rest_agg_last_id.get(sym,-1))
+                                    if aid>=0 and aid<=last_aid:
+                                        tape_stats['agg_duplicate_drop']=tape_stats.get('agg_duplicate_drop',0)+1
+                                        continue
+                                    if aid>=0:
+                                        _rest_agg_last_id[sym]=aid
                                     trade_events[sym].append((stamp,price,price*qty,not bool(d.get('m')),int(f(d.get('E') or d.get('T')))))
                                     tape_stats['trades']+=1
                                     if sym in set(getattr(app,'selected_micro_symbols',[]) or []):
                                         try:
-                                            app.process_agg_trade(sym,d)
-                                            tape_stats['micro_trade_bridge']+=1
+                                            accepted=app.process_agg_trade(sym,d)
+                                            if accepted is not False:
+                                                tape_stats['micro_trade_bridge']+=1
                                         except Exception:
                                             tape_stats['micro_trade_bridge_fail']+=1
                         elif is_book:
-                            bbo[sym]={'t':now,'bid':f(d.get('b')),'bq':f(d.get('B')),'ask':f(d.get('a')),'aq':f(d.get('A'))}
-                            tape_stats['books']+=1
+                            bid=f(d.get('b'));ask=f(d.get('a'))
+                            if bid>0 and ask>=bid:
+                                bbo[sym]={'t':now,'bid':bid,'bq':f(d.get('B')),'ask':ask,'aq':f(d.get('A'))}
+                                tape_stats['books']+=1
                     elif msg.type in (aiohttp.WSMsgType.CLOSED,aiohttp.WSMsgType.ERROR):
                         raise RuntimeError(f'websocket_{msg.type.name.lower()}')
                 raise RuntimeError('websocket_stream_ended')
