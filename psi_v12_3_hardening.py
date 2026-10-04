@@ -8,7 +8,7 @@ import redis.asyncio as redis_async
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3.4_LANES->V12.3.4_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.4-activity-qualified-pool"
+HARDENING_REVISION = "12.3.4-rapid-guaranteed-promotion"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -20,6 +20,10 @@ MIN_REBALANCE_S = 15.0
 ACTIVITY_HUNTER_SLOTS = 48
 ACTIVITY_GRACE_S = 120.0
 ACTIVITY_RANK_REFRESH_S = 15.0
+RAPID_PROMOTION_SLOTS = 10
+RAPID_MIN_SCORE = 85.0
+RAPID_CHURN_PER_CYCLE = 4
+RAPID_DIAG_SECONDS = 15.0
 
 _last_rebalance = 0.0
 _rotation_epoch = 0
@@ -28,6 +32,7 @@ _last_micro_diag = {}
 _last_diag_mono = 0.0
 _activity_rank_cache = []
 _activity_rank_mono = 0.0
+_last_rapid_diag_mono = 0.0
 _inactive_since = {}
 _original_gate = None
 _original_scan = None
@@ -53,7 +58,36 @@ def _strict_micro_ready(symbol):
     )
 
 
-def _activity_sort_key(metric, quote_volume=0.0):
+def _rapid_score(symbol):
+    """Return the latest full-universe RAPID score without granting execution authority."""
+    core = _core()
+    try:
+        row = ((getattr(core.q, "latest", {}) or {}).get(str(symbol).upper()) or {})
+    except Exception:
+        row = {}
+    rapid = row.get("rapid_ignition") or {}
+    values = [rapid.get("score"), row.get("rapid_score")]
+    best = 0.0
+    for value in values:
+        try:
+            best = max(best, float(value or 0.0))
+        except (TypeError, ValueError):
+            pass
+    return best
+
+
+def _rapid_ranked_symbols(universe, min_score=None):
+    threshold = RAPID_MIN_SCORE if min_score is None else float(min_score)
+    ranked = []
+    for symbol in universe:
+        score = _rapid_score(symbol)
+        if score >= threshold:
+            ranked.append((score, symbol))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [symbol for _, symbol in ranked]
+
+
+def _activity_sort_key(metric, quote_volume=0.0, rapid_score=0.0):
     metric = metric or {}
     try:
         age = float(metric.get("age_ms", 999999.0) or 999999.0)
@@ -79,9 +113,15 @@ def _activity_sort_key(metric, quote_volume=0.0):
         quote_volume = float(quote_volume or 0.0)
     except (TypeError, ValueError):
         quote_volume = 0.0
+    try:
+        rapid_score = float(rapid_score or 0.0)
+    except (TypeError, ValueError):
+        rapid_score = 0.0
 
     ready = bool(metric.get("ready")) and age <= 1500.0
     return (
+        1 if rapid_score >= RAPID_MIN_SCORE else 0,
+        min(rapid_score, 250.0),
         1 if ready else 0,
         1 if age <= 1500.0 else 0,
         min(trades5, 100),
@@ -116,7 +156,8 @@ def _activity_ranked_symbols(universe, refresh_seconds=ACTIVITY_RANK_REFRESH_S):
         except Exception:
             tm = {}
         qv = float((meta.get(sym, {}) or {}).get("quote_volume_24h", 0.0) or 0.0)
-        ranked.append((_activity_sort_key(tm, qv), sym))
+        rapid_score = _rapid_score(sym)
+        ranked.append((_activity_sort_key(tm, qv, rapid_score), sym))
     ranked.sort(reverse=True)
     _activity_rank_cache = [sym for _, sym in ranked]
     _activity_rank_mono = now_mono
@@ -151,9 +192,12 @@ def stable_micro_symbols():
 
     The protected pool is private to this hardening layer. Core/legacy modules
     may still mutate their own candidate lists, but they cannot replace the
-    execution subscription set wholesale.
+    execution subscription set wholesale. RAPID challengers receive bounded,
+    guaranteed access to micro hydration; they still have zero execution
+    authority until the unchanged V12.3.4 fail-closed gate approves them.
     """
     global _last_rebalance, _rotation_epoch, _protected_pool, _inactive_since
+    global _last_rapid_diag_mono
 
     core = _core()
     pool_size = int(core.REDIS_MICRO_POOL_SIZE)
@@ -182,6 +226,17 @@ def stable_micro_symbols():
     activity_grace = max(
         60.0, float(os.getenv("PSI_MICRO_ACTIVITY_GRACE_S", str(ACTIVITY_GRACE_S)))
     )
+    rapid_slots = max(
+        2,
+        min(int(os.getenv("PSI_MICRO_RAPID_SLOTS", str(RAPID_PROMOTION_SLOTS))), max(2, pool_size // 3)),
+    )
+    rapid_min_score = max(
+        50.0, float(os.getenv("PSI_MICRO_RAPID_MIN_SCORE", str(RAPID_MIN_SCORE)))
+    )
+    rapid_churn = max(
+        1,
+        min(int(os.getenv("PSI_MICRO_RAPID_CHURN_PER_CYCLE", str(RAPID_CHURN_PER_CYCLE))), 8),
+    )
 
     desired = []
     seen = set()
@@ -209,21 +264,29 @@ def stable_micro_symbols():
     universe_set = set(universe)
 
     activity_ranked = _activity_ranked_symbols(universe)
+    rapid_ranked = _rapid_ranked_symbols(universe, rapid_min_score)
     priority = [symbol for symbol in desired[:priority_slots] if symbol in universe_set]
+    rapid_priority = [
+        symbol for symbol in rapid_ranked[:rapid_slots]
+        if symbol in universe_set and symbol not in set(priority)
+    ]
     priority_set = set(priority)
+    protected_priority_set = priority_set | set(rapid_priority)
 
-    # Reserve a large hunter tier for symbols with live full-universe tape
-    # activity. A final fair/discovery tier remains after these slots.
+    # Reserve a guaranteed RAPID challenger tier before the normal activity
+    # hunters. This prevents absolute notional/24h-volume bias from hiding a
+    # smaller coin whose relative acceleration is already extreme.
+    # A final fair/discovery tier remains after these slots.
     activity_hunters = []
     for symbol in activity_ranked:
-        if symbol in universe_set and symbol not in priority_set:
+        if symbol in universe_set and symbol not in protected_priority_set:
             activity_hunters.append(symbol)
         if len(activity_hunters) >= activity_hunter_slots:
             break
 
     ordered = []
     ordered_seen = set()
-    for symbol in priority + activity_hunters + desired + universe:
+    for symbol in priority + rapid_priority + activity_hunters + desired + universe:
         if symbol in universe_set and symbol not in ordered_seen:
             ordered_seen.add(symbol)
             ordered.append(symbol)
@@ -279,7 +342,13 @@ def stable_micro_symbols():
 
     now_mono = time.monotonic()
     can_rebalance = now_mono - _last_rebalance >= min_rebalance
+    rapid_missing = [symbol for symbol in rapid_priority if symbol not in current]
     budget = max_churn if can_rebalance else 0
+    if can_rebalance and rapid_missing:
+        # RAPID challengers can accelerate faster than the normal sticky-pool
+        # churn rate. Allow a small bounded burst so they hydrate before the
+        # move is over, without permitting a wholesale pool flip.
+        budget = min(12, max(budget, min(rapid_churn, len(rapid_missing))))
 
     warmed = [symbol for symbol in current if _strict_micro_ready(symbol)]
     warmed_set = set(warmed)
@@ -290,7 +359,7 @@ def stable_micro_symbols():
     inactive = []
     active_warming = []
     for symbol in current:
-        if symbol in priority_set or symbol in warmed_set:
+        if symbol in protected_priority_set or symbol in warmed_set:
             _inactive_since.pop(symbol, None)
             active_warming.append(symbol)
             continue
@@ -311,6 +380,14 @@ def stable_micro_symbols():
 
     inject = []
     if budget:
+        # First reserve bounded access for live RAPID challengers such as GTC.
+        for symbol in rapid_priority:
+            if symbol not in current and symbol not in inject:
+                inject.append(symbol)
+            if len(inject) >= min(budget, rapid_churn):
+                break
+
+        # Then preserve normal V12 execution-priority admission.
         for symbol in priority:
             if symbol not in current and symbol not in inject:
                 inject.append(symbol)
@@ -386,9 +463,35 @@ def stable_micro_symbols():
     core._redis_bridge_stats["micro_actual_removed"] = actual_removed
     core._redis_bridge_stats["micro_sustained_inactive"] = len(inactive)
     core._redis_bridge_stats["micro_activity_hunters"] = len(activity_hunters)
+    core._redis_bridge_stats["micro_rapid_eligible"] = len(rapid_ranked)
+    core._redis_bridge_stats["micro_rapid_reserved"] = len(rapid_priority)
+    core._redis_bridge_stats["micro_rapid_in_pool"] = sum(
+        symbol in set(next_pool) for symbol in rapid_priority
+    )
+    core._redis_bridge_stats["micro_rapid_missing"] = sum(
+        symbol not in set(next_pool) for symbol in rapid_priority
+    )
     core._redis_bridge_stats["micro_warmed_retained"] = sum(
         symbol in set(next_pool) for symbol in warmed
     )
+
+    if now_mono - _last_rapid_diag_mono >= RAPID_DIAG_SECONDS:
+        _last_rapid_diag_mono = now_mono
+        top_rapid = ",".join(
+            f"{symbol}:{_rapid_score(symbol):.1f}"
+            for symbol in rapid_ranked[:min(8, len(rapid_ranked))]
+        ) or "-"
+        missing_rapid = ",".join(
+            symbol for symbol in rapid_priority if symbol not in set(next_pool)
+        ) or "-"
+        print(
+            f"Ψ-V12.3 RAPID PROMOTION eligible={len(rapid_ranked)} "
+            f"reserved={len(rapid_priority)} "
+            f"inPool={core._redis_bridge_stats['micro_rapid_in_pool']}/{len(rapid_priority)} "
+            f"missing={missing_rapid} injected={','.join(inject) or '-'} "
+            f"top={top_rapid}",
+            flush=True,
+        )
 
     _protected_pool[:] = next_pool
     core._distributed_micro_sticky_pool = list(_protected_pool)
