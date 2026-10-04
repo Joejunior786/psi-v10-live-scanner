@@ -183,7 +183,10 @@ async def main():
         flush=True,
     )
 
-    host_index = SHARD_INDEX
+    # Start every shard on Binance's data-stream endpoint, which is the
+    # most reliable route in this Railway region. Reconnects still rotate
+    # through the configured fallback hosts.
+    host_index = 0
     active: Tuple[str, ...] = tuple()
     task = None
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
