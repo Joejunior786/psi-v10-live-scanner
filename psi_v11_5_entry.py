@@ -1616,6 +1616,21 @@ def _raw_seed_count(symbol):
         if isinstance((_structure_raw_cache.get(_raw_key(symbol,interval,limit)) or {}).get("rows"),list)
     )
 
+
+def _core_structure_seed_ready(symbol):
+    """True only when verified 1H and 4H history are deep enough for structure.
+
+    The missing 15m packet may then be fetched in the FAST lane. This preserves
+    all structure requirements while avoiding redundant 1H/4H downloads.
+    """
+    symbol=str(symbol)
+    for interval in ("1h","4h"):
+        entry=_structure_raw_cache.get(_raw_key(symbol,interval,260)) or {}
+        rows=entry.get("rows") if isinstance(entry,dict) else None
+        if not isinstance(rows,list) or len(rows)<_minimum_structure_rows(interval):
+            return False
+    return True
+
 def _structure_symbol_gate(symbol, interval=None):
     # Lock only identical symbol/timeframe refreshes. 1h/4h/15m for the same
     # symbol must run concurrently because app.load_structure() requires all
@@ -3621,7 +3636,7 @@ async def structure_recovery_loop():
         ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
         targets=[
             s for s in scope
-            if _raw_seed_count(s)>=3
+            if (_raw_seed_count(s)>=3 or _core_structure_seed_ready(s))
             and _structure_age_recovery(s)>RECOVERY_STALE_S
             and _recovery_retry_after.get(s,0)<=now
             and s not in _recovery_inflight
@@ -3717,7 +3732,7 @@ async def cold_seed_loop():
 
             fast_pending=[
                 s for s in scope
-                if _raw_seed_count(s)>=3
+                if (_raw_seed_count(s)>=3 or _core_structure_seed_ready(s))
                 and _structure_age_recovery(s)>RECOVERY_STALE_S
                 and _recovery_retry_after.get(s,0)<=now
                 and s not in _recovery_inflight
@@ -3728,6 +3743,7 @@ async def cold_seed_loop():
             candidates=[
                 s for s in scope
                 if _raw_seed_count(s)<3
+                and not _core_structure_seed_ready(s)
                 and _recovery_retry_after.get(s,0)<=now
                 and s not in _recovery_inflight
             ]
