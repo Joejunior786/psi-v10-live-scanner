@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.21-late-response-salvage"
+VERSION = "12.2.22-direct-late-commit"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1358,6 +1358,45 @@ def _v12_ws_fail_pending(shard, reason):
     _v12_ws_meta[shard].clear()
 
 
+def _commit_authoritative_rows(sym, tf, rows, requested_limit, source="WS"):
+    """Store official Binance kline rows immediately, including late WS replies."""
+    if not isinstance(rows, list) or not rows:
+        return False
+    sym = str(sym or "").upper()
+    tf = str(tf or "")
+    if not sym or tf not in {"1h", "4h", "1d", "1w"}:
+        return False
+
+    requested_limit = max(1, int(requested_limit or len(rows)))
+    snapshot = snap(rows)
+    capped = len(rows) < requested_limit
+    current = _cache.get(sym, {}).get(tf) or {}
+    current_rows = current.get("rows") or []
+    now = time.time()
+
+    if len(rows) >= len(current_rows):
+        _cache[sym][tf] = {
+            "rows": rows,
+            "snap": snapshot,
+            "updated": now,
+            "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
+            "history_capped": capped,
+            "max_history_rows": len(rows),
+        }
+    else:
+        current["updated"] = now
+        current["history_capped"] = bool(current.get("history_capped")) or capped
+        current["max_history_rows"] = max(int(current.get("max_history_rows") or 0), len(rows))
+        if current.get("snap") is None:
+            current["snap"] = snap(current_rows)
+        _cache[sym][tf] = current
+
+    deep = requested_limit >= DEEP_MIN_ROWS
+    _tf_mark_success(sym, tf, deep)
+    _stats[f"authoritative_commit_{source.lower()}"] += 1
+    return True
+
+
 async def v12_ws_rpc_loop(shard):
     shard = int(shard) % V12_WS_SHARDS
     ready, _, _ = _v12_ws_primitives(shard)
@@ -1441,11 +1480,18 @@ async def v12_ws_rpc_loop(shard):
                             tf = str(meta.get("interval") or "")
                             requested = int(meta.get("limit") or len(rows))
                             if sym and tf:
-                                _v12_ws_late_results[(sym, tf)] = {
-                                    "rows": rows,
-                                    "limit": requested,
-                                    "received": time.time(),
-                                }
+                                committed = _commit_authoritative_rows(
+                                    sym, tf, rows, requested, source="WS_LATE"
+                                )
+                                if committed:
+                                    _stats["ws_late_committed"] += 1
+                                    _stats[f"ws_late_{tf}_committed"] += 1
+                                else:
+                                    _v12_ws_late_results[(sym, tf)] = {
+                                        "rows": rows,
+                                        "limit": requested,
+                                        "received": time.time(),
+                                    }
                                 _stats["ws_late_salvaged"] += 1
                                 _stats[f"ws_late_{tf}_salvaged"] += 1
                 elif msg.type in {
@@ -1792,32 +1838,11 @@ async def _fetch_tf(sym, tf, deep=False):
             rows = None
 
     # 4) Store any authoritative non-empty history. If Binance returns fewer
-    # candles than requested, mark the timeframe history-capped. MA50/MA200
-    # fields remain None until enough real candles exist; no synthetic history.
+    # candles than requested, the shared commit helper marks history-capped;
+    # MA50/MA200 remain unavailable until enough real candles exist.
     if isinstance(rows, list) and rows:
         capped = len(rows) < limit
-        snapshot = snap(rows)
-        current = _cache.get(sym, {}).get(tf) or {}
-        current_rows = current.get("rows") or []
-
-        if len(rows) >= len(current_rows):
-            _cache[sym][tf] = {
-                "rows": rows,
-                "snap": snapshot,
-                "updated": time.time(),
-                "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
-                "history_capped": capped,
-                "max_history_rows": len(rows),
-            }
-        else:
-            current["updated"] = time.time()
-            current["history_capped"] = bool(current.get("history_capped")) or capped
-            current["max_history_rows"] = max(
-                int(current.get("max_history_rows") or 0), len(rows)
-            )
-            if current.get("snap") is None:
-                current["snap"] = snap(current_rows)
-
+        _commit_authoritative_rows(sym, tf, rows, limit, source="FETCH")
         _stats["fetch_ok"] += 1
         if len(rows) >= DEEP_MIN_ROWS:
             _stats["fetch_deep_ok"] += 1
@@ -1826,7 +1851,6 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["history_short_resolved"] += 1
         else:
             _stats["fetch_fast_ok"] += 1
-        _tf_mark_success(sym, tf, deep)
         return True
 
     _stats["fetch_fail"] += 1
@@ -2364,7 +2388,7 @@ async def strategy_loop():
                 f"sendTO={_stats.get('ws_send_timeout',0)} respTO={_stats.get('ws_response_timeouts',0)} "
                 f"rx={_stats.get('ws_rx_frames',0)} orphan={_stats.get('ws_orphan_frames',0)} "
                 f"lat={_stats.get('ws_last_latency_ms',0)}/{int(float(_stats.get('ws_max_latency_ms',0) or 0))}ms "
-                f"late={_stats.get('ws_late_salvaged',0)}/{_stats.get('ws_late_used',0)} "
+                f"late={_stats.get('ws_late_salvaged',0)}/{_stats.get('ws_late_committed',0)}/{_stats.get('ws_late_used',0)} "
                 f"lateLat={_stats.get('ws_late_last_latency_ms',0)}/{int(float(_stats.get('ws_late_max_latency_ms',0) or 0))}ms "
                 f"sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
                 f"{_stats.get('shared_ws_fallback_miss',0)} circuitFB={_stats.get('circuit_fallback_ok',0)}/{_stats.get('circuit_fallback_miss',0)} "
@@ -2493,7 +2517,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.21] MULTI-SETUP AUTHORITY + LATE-RESPONSE SALVAGE {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.22] MULTI-SETUP AUTHORITY + DIRECT LATE COMMIT {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
