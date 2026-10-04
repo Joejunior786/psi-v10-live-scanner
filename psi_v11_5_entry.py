@@ -129,6 +129,57 @@ _discovery_last_seen = {}
 _discovery_watch_streak = defaultdict(int)
 _discovery_recent_promotions = {}
 
+# Execution-slot ranking overlay. Full-universe discovery remains unchanged and
+# formal/core continuity locks still have first authority. This overlay only
+# breaks ties / ranks non-core candidates for scarce strict-micro slots using
+# already-live full-universe tape activity. It never changes micro readiness or
+# any BUY/ARMED gate.
+ACTIVITY_SLOT_BONUS_MAX = max(0.0,float(os.environ.get("PSI_ACTIVITY_SLOT_BONUS_MAX","26")))
+_activity_rank_stats = defaultdict(int)
+_legacy_continuity_candidate_score = continuity_guard.base._candidate_score
+
+
+def _activity_aware_candidate_score(sym):
+    score=float(_legacy_continuity_candidate_score(sym))
+    try:
+        tm=tape.tape_metric(sym) or {}
+        age=float(tm.get("age_ms",999999.0) or 999999.0)
+        book_age=float(tm.get("book_age_ms",999999.0) or 999999.0)
+        trades5=float(tm.get("trades_5s",0.0) or 0.0)
+        spread=float(tm.get("spread_bps",999.0) or 999.0)
+        ready=bool(tm.get("ready"))
+        bonus=0.0
+        if age<=1500.0:
+            bonus+=7.0
+        elif age<=5000.0:
+            bonus+=3.0
+        if book_age<=2000.0:
+            bonus+=5.0
+        elif book_age<=5000.0:
+            bonus+=2.0
+        bonus+=min(9.0,max(0.0,trades5)*0.45)
+        if ready:
+            bonus+=4.0
+        if spread<=5.0:
+            bonus+=1.0
+        bonus=min(ACTIVITY_SLOT_BONUS_MAX,bonus)
+        if bonus>0:
+            _activity_rank_stats["boosted"]+=1
+            _activity_rank_stats["last_bonus_x10"]=int(bonus*10)
+        return score+bonus
+    except Exception:
+        _activity_rank_stats["errors"]+=1
+        return score
+
+
+continuity_guard.base._candidate_score = _activity_aware_candidate_score
+print(
+    "Ψ-V11.0.5 ACTIVITY_SLOT_RANK active — non-core strict-micro slot ranking "
+    "uses fresh full-universe tape activity; discovery fairness, micro readiness "
+    "and formal BUY/ARMED gates unchanged",
+    flush=True,
+)
+
 REST_BASES = [
     "https://api.binance.com",
     "https://api-gcp.binance.com",
