@@ -14,6 +14,7 @@ import psi_v11_5_entry as legacy
 app = legacy.app
 q = legacy.q
 base = legacy.base
+tape = legacy.tape
 
 VERSION = "12.3.0-strict-buy-now-gate"
 SCANNER_VERSION_ENV = os.getenv("PSI_SCANNER_VERSION", "").strip()
@@ -31,6 +32,10 @@ REDIS_CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip
 REDIS_MICRO_POOL_SIZE = max(10, min(int(os.getenv("PSI_REDIS_MICRO_POOL_SIZE", "40")), 80))
 REDIS_TRADE_CHANNEL = "psi:v12:trade"
 REDIS_DEPTH_CHANNEL = "psi:v12:depth"
+REDIS_UNIVERSE_KEY = os.getenv("PSI_TAPE_UNIVERSE_KEY", "psi:v12:universe").strip()
+REDIS_TAPE_TRADE_CHANNEL = "psi:v12:tape-trade"
+REDIS_TAPE_BOOK_CHANNEL = "psi:v12:tape-book"
+REDIS_TAPE_WORKERS = max(1, min(int(os.getenv("PSI_TAPE_WORKERS", "2")), 8))
 _redis_bridge_stats = defaultdict(int)
 _redis_worker_health = {}
 
@@ -2838,6 +2843,22 @@ async def redis_control_loop():
                 )
                 await client.set(REDIS_CONTROL_KEY, payload, ex=10)
                 _redis_bridge_stats["control_symbols"] = len(symbols)
+
+                universe = list(getattr(q, "universe", []) or [])
+                await client.set(
+                    REDIS_UNIVERSE_KEY,
+                    json.dumps(
+                        {
+                            "version": VERSION,
+                            "authority": "V12_ONLY",
+                            "symbols": universe,
+                            "generated_ms": int(time.time() * 1000),
+                        },
+                        separators=(",", ":"),
+                    ),
+                    ex=15,
+                )
+                _redis_bridge_stats["universe_symbols"] = len(universe)
                 if len(symbols) != last_logged_symbols:
                     print(
                         f"Ψ-V12 REDIS_CONTROL symbols={len(symbols)} preview={','.join(symbols[:8])}",
@@ -2853,6 +2874,29 @@ async def redis_control_loop():
                             _redis_worker_health[role] = json.loads(raw)
                         except Exception:
                             _redis_worker_health[role] = {"raw": raw}
+
+                tape_up = 0
+                now_ms = int(time.time() * 1000)
+                for idx in range(REDIS_TAPE_WORKERS):
+                    key = f"psi:v12:tape-worker:{idx}"
+                    raw = await client.get(key)
+                    if not raw:
+                        continue
+                    try:
+                        hb = json.loads(raw)
+                    except Exception:
+                        hb = {"raw": raw}
+                    _redis_worker_health[f"tape{idx}"] = hb
+                    age = now_ms - int(hb.get("last_event_ms") or 0) if isinstance(hb, dict) else 999999
+                    if (
+                        isinstance(hb, dict)
+                        and int(hb.get("symbols") or 0) > 0
+                        and not str(hb.get("error") or "")
+                        and 0 <= age <= 15000
+                    ):
+                        tape_up += 1
+                tape.tape_stats["distributed_shards_up"] = tape_up
+                _redis_bridge_stats["tape_workers_up"] = tape_up
                 await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             raise
@@ -2881,11 +2925,17 @@ async def redis_micro_ingest_loop():
             client = redis_async.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
             await client.ping()
             pubsub = client.pubsub(ignore_subscribe_messages=True)
-            await pubsub.subscribe(REDIS_TRADE_CHANNEL, REDIS_DEPTH_CHANNEL)
+            await pubsub.subscribe(
+                REDIS_TRADE_CHANNEL,
+                REDIS_DEPTH_CHANNEL,
+                REDIS_TAPE_TRADE_CHANNEL,
+                REDIS_TAPE_BOOK_CHANNEL,
+            )
             _redis_bridge_stats["ingest_connects"] += 1
             print(
                 f"Ψ-V12 REDIS_MICRO connected pool={REDIS_MICRO_POOL_SIZE} "
-                f"channels={REDIS_TRADE_CHANNEL},{REDIS_DEPTH_CHANNEL}",
+                f"channels={REDIS_TRADE_CHANNEL},{REDIS_DEPTH_CHANNEL},"
+                f"{REDIS_TAPE_TRADE_CHANNEL},{REDIS_TAPE_BOOK_CHANNEL}",
                 flush=True,
             )
 
@@ -2910,6 +2960,64 @@ async def redis_micro_ingest_loop():
                         app.process_partial_depth_snapshot(symbol, data)
                         _redis_bridge_stats["depth_events"] += 1
                         _redis_bridge_stats["depth_last_ms"] = int(time.time() * 1000)
+                    elif channel == REDIS_TAPE_TRADE_CHANNEL:
+                        try:
+                            price = float(data.get("p") or 0.0)
+                            qty = float(data.get("q") or 0.0)
+                        except (TypeError, ValueError):
+                            price, qty = 0.0, 0.0
+                        if price > 0 and qty > 0:
+                            now = time.time()
+                            try:
+                                event_ms = int(data.get("T") or data.get("E") or int(now * 1000))
+                            except (TypeError, ValueError):
+                                event_ms = int(now * 1000)
+                            stamp = event_ms / 1000.0
+                            if stamp >= now - float(getattr(tape, "WINDOW", 35.0)) - 5.0:
+                                try:
+                                    aid = int(data.get("a", -1))
+                                except (TypeError, ValueError):
+                                    aid = -1
+                                cursor = getattr(tape, "_rest_agg_last_id", None)
+                                last_aid = int(cursor.get(symbol, -1)) if cursor is not None else -1
+                                if aid >= 0 and aid <= last_aid:
+                                    tape.tape_stats["distributed_duplicate_drop"] += 1
+                                else:
+                                    if aid >= 0 and cursor is not None:
+                                        cursor[symbol] = aid
+                                    tape.trade_events[symbol].append(
+                                        (
+                                            stamp,
+                                            price,
+                                            price * qty,
+                                            not bool(data.get("m", False)),
+                                            int(data.get("E") or data.get("T") or event_ms),
+                                        )
+                                    )
+                                    tape.tape_stats["distributed_trades"] += 1
+                                    tape.tape_stats["distributed_last_trade_ms"] = int(time.time() * 1000)
+                                    _redis_bridge_stats["tape_trade_events"] += 1
+                                    _redis_bridge_stats["tape_trade_last_ms"] = int(time.time() * 1000)
+                    elif channel == REDIS_TAPE_BOOK_CHANNEL:
+                        try:
+                            bid = float(data.get("b") or 0.0)
+                            ask = float(data.get("a") or 0.0)
+                            bq = float(data.get("B") or 0.0)
+                            aq = float(data.get("A") or 0.0)
+                        except (TypeError, ValueError):
+                            bid = ask = bq = aq = 0.0
+                        if bid > 0 and ask >= bid:
+                            tape.bbo[symbol] = {
+                                "t": time.time(),
+                                "bid": bid,
+                                "bq": bq,
+                                "ask": ask,
+                                "aq": aq,
+                            }
+                            tape.tape_stats["distributed_books"] += 1
+                            tape.tape_stats["distributed_last_book_ms"] = int(time.time() * 1000)
+                            _redis_bridge_stats["tape_book_events"] += 1
+                            _redis_bridge_stats["tape_book_last_ms"] = int(time.time() * 1000)
                 except Exception as exc:
                     _redis_bridge_stats["event_errors"] += 1
                     _redis_bridge_stats["event_last_error"] = f"{type(exc).__name__}: {exc}"
