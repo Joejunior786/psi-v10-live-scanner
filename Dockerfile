@@ -69,8 +69,8 @@ COPY test_micro_stability.py .
 RUN python -m py_compile psi_strategy_v12_entry.py psi_v12_3_hardening.py psi_v12_3_runner.py psi_micro_worker.py psi_tape_worker.py psi_structure_worker.py psi_extension_worker.py psi_risk_worker.py test_micro_stability.py && python -m unittest -v test_v12_execution_gate.py test_micro_stability.py
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=12.3.0-strict-buy-now-gate
-ENV PSI_APPROVED_SCANNER_VERSION=12.3.0-strict-buy-now-gate
+ENV PSI_SCANNER_VERSION=12.3.4-strict-buy-now-gate
+ENV PSI_APPROVED_SCANNER_VERSION=12.3.4-strict-buy-now-gate
 ENV PSI_STRATEGY_AUTHORITY=V12_ONLY
 ENV PSI_V11_SHADOW_ONLY=1
 ENV PSI_BYBIT_ENABLED=0
