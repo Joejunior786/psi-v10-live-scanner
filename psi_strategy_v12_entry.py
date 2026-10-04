@@ -3255,47 +3255,133 @@ async def strategy_loop():
 
 
 
+_distributed_micro_sticky_pool = []
+_distributed_micro_pool_epoch = 0
+REDIS_MICRO_PRIORITY_SLOTS = max(
+    8, min(int(os.getenv("PSI_MICRO_PRIORITY_SLOTS", "24")), REDIS_MICRO_POOL_SIZE)
+)
+REDIS_MICRO_ROTATION_SLOTS = max(
+    2, min(int(os.getenv("PSI_MICRO_ROTATION_SLOTS", "8")), REDIS_MICRO_POOL_SIZE)
+)
+REDIS_MICRO_ROTATION_PERIOD_S = max(
+    20.0, float(os.getenv("PSI_MICRO_ROTATION_PERIOD_S", "45"))
+)
+
+
 def _distributed_micro_symbols():
-    out = []
+    """Stable execution micro pool.
+
+    Discovery remains full-universe. This pool is intentionally sticky so
+    Trade/Book workers can accumulate sequence/warm-up history instead of
+    resetting most symbols on every ranking change. Highest-priority current
+    candidates always get first access, and a bounded rotation slice preserves
+    fair exposure for the rest of the universe.
+    """
+    global _distributed_micro_sticky_pool, _distributed_micro_pool_epoch
+
+    desired = []
     seen = set()
 
-    def add(sym):
+    def add_desired(sym):
         sym = str(sym or "").upper()
         if sym.endswith("USDT") and sym not in seen:
             seen.add(sym)
-            out.append(sym)
+            desired.append(sym)
 
+    # Current execution/promoted symbols are highest priority.
     for sym in list(getattr(app, "selected_micro_symbols", []) or []):
-        add(sym)
+        add_desired(sym)
 
+    # Then current V12 structural/radar board.
     try:
         for row in _board():
-            add(row.get("symbol"))
-            if len(out) >= REDIS_MICRO_POOL_SIZE:
+            add_desired(row.get("symbol"))
+            if len(desired) >= max(REDIS_MICRO_POOL_SIZE * 2, 120):
                 break
     except Exception:
         pass
 
-    # Cold-start bootstrap: never leave distributed micro workers idle merely
-    # because Pinpoint/structure ranking has not populated yet. Fill remaining
-    # slots from the live Binance universe, ranked by current 24h quote volume.
-    # Ranked V12 candidates still take priority and replace bootstrap symbols.
-    if len(out) < REDIS_MICRO_POOL_SIZE:
+    universe = list(getattr(q, "universe", []) or [])
+    universe_set = set(universe)
+
+    # Liquidity fallback keeps cold start useful.
+    if len(desired) < REDIS_MICRO_POOL_SIZE:
         try:
-            universe = list(getattr(q, "universe", []) or [])
             meta = getattr(app, "symbol_meta", {}) or {}
-            universe.sort(
+            liquid = sorted(
+                universe,
                 key=lambda sym: float((meta.get(sym, {}) or {}).get("quote_volume_24h", 0.0) or 0.0),
                 reverse=True,
             )
-            for sym in universe:
-                add(sym)
-                if len(out) >= REDIS_MICRO_POOL_SIZE:
+            for sym in liquid:
+                add_desired(sym)
+                if len(desired) >= REDIS_MICRO_POOL_SIZE:
                     break
         except Exception:
             pass
 
-    return out[:REDIS_MICRO_POOL_SIZE]
+    if not _distributed_micro_sticky_pool:
+        _distributed_micro_sticky_pool = desired[:REDIS_MICRO_POOL_SIZE]
+        return list(_distributed_micro_sticky_pool)
+
+    # Immediate access for the strongest current candidates, but cap how much
+    # one rebalance can displace so warm-up/sequence history survives.
+    priority = desired[:REDIS_MICRO_PRIORITY_SLOTS]
+    out = []
+    out_seen = set()
+
+    def add_out(sym):
+        sym = str(sym or "").upper()
+        if (
+            sym and sym.endswith("USDT") and sym in universe_set
+            and sym not in out_seen and len(out) < REDIS_MICRO_POOL_SIZE
+        ):
+            out_seen.add(sym)
+            out.append(sym)
+
+    for sym in priority:
+        add_out(sym)
+
+    # Retain existing warmed symbols next.
+    retain_target = max(
+        REDIS_MICRO_PRIORITY_SLOTS,
+        REDIS_MICRO_POOL_SIZE - REDIS_MICRO_ROTATION_SLOTS,
+    )
+    for sym in _distributed_micro_sticky_pool:
+        if len(out) >= retain_target:
+            break
+        add_out(sym)
+
+    # Fill remaining ranked candidates.
+    for sym in desired:
+        if len(out) >= REDIS_MICRO_POOL_SIZE - REDIS_MICRO_ROTATION_SLOTS:
+            break
+        add_out(sym)
+
+    # Bounded fair-rotation slice across the whole 403-market universe.
+    if universe and len(out) < REDIS_MICRO_POOL_SIZE:
+        epoch = int(time.time() / REDIS_MICRO_ROTATION_PERIOD_S)
+        if epoch != _distributed_micro_pool_epoch:
+            _distributed_micro_pool_epoch = epoch
+        slots = min(REDIS_MICRO_ROTATION_SLOTS, REDIS_MICRO_POOL_SIZE - len(out))
+        start = (epoch * max(1, slots)) % len(universe)
+        checked = 0
+        while slots > 0 and checked < len(universe):
+            sym = universe[(start + checked) % len(universe)]
+            checked += 1
+            before = len(out)
+            add_out(sym)
+            if len(out) > before:
+                slots -= 1
+
+    # Final fill if deduplication left capacity.
+    for sym in desired + universe:
+        if len(out) >= REDIS_MICRO_POOL_SIZE:
+            break
+        add_out(sym)
+
+    _distributed_micro_sticky_pool = out[:REDIS_MICRO_POOL_SIZE]
+    return list(_distributed_micro_sticky_pool)
 
 
 async def redis_control_loop():
