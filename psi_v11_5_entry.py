@@ -4720,12 +4720,48 @@ async def watchdog_loop():
             )
 
             live_micro=0
+            micro_diag={
+                "distributed":0,"tradeFresh":0,"bookFresh":0,
+                "tradeSeq":0,"bookSeq":0,"tradeCount":0,
+                "ofiSamples":0,"bookUpdates":0,"ready":0,
+            }
+            micro_diag_total=0
             for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
                 try:
-                    if bool(app.micro_metrics(sym).get("micro_ready")):
+                    mm=app.micro_metrics(sym) or {}
+                    micro_diag_total+=1
+                    if str(mm.get("snapshot_source") or "")=="DISTRIBUTED_MICRO":
+                        micro_diag["distributed"]+=1
+                    trade_age=f(mm.get("snapshot_trade_age_ms"),999999999.0)
+                    book_age=f(mm.get("snapshot_book_age_ms"),999999999.0)
+                    micro_diag["tradeFresh"]+=int(trade_age<=15000.0)
+                    micro_diag["bookFresh"]+=int(book_age<=5000.0)
+                    micro_diag["tradeSeq"]+=int(bool(mm.get("sequence_verified")))
+                    micro_diag["bookSeq"]+=int(bool(mm.get("book_sequence_verified")))
+                    micro_diag["tradeCount"]+=int(int(f(mm.get("trade_count_60s"),0))>=10)
+                    # Snapshot adapter does not expose these counts directly;
+                    # derive final readiness from the same authoritative result.
+                    ready=bool(mm.get("micro_ready"))
+                    micro_diag["ready"]+=int(ready)
+                    if ready:
                         live_micro+=1
+                    # For distributed metrics, readiness already requires both
+                    # OFI sample and book-update minimums. Count them as passed
+                    # only when the snapshot is ready; this keeps diagnostics
+                    # conservative until those raw counts are surfaced.
+                    micro_diag["ofiSamples"]+=int(ready)
+                    micro_diag["bookUpdates"]+=int(ready)
                 except Exception:
                     pass
+            print(
+                f"Ψ-MICRO-READINESS pool={micro_diag_total} "
+                f"dist={micro_diag['distributed']} tradeFresh={micro_diag['tradeFresh']} "
+                f"bookFresh={micro_diag['bookFresh']} tradeSeq={micro_diag['tradeSeq']} "
+                f"bookSeq={micro_diag['bookSeq']} tradeCount={micro_diag['tradeCount']} "
+                f"ofiReady={micro_diag['ofiSamples']} bookUpdReady={micro_diag['bookUpdates']} "
+                f"ready={micro_diag['ready']}",
+                flush=True,
+            )
             execution_micro_ok=(
                 startup_age<=WATCHDOG_STARTUP_GRACE_S
                 or pool==0
