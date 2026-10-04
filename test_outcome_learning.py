@@ -85,6 +85,57 @@ class OutcomeLearningTests(unittest.TestCase):
         self.assertTrue(clean.endswith("C0"))
         self.assertTrue(chased.endswith("C1"))
 
+    def test_clean_entry_requires_limited_adverse_excursion(self):
+        event = self.make_event()
+        event["mae_at_target"] = {}
+        ml._update_event(event, 99.0, 1_100_000)
+        ml._update_event(event, 106.0, 1_200_000)
+        self.assertTrue(ml._clean_target_before_stop(event, 5.0))
+
+        event2 = self.make_event()
+        event2["mae_at_target"] = {}
+        ml._update_event(event2, 97.0, 1_100_000)
+        event2["resolved"] = False
+        event2["resolution"] = "OPEN"
+        event2["stop_hit_ms"] = 0
+        ml._update_event(event2, 106.0, 1_200_000)
+        self.assertFalse(ml._clean_target_before_stop(event2, 5.0))
+
+    def test_time_blocked_dataset_split(self):
+        day = ml.DAY_MS
+        self.assertEqual(ml._dataset_split(0 * day), "TRAIN")
+        self.assertEqual(ml._dataset_split(13 * day), "TRAIN")
+        self.assertEqual(ml._dataset_split(14 * day), "VALIDATION")
+        self.assertEqual(ml._dataset_split(16 * day), "VALIDATION")
+        self.assertEqual(ml._dataset_split(17 * day), "TEST")
+        self.assertEqual(ml._dataset_split(19 * day), "TEST")
+
+    def test_validated_70_claim_requires_test_evidence(self):
+        old = dict(ml._stats)
+        try:
+            ml._stats.clear()
+            overall = ml._blank_stat()
+            overall["targets"]["5"].update({"clean_win": 285, "clean_loss": 15})
+            overall["n"] = 300
+            ml._stats["GLOBAL"] = overall
+
+            test = ml._blank_stat()
+            test["targets"]["5"].update({"clean_win": 72, "clean_loss": 3})
+            test["n"] = 75
+            ml._stats["SPLIT::TEST::GLOBAL"] = test
+
+            claim = ml._validated_70_claim("GLOBAL", 5.0, True)
+            self.assertTrue(claim["qualified"])
+
+            ml._stats["SPLIT::TEST::GLOBAL"]["targets"]["5"].update(
+                {"clean_win": 45, "clean_loss": 30}
+            )
+            claim = ml._validated_70_claim("GLOBAL", 5.0, True)
+            self.assertFalse(claim["qualified"])
+        finally:
+            ml._stats.clear()
+            ml._stats.update(old)
+
 
 if __name__ == "__main__":
     unittest.main()
