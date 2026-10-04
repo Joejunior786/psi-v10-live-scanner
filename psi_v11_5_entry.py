@@ -4633,17 +4633,29 @@ async def watchdog_loop():
                     flush=True,
                 )
 
-            # Continuity is no longer allowed to freeze at a small sticky pool.
-            # Whenever verified fresh structure materially exceeds the current
-            # pool, ask the guarded continuity allocator to expand/rotate it.
+            # Continuity is no longer allowed to freeze at a small sticky pool,
+            # but expansion must not outrun strict Trade/Book warm-up. Discovery
+            # remains full-universe; this governor only controls admission into
+            # the execution micro pool.
             desired_pool=min(int(getattr(base,"POOL_SIZE",80)),total,max(16,fresh_cov))
-            if (
+            expansion_live_micro=0
+            for _sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+                try:
+                    expansion_live_micro+=int(bool(app.micro_metrics(_sym).get("micro_ready")))
+                except Exception:
+                    pass
+            expansion_micro_required=0 if pool<16 else max(6,int(math.ceil(pool*0.40)))
+            expansion_micro_ok=(pool<16 or expansion_live_micro>=expansion_micro_required)
+
+            pool_expand_candidate=(
                 startup_age>WATCHDOG_STARTUP_GRACE_S
                 and fresh_cov>=min(16,total)
                 and pool<desired_pool
                 and fresh_cov>=pool+3
                 and now-_watchdog_last_pool_progress>min(WATCHDOG_POOL_STALL_S,35.0)
-            ):
+            )
+
+            if pool_expand_candidate and expansion_micro_ok:
                 try:
                     before_pool=pool
                     await continuity_guard.rebalance_continuity_guarded(force=True)
@@ -4651,13 +4663,28 @@ async def watchdog_loop():
                     watchdog_stats["pool_kicks"]+=1
                     watchdog_stats["actions"]+=1
                     actions.append(f"POOL_REBALANCE:{before_pool}->{new_pool}")
-                    print(f"Ψ-WATCHDOG ACTION POOL_REBALANCE before={before_pool} after={new_pool} desired={desired_pool} structure={fresh_cov}/{total}",flush=True)
+                    print(
+                        f"Ψ-WATCHDOG ACTION POOL_REBALANCE before={before_pool} after={new_pool} "
+                        f"desired={desired_pool} structure={fresh_cov}/{total} "
+                        f"microReady={expansion_live_micro}/{pool} required={expansion_micro_required}",
+                        flush=True,
+                    )
                     _watchdog_last_pool=max(_watchdog_last_pool,new_pool)
                     _watchdog_last_pool_progress=now
                 except Exception as exc:
                     watchdog_stats["errors"]+=1
                     actions.append("POOL_REBALANCE_FAIL")
                     print(f"Ψ-WATCHDOG ERROR POOL_REBALANCE {type(exc).__name__}: {exc}",flush=True)
+            elif pool_expand_candidate and not expansion_micro_ok:
+                actions.append(
+                    f"POOL_HOLD_MICRO:{expansion_live_micro}/{pool}<{expansion_micro_required}"
+                )
+                print(
+                    f"Ψ-WATCHDOG ACTION POOL_HOLD_MICRO pool={pool} desired={desired_pool} "
+                    f"ready={expansion_live_micro} required={expansion_micro_required} "
+                    f"structure={fresh_cov}/{total}",
+                    flush=True,
+                )
 
             # If the continuity pool exists but both the legacy tape and the
             # distributed tape are unavailable, ask the guarded legacy shard
