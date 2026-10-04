@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.25-full-shard-utilization"
+VERSION = "12.2.26-completion-biased-fast-core"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -46,8 +46,8 @@ ROTATION_SLOTS = max(4, int(os.getenv("PSI_V12_ROTATION_SLOTS", "4")))
 PRIORITY_SLOTS = max(4, int(os.getenv("PSI_V12_PRIORITY_SLOTS", "4")))
 LOOP_SECONDS = max(8.0, float(os.getenv("PSI_V12_LOOP_SECONDS", "15")))
 FETCH_CONCURRENCY = max(6, min(int(os.getenv("PSI_V12_FETCH_CONCURRENCY", "9")), 9))
-MAX_INFLIGHT_SYMBOLS = max(18, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "27")), 36))
-BOOTSTRAP_SYMBOLS_PER_CYCLE = max(12, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "18")), 27))
+MAX_INFLIGHT_SYMBOLS = max(12, min(int(os.getenv("PSI_V12_MAX_INFLIGHT_SYMBOLS", "18")), 18))
+BOOTSTRAP_SYMBOLS_PER_CYCLE = max(9, min(int(os.getenv("PSI_V12_BOOTSTRAP_SYMBOLS_PER_CYCLE", "18")), 18))
 ACTIVE_SYMBOLS_PER_CYCLE = max(4, min(int(os.getenv("PSI_V12_ACTIVE_SYMBOLS_PER_CYCLE", "8")), 16))
 MAX_BOARD_PER_STATE = max(5, int(os.getenv("PSI_V12_MAX_BOARD_PER_STATE", "20")))
 
