@@ -8,7 +8,7 @@ from typing import List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.2-distributed-micro-4"
+WORKER_VERSION = "12.3.4-distributed-micro-rotation5"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -30,13 +30,13 @@ WS_HOSTS = tuple(
 CONTROL_POLL_SECONDS = max(1.0, float(os.getenv("PSI_WORKER_CONTROL_POLL_SECONDS", "2")))
 MAX_SYMBOLS = max(1, min(int(os.getenv("PSI_WORKER_MAX_SYMBOLS", "80")), 120))
 CONTROL_MAX_REPLACEMENTS = max(
-    1, min(int(os.getenv("PSI_WORKER_MAX_REPLACEMENTS", "2")), 12)
+    1, min(int(os.getenv("PSI_WORKER_MAX_REPLACEMENTS", "4")), 12)
 )
 CONTROL_REBALANCE_SECONDS = max(
-    5.0, float(os.getenv("PSI_WORKER_CONTROL_REBALANCE_SECONDS", "30"))
+    5.0, float(os.getenv("PSI_WORKER_CONTROL_REBALANCE_SECONDS", "15"))
 )
 CONTROL_MIN_HOLD_SECONDS = max(
-    30.0, float(os.getenv("PSI_WORKER_MIN_HOLD_SECONDS", "120"))
+    30.0, float(os.getenv("PSI_WORKER_MIN_HOLD_SECONDS", "90"))
 )
 STATE_RETENTION_SECONDS = max(
     120.0, float(os.getenv("PSI_WORKER_STATE_RETENTION_SECONDS", "300"))
