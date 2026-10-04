@@ -3007,7 +3007,8 @@ async def board_loop_v5():
         try:
             base.refresh_adapt();rows=list(base.latest.get("_board") or []);all_rows=list(base.latest.get("_all_candidates") or rows);states=("MONSTER-HOT","MONSTER-IGNITION","MONSTER-MEMORY","MONSTER-RESCUE","MONSTER-SEED","MONSTER-EXTENDED");counts={k:sum(r.get("state")==k for r in all_rows) for k in states};ups=sum(int(tape.tape_stats.get(f"shard_{i}_up",0)) for i in range(tape.SHARDS));ready,trade_fresh,book_fresh=_monster_tape_health()
             integrity_live=sum(bool(r.get("integrityVerified")) for r in all_rows)
-            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} shards={ups}/{tape.SHARDS} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
+            dist_up=int(f(tape.tape_stats.get("distributed_shards_up"),0));dist_req=max(1,int(os.environ.get("PSI_TAPE_WORKERS","2")))
+            print(f"Ψ-MONSTER-RADAR BOARD scanned={base.stats['universe']}/{len(getattr(q,'universe',[]) or [])} deep={base.stats['deep']} candidates={base.stats['cand']} hot={counts['MONSTER-HOT']} ignition={counts['MONSTER-IGNITION']} memory={counts['MONSTER-MEMORY']} rescue={counts['MONSTER-RESCUE']} seed={counts['MONSTER-SEED']} extended={counts['MONSTER-EXTENDED']} rows={len(rows)}/{BOARD_ROWS} allRows={len(all_rows)} integrityLive={integrity_live}/{len(all_rows)} scan={int(base.SCAN_S*1000)}ms tape={trade_fresh}/{len(getattr(q,'universe',[]) or [])} tapeStrict={ready}/{len(getattr(q,'universe',[]) or [])} bookFresh={book_fresh}/{len(getattr(q,'universe',[]) or [])} legacyShards={ups}/{tape.SHARDS} distTape={dist_up}/{dist_req} trades={tape.tape_stats['trades']} books={tape.tape_stats['books']} distTrades={int(f(tape.tape_stats.get('distributed_trades'),0))} distBooks={int(f(tape.tape_stats.get('distributed_books'),0))} learning={base.adapt['status']} obsPending={len(base.pending)} obsResolved={len(base.resolved)} PinpointAuthority=YES BSI=ON HARD_LIVE_INTEGRITY=ON",flush=True)
             dark_exclude={
                 str(r.get("symbol") or "")
                 for r in all_rows
@@ -4080,11 +4081,17 @@ async def watchdog_loop():
                     actions.append("POOL_REBALANCE_FAIL")
                     print(f"Ψ-WATCHDOG ERROR POOL_REBALANCE {type(exc).__name__}: {exc}",flush=True)
 
-            # If the continuity pool exists but shard assignments remain absent,
-            # ask the existing guarded shard allocator to repair the mapping.
+            # If the continuity pool exists but both the legacy tape and the
+            # distributed tape are unavailable, ask the guarded legacy shard
+            # allocator to repair the mapping. A healthy distributed tape is a
+            # first-class replacement transport, not a reason to churn legacy
+            # shards that are no longer on the hot path.
+            distributed_shards_required=max(1,int(os.environ.get("PSI_TAPE_WORKERS","2")))
+            distributed_shards_up=int(f(tape.tape_stats.get("distributed_shards_up"),0))
             if (
                 startup_age>WATCHDOG_STARTUP_GRACE_S
                 and pool>0 and shards<tape.SHARDS
+                and distributed_shards_up<distributed_shards_required
                 and now-_watchdog_last_shard_progress>WATCHDOG_SHARD_STALL_S
             ):
                 try:
@@ -4118,9 +4125,17 @@ async def watchdog_loop():
             wsapi_book_age=(now*1000-f(_ws_market_stats.get("last_book_ms"),0))/1000.0 if f(_ws_market_stats.get("last_book_ms"),0)>0 else 999999.0
             wsapi_trade_age=(now*1000-f(_ws_market_stats.get("last_trade_ms"),0))/1000.0 if f(_ws_market_stats.get("last_trade_ms"),0)>0 else 999999.0
             wsapi_tape_live=(wsapi_book_age<=5.0 and wsapi_trade_age<=15.0)
+            dist_book_age=(now*1000-f(tape.tape_stats.get("distributed_last_book_ms"),0))/1000.0 if f(tape.tape_stats.get("distributed_last_book_ms"),0)>0 else 999999.0
+            dist_trade_age=(now*1000-f(tape.tape_stats.get("distributed_last_trade_ms"),0))/1000.0 if f(tape.tape_stats.get("distributed_last_trade_ms"),0)>0 else 999999.0
+            distributed_tape_live=(
+                distributed_shards_up>=distributed_shards_required
+                and dist_book_age<=5.0
+                and dist_trade_age<=15.0
+            )
             shard_ok=(
                 pool==0
                 or shards==tape.SHARDS
+                or distributed_tape_live
                 or rest_tape_live
                 or wsapi_tape_live
                 or now-_watchdog_last_shard_progress<=WATCHDOG_SHARD_STALL_S
@@ -4171,7 +4186,7 @@ async def watchdog_loop():
                 f"structureFreshExec={exec_fresh}/{exec_total} structureEverExec={exec_ever}/{exec_total} "
                 f"structureFreshScope={fresh_cov}/{total} structureEverScope={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} liveMicro={live_micro}/{pool} "
-                f"monsterShards={shards}/{tape.SHARDS} restTape={'LIVE' if rest_tape_live else 'STALE'} restBookAge={rest_book_age:.1f}s restTradeAge={rest_trade_age:.1f}s wsApiTape={'LIVE' if wsapi_tape_live else 'STALE'} wsApiBookAge={wsapi_book_age:.1f}s wsApiTradeAge={wsapi_trade_age:.1f}s extAge={ext_age:.1f}s "
+                f"legacyMonsterShards={shards}/{tape.SHARDS} distTape={distributed_shards_up}/{distributed_shards_required} distTapeState={'LIVE' if distributed_tape_live else 'STALE'} distBookAge={dist_book_age:.1f}s distTradeAge={dist_trade_age:.1f}s restTape={'LIVE' if rest_tape_live else 'STALE'} restBookAge={rest_book_age:.1f}s restTradeAge={rest_trade_age:.1f}s wsApiTape={'LIVE' if wsapi_tape_live else 'STALE'} wsApiBookAge={wsapi_book_age:.1f}s wsApiTradeAge={wsapi_trade_age:.1f}s extAge={ext_age:.1f}s "
                 f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wdRescueOK={recovery_stats['rescue_ok']} wdRescueFail={recovery_stats['rescue_fail']} wdStaleOK={recovery_stats['rescue_stale_ok']} wdStaleFail={recovery_stats['rescue_stale_fail']} wdRouteReset={recovery_stats['route_resets']} wdRestOK={_structure_tf_stats['watchdog_rest_ok']} wdRestFail={_structure_tf_stats['watchdog_rest_fail']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
