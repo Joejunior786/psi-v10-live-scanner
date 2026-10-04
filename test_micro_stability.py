@@ -141,5 +141,103 @@ class MicroStabilityTests(unittest.TestCase):
         self.assertFalse(removed)
 
 
+    def test_true_low_market_cap_is_eligible(self):
+        profile = hardening._lowcap_cap_profile_values(
+            quote_volume_24h=5_000_000.0,
+            market_cap_usd=80_000_000.0,
+        )
+        self.assertTrue(profile["eligible"])
+        self.assertEqual(profile["band"], "LOW_CAP")
+        self.assertEqual(profile["source"], "MARKET_CAP")
+
+    def test_quote_volume_fallback_is_explicitly_proxy_only(self):
+        profile = hardening._lowcap_cap_profile_values(
+            quote_volume_24h=8_000_000.0,
+            market_cap_usd=0.0,
+        )
+        self.assertTrue(profile["eligible"])
+        self.assertEqual(profile["band"], "LOW_CAP_PROXY")
+        self.assertEqual(profile["source"], "QUOTE_VOLUME_PROXY")
+
+    def test_volume_before_price_beats_same_flow_after_vertical_chase(self):
+        common = {
+            "notional_accel_1s": 3.2,
+            "trade_count_accel_1s": 2.8,
+            "avg_trade_shift_1s": 1.8,
+            "notional_15s": 300_000.0,
+            "notional_30s": 390_000.0,
+            "buy_ratio_1s": 0.72,
+            "cvd_accel": 0.22,
+            "bbo_imbalance": 0.18,
+        }
+        quiet = dict(common, price_velocity_5s_pct=0.8)
+        chased = dict(common, price_velocity_5s_pct=5.5)
+        quiet_row = hardening._score_lowcap_candidate(
+            "QUIETUSDT",
+            quote_volume_24h=5_000_000.0,
+            rapid_score=100.0,
+            tape_metric=quiet,
+        )
+        chased_row = hardening._score_lowcap_candidate(
+            "CHASEUSDT",
+            quote_volume_24h=5_000_000.0,
+            rapid_score=100.0,
+            tape_metric=chased,
+        )
+        self.assertGreater(quiet_row["score"], chased_row["score"])
+        self.assertGreater(
+            quiet_row["components"]["volume_before_price"],
+            chased_row["components"]["volume_before_price"],
+        )
+
+    def test_flow_flip_materially_improves_lowcap_score(self):
+        base_tape = {
+            "notional_accel_1s": 2.4,
+            "trade_count_accel_1s": 2.2,
+            "avg_trade_shift_1s": 1.4,
+            "notional_15s": 200_000.0,
+            "notional_30s": 300_000.0,
+            "price_velocity_5s_pct": 0.7,
+            "bbo_imbalance": 0.05,
+        }
+        weak = hardening._score_lowcap_candidate(
+            "FLOWUSDT",
+            quote_volume_24h=4_000_000.0,
+            tape_metric=dict(base_tape, buy_ratio_1s=0.50, cvd_accel=-0.10),
+            micro_metric={"ofi_acceleration": -0.05},
+        )
+        strong = hardening._score_lowcap_candidate(
+            "FLOWUSDT",
+            quote_volume_24h=4_000_000.0,
+            tape_metric=dict(base_tape, buy_ratio_1s=0.79, cvd_accel=0.38),
+            micro_metric={"ofi_acceleration": 0.22, "obi": 0.30, "ask_depletion": 0.18},
+        )
+        self.assertGreater(strong["score"], weak["score"] + 10.0)
+        self.assertGreater(strong["components"]["flow_flip"], weak["components"]["flow_flip"])
+
+    def test_lowcap_engine_has_no_execution_authority(self):
+        row = hardening._score_lowcap_candidate(
+            "HOTUSDT",
+            quote_volume_24h=2_000_000.0,
+            rapid_score=150.0,
+            tape_metric={
+                "notional_accel_1s": 4.0,
+                "trade_count_accel_1s": 3.5,
+                "avg_trade_shift_1s": 2.0,
+                "notional_15s": 400_000.0,
+                "notional_30s": 500_000.0,
+                "price_velocity_5s_pct": 0.5,
+                "buy_ratio_1s": 0.85,
+                "cvd_accel": 0.5,
+                "bbo_imbalance": 0.4,
+            },
+            micro_metric={"ofi_acceleration": 0.3, "obi": 0.4, "ask_depletion": 0.25},
+            latest_row={"resistance_fatigue": 75.0, "state": "PULLBACK_EXHAUSTED"},
+        )
+        self.assertGreaterEqual(row["score"], hardening.LOWCAP_MIN_SCORE)
+        self.assertFalse(row["execution_authority"])
+        self.assertEqual(row["role"], "DISCOVERY_PROMOTION_ONLY")
+
+
 if __name__ == "__main__":
     unittest.main()

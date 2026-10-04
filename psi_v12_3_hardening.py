@@ -8,7 +8,7 @@ import redis.asyncio as redis_async
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3.4_LANES->V12.3.4_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.4-rapid-guaranteed-promotion"
+HARDENING_REVISION = "12.3.4-lowcap-early-explosion+rapid-guaranteed-promotion"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -24,6 +24,14 @@ RAPID_PROMOTION_SLOTS = 10
 RAPID_MIN_SCORE = 85.0
 RAPID_CHURN_PER_CYCLE = 4
 RAPID_DIAG_SECONDS = 15.0
+LOWCAP_PROMOTION_SLOTS = 12
+LOWCAP_MIN_SCORE = 65.0
+LOWCAP_CHURN_PER_CYCLE = 4
+LOWCAP_DIAG_SECONDS = 15.0
+LOWCAP_PROXY_MIN_QUOTE_VOLUME_24H = 250_000.0
+LOWCAP_PROXY_MAX_QUOTE_VOLUME_24H = 75_000_000.0
+LOWCAP_MICRO_CAP_MAX_USD = 25_000_000.0
+LOWCAP_LOW_CAP_MAX_USD = 300_000_000.0
 
 _last_rebalance = 0.0
 _rotation_epoch = 0
@@ -33,6 +41,9 @@ _last_diag_mono = 0.0
 _activity_rank_cache = []
 _activity_rank_mono = 0.0
 _last_rapid_diag_mono = 0.0
+_last_lowcap_diag_mono = 0.0
+_lowcap_rank_cache = []
+_lowcap_rank_mono = 0.0
 _inactive_since = {}
 _original_gate = None
 _original_scan = None
@@ -85,6 +96,369 @@ def _rapid_ranked_symbols(universe, min_score=None):
             ranked.append((score, symbol))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [symbol for _, symbol in ranked]
+
+
+
+
+def _f(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp01(value):
+    return max(0.0, min(1.0, _f(value)))
+
+
+def _scale(value, low, high):
+    value = _f(value)
+    if high <= low:
+        return 0.0
+    return _clamp01((value - low) / (high - low))
+
+
+def _first_numeric(mapping, keys, default=0.0):
+    mapping = mapping or {}
+    for key in keys:
+        if key not in mapping:
+            continue
+        try:
+            value = float(mapping.get(key))
+        except (TypeError, ValueError):
+            continue
+        return value
+    return default
+
+
+def _lowcap_cap_profile_values(quote_volume_24h=0.0, market_cap_usd=0.0):
+    """Classify true market cap when available, otherwise use a labelled liquidity proxy.
+
+    The proxy is discovery-only. It is never represented as a real market-cap value and
+    it has no execution authority.
+    """
+    quote_volume_24h = max(0.0, _f(quote_volume_24h))
+    market_cap_usd = max(0.0, _f(market_cap_usd))
+    if market_cap_usd > 0.0:
+        if market_cap_usd < LOWCAP_MICRO_CAP_MAX_USD:
+            band = "MICRO_CAP"
+        elif market_cap_usd < LOWCAP_LOW_CAP_MAX_USD:
+            band = "LOW_CAP"
+        elif market_cap_usd < 3_000_000_000.0:
+            band = "MID_CAP"
+        else:
+            band = "LARGE_CAP"
+        return {
+            "eligible": band in {"MICRO_CAP", "LOW_CAP"},
+            "band": band,
+            "source": "MARKET_CAP",
+            "market_cap_usd": market_cap_usd,
+            "quote_volume_24h": quote_volume_24h,
+        }
+
+    proxy_min = max(
+        0.0,
+        _f(os.getenv("PSI_LOW_CAP_PROXY_MIN_QUOTE_VOLUME_24H", LOWCAP_PROXY_MIN_QUOTE_VOLUME_24H)),
+    )
+    proxy_max = max(
+        proxy_min,
+        _f(os.getenv("PSI_LOW_CAP_PROXY_MAX_QUOTE_VOLUME_24H", LOWCAP_PROXY_MAX_QUOTE_VOLUME_24H)),
+    )
+    eligible = proxy_min <= quote_volume_24h <= proxy_max
+    return {
+        "eligible": eligible,
+        "band": "LOW_CAP_PROXY" if eligible else "OUTSIDE_LOW_CAP_PROXY",
+        "source": "QUOTE_VOLUME_PROXY",
+        "market_cap_usd": 0.0,
+        "quote_volume_24h": quote_volume_24h,
+    }
+
+
+def _score_lowcap_candidate(
+    symbol,
+    quote_volume_24h=0.0,
+    market_cap_usd=0.0,
+    rapid_score=0.0,
+    tape_metric=None,
+    micro_metric=None,
+    latest_row=None,
+):
+    """Pure low-cap early-explosion score.
+
+    This score can only promote a symbol into deeper telemetry. It cannot create
+    Pinpoint state, structural BUY, EXEC ARMED or BUY NOW.
+    """
+    tape_metric = tape_metric or {}
+    micro_metric = micro_metric or {}
+    latest_row = latest_row or {}
+    cap = _lowcap_cap_profile_values(quote_volume_24h, market_cap_usd)
+    if not cap["eligible"]:
+        return {
+            "symbol": str(symbol or "").upper(),
+            "eligible": False,
+            "score": 0.0,
+            "state": "OUTSIDE_LOW_CAP_LANE",
+            "cap_band": cap["band"],
+            "cap_source": cap["source"],
+            "market_cap_usd": cap["market_cap_usd"],
+            "quote_volume_24h": cap["quote_volume_24h"],
+            "role": "DISCOVERY_PROMOTION_ONLY",
+            "execution_authority": False,
+            "components": {},
+        }
+
+    n1_acc = _first_numeric(tape_metric, ("notional_accel_1s",), 0.0)
+    c1_acc = _first_numeric(tape_metric, ("trade_count_accel_1s",), 0.0)
+    trade_shift = _first_numeric(
+        tape_metric,
+        ("avg_trade_shift_1s",),
+        _first_numeric(micro_metric, ("trade_size_shift",), 0.0),
+    )
+    n15 = max(0.0, _first_numeric(tape_metric, ("notional_15s",), 0.0))
+    n30 = max(n15, _first_numeric(tape_metric, ("notional_30s",), n15))
+    prior15 = max(0.0, n30 - n15)
+    n15_ratio = (
+        n15 / max(prior15, 1e-9)
+        if prior15 > 0.0
+        else (2.0 if n15 > 0.0 else 0.0)
+    )
+
+    rv30 = _first_numeric(micro_metric, ("relative_volume_30s",), 0.0)
+    trade_acc = _first_numeric(micro_metric, ("trade_acceleration",), 0.0)
+    pv5 = abs(_first_numeric(tape_metric, ("price_velocity_5s_pct",), 0.0))
+
+    buy_ratio = _first_numeric(
+        tape_metric,
+        ("buy_ratio_1s", "buy_ratio_5s"),
+        _first_numeric(micro_metric, ("aggressive_buy_ratio",), 0.5),
+    )
+    cvd_acc = _first_numeric(
+        tape_metric,
+        ("cvd_accel",),
+        _first_numeric(micro_metric, ("cvd_acceleration",), 0.0),
+    )
+    ofi_acc = _first_numeric(micro_metric, ("ofi_acceleration",), 0.0)
+    obi = _first_numeric(
+        micro_metric,
+        ("obi",),
+        _first_numeric(tape_metric, ("bbo_imbalance",), 0.0),
+    )
+    ask_depletion = _first_numeric(micro_metric, ("ask_depletion",), 0.0)
+
+    volume_strength = max(
+        _scale(n15_ratio, 1.25, 4.0),
+        _scale(n1_acc, 1.20, 3.5),
+        _scale(rv30, 1.0, 3.0),
+    )
+    activity_strength = max(
+        _scale(c1_acc, 1.20, 3.0),
+        _scale(trade_acc, 1.0, 2.5),
+    )
+    # We deliberately reward participation expanding before price gets far away.
+    quiet_price = 1.0 - _scale(pv5, 0.75, 3.0)
+    volume_before_price = _clamp01(
+        (0.65 * volume_strength + 0.35 * activity_strength) * quiet_price
+    )
+
+    buy_strength = _scale(buy_ratio, 0.55, 0.82)
+    cvd_strength = _scale(cvd_acc, 0.04, 0.45)
+    ofi_strength = _scale(ofi_acc, 0.01, 0.30)
+    book_strength = max(_scale(obi, 0.02, 0.45), _scale(ask_depletion, 0.0, 0.30))
+    flow_flip = _clamp01(
+        0.38 * buy_strength
+        + 0.32 * cvd_strength
+        + 0.18 * ofi_strength
+        + 0.12 * book_strength
+    )
+
+    liquidity_shift = _clamp01(
+        0.40 * max(_scale(n1_acc, 1.2, 3.5), _scale(n15_ratio, 1.25, 4.0))
+        + 0.35 * max(_scale(c1_acc, 1.2, 3.0), _scale(trade_acc, 1.0, 2.5))
+        + 0.25 * _scale(trade_shift, 1.15, 2.5)
+    )
+
+    resistance_weakness = _first_numeric(
+        latest_row,
+        (
+            "resistance_fatigue",
+            "resistance_fatigue_score",
+            "resistance_weakness",
+            "resWeak",
+            "res_weak",
+        ),
+        0.0,
+    )
+    resistance_attacks = _first_numeric(
+        latest_row,
+        ("resistance_attacks", "attacks", "tests"),
+        0.0,
+    )
+    resistance_fatigue = max(
+        _scale(resistance_weakness, 15.0, 70.0),
+        _scale(resistance_attacks, 1.0, 4.0),
+    )
+
+    state_blob = " ".join(
+        str(latest_row.get(key) or "").upper()
+        for key in (
+            "state",
+            "pullback_state",
+            "pullback",
+            "formal",
+            "monster_state",
+            "status",
+        )
+    )
+    pullback_exhaustion = 0.0
+    if "PULLBACK_EXHAUSTED" in state_blob:
+        pullback_exhaustion = 1.0
+    elif "SELL_PRESSURE_EXHAUSTING" in state_blob or "SELLERS_EXHAUSTING" in state_blob:
+        pullback_exhaustion = 0.65
+
+    rapid_component = _scale(rapid_score, RAPID_MIN_SCORE, 150.0)
+
+    score = (
+        30.0 * volume_before_price
+        + 25.0 * flow_flip
+        + 20.0 * liquidity_shift
+        + 15.0 * resistance_fatigue
+        + 5.0 * pullback_exhaustion
+        + 5.0 * rapid_component
+    )
+    # Anti-chase applies to promotion too: the engine is designed to catch the
+    # participation regime shift before the obvious vertical candle.
+    if pv5 >= 3.0:
+        score -= min(25.0, 8.0 + (pv5 - 3.0) * 4.0)
+    score = max(0.0, min(100.0, score))
+
+    if score >= 90.0:
+        state = "RAPID_PROMOTION"
+    elif score >= 75.0:
+        state = "HOT"
+    elif score >= 60.0:
+        state = "PRE-IGNITION"
+    elif score >= 45.0:
+        state = "WAKING"
+    else:
+        state = "WATCH"
+
+    return {
+        "symbol": str(symbol or "").upper(),
+        "eligible": True,
+        "score": round(score, 2),
+        "state": state,
+        "cap_band": cap["band"],
+        "cap_source": cap["source"],
+        "market_cap_usd": cap["market_cap_usd"],
+        "quote_volume_24h": cap["quote_volume_24h"],
+        "rapid_score": round(_f(rapid_score), 2),
+        "price_velocity_5s_pct": round(pv5, 4),
+        "buy_ratio_1s": round(buy_ratio, 4),
+        "cvd_accel": round(cvd_acc, 4),
+        "role": "DISCOVERY_PROMOTION_ONLY",
+        "execution_authority": False,
+        "components": {
+            "volume_before_price": round(volume_before_price * 100.0, 1),
+            "flow_flip": round(flow_flip * 100.0, 1),
+            "liquidity_shift": round(liquidity_shift * 100.0, 1),
+            "resistance_fatigue": round(resistance_fatigue * 100.0, 1),
+            "pullback_exhaustion": round(pullback_exhaustion * 100.0, 1),
+            "rapid": round(rapid_component * 100.0, 1),
+        },
+    }
+
+
+def _lowcap_signal(symbol):
+    core = _core()
+    symbol = str(symbol or "").upper()
+    row = ((getattr(core.q, "latest", {}) or {}).get(symbol) or {})
+    meta = (getattr(core.app, "symbol_meta", {}) or {}).get(symbol, {}) or {}
+    quote_volume = _first_numeric(
+        meta,
+        ("quote_volume_24h",),
+        _first_numeric(row, ("quote_volume_24h", "quoteVolume"), 0.0),
+    )
+    market_cap = _first_numeric(
+        meta,
+        ("market_cap_usd", "market_cap"),
+        _first_numeric(row, ("market_cap_usd", "market_cap", "marketCap"), 0.0),
+    )
+    try:
+        tape_metric = core.tape.tape_metric(symbol) or {}
+    except Exception:
+        tape_metric = {}
+    try:
+        micro_metric = core.app.micro_metrics(symbol) or {}
+    except Exception:
+        micro_metric = {}
+    return _score_lowcap_candidate(
+        symbol,
+        quote_volume_24h=quote_volume,
+        market_cap_usd=market_cap,
+        rapid_score=_rapid_score(symbol),
+        tape_metric=tape_metric,
+        micro_metric=micro_metric,
+        latest_row=row,
+    )
+
+
+def _lowcap_ranked_details(universe, refresh_seconds=5.0):
+    global _lowcap_rank_cache, _lowcap_rank_mono
+    now_mono = time.monotonic()
+    universe_set = set(universe)
+    if _lowcap_rank_cache and now_mono - _lowcap_rank_mono < max(2.0, float(refresh_seconds)):
+        return [row for row in _lowcap_rank_cache if row.get("symbol") in universe_set]
+
+    try:
+        _core()._refresh_tape_snapshots_sync(force=True)
+    except Exception:
+        pass
+
+    rows = []
+    for symbol in universe:
+        row = _lowcap_signal(symbol)
+        if row.get("eligible"):
+            rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            _f(row.get("score")),
+            _f((row.get("components") or {}).get("volume_before_price")),
+            _f((row.get("components") or {}).get("flow_flip")),
+            -_f(row.get("quote_volume_24h")),
+            row.get("symbol", ""),
+        ),
+        reverse=True,
+    )
+    _lowcap_rank_cache = rows
+    _lowcap_rank_mono = now_mono
+    return list(rows)
+
+
+def _lowcap_ranked_symbols(universe, min_score=None):
+    threshold = LOWCAP_MIN_SCORE if min_score is None else _f(min_score, LOWCAP_MIN_SCORE)
+    return [
+        row["symbol"]
+        for row in _lowcap_ranked_details(universe)
+        if _f(row.get("score")) >= threshold
+    ]
+
+
+def _lowcap_summary(limit=12):
+    core = _core()
+    universe = list(getattr(core.q, "universe", []) or [])
+    rows = _lowcap_ranked_details(universe)[:max(1, int(limit))]
+    return {
+        "revision": HARDENING_REVISION,
+        "role": "DISCOVERY_PROMOTION_ONLY",
+        "execution_authority": False,
+        "true_market_cap_when_available": True,
+        "fallback_cap_source": "QUOTE_VOLUME_PROXY",
+        "promotion_threshold": _f(
+            os.getenv("PSI_LOW_CAP_MIN_SCORE", LOWCAP_MIN_SCORE),
+            LOWCAP_MIN_SCORE,
+        ),
+        "top": rows,
+    }
 
 
 def _activity_sort_key(metric, quote_volume=0.0, rapid_score=0.0):
@@ -198,7 +572,7 @@ def stable_micro_symbols():
     authority until the unchanged V12.3.4 fail-closed gate approves them.
     """
     global _last_rebalance, _rotation_epoch, _protected_pool, _inactive_since
-    global _last_rapid_diag_mono
+    global _last_rapid_diag_mono, _last_lowcap_diag_mono
 
     core = _core()
     pool_size = int(core.REDIS_MICRO_POOL_SIZE)
@@ -238,6 +612,23 @@ def stable_micro_symbols():
         1,
         min(int(os.getenv("PSI_MICRO_RAPID_CHURN_PER_CYCLE", str(RAPID_CHURN_PER_CYCLE))), 8),
     )
+    lowcap_slots = max(
+        4,
+        min(
+            int(os.getenv("PSI_MICRO_LOWCAP_SLOTS", str(LOWCAP_PROMOTION_SLOTS))),
+            max(4, pool_size // 3),
+        ),
+    )
+    lowcap_min_score = max(
+        45.0, _f(os.getenv("PSI_LOW_CAP_MIN_SCORE", LOWCAP_MIN_SCORE), LOWCAP_MIN_SCORE)
+    )
+    lowcap_churn = max(
+        1,
+        min(
+            int(os.getenv("PSI_MICRO_LOWCAP_CHURN_PER_CYCLE", str(LOWCAP_CHURN_PER_CYCLE))),
+            8,
+        ),
+    )
 
     desired = []
     seen = set()
@@ -266,18 +657,31 @@ def stable_micro_symbols():
 
     activity_ranked = _activity_ranked_symbols(universe)
     rapid_ranked = _rapid_ranked_symbols(universe, rapid_min_score)
+    lowcap_details = _lowcap_ranked_details(universe)
+    lowcap_ranked = [
+        row["symbol"] for row in lowcap_details
+        if _f(row.get("score")) >= lowcap_min_score
+    ]
     priority = [symbol for symbol in desired[:priority_slots] if symbol in universe_set]
+    priority_set = set(priority)
+    lowcap_priority = [
+        symbol for symbol in lowcap_ranked[:lowcap_slots]
+        if symbol in universe_set and symbol not in priority_set
+    ]
+    lowcap_priority_set = set(lowcap_priority)
     rapid_priority = [
         symbol for symbol in rapid_ranked[:rapid_slots]
-        if symbol in universe_set and symbol not in set(priority)
+        if (
+            symbol in universe_set
+            and symbol not in priority_set
+            and symbol not in lowcap_priority_set
+        )
     ]
-    priority_set = set(priority)
-    protected_priority_set = priority_set | set(rapid_priority)
+    protected_priority_set = priority_set | lowcap_priority_set | set(rapid_priority)
 
-    # Reserve a guaranteed RAPID challenger tier before the normal activity
-    # hunters. This prevents absolute notional/24h-volume bias from hiding a
-    # smaller coin whose relative acceleration is already extreme.
-    # A final fair/discovery tier remains after these slots.
+    # Reserve guaranteed low-cap early-explosion and RAPID challenger tiers
+    # before normal activity hunters. Both are discovery/promotion only; final
+    # execution remains entirely under the unchanged V12.3.4 fail-closed gate.
     activity_hunters = []
     for symbol in activity_ranked:
         if symbol in universe_set and symbol not in protected_priority_set:
@@ -287,7 +691,7 @@ def stable_micro_symbols():
 
     ordered = []
     ordered_seen = set()
-    for symbol in priority + rapid_priority + activity_hunters + desired + universe:
+    for symbol in priority + lowcap_priority + rapid_priority + activity_hunters + desired + universe:
         if symbol in universe_set and symbol not in ordered_seen:
             ordered_seen.add(symbol)
             ordered.append(symbol)
@@ -343,13 +747,18 @@ def stable_micro_symbols():
 
     now_mono = time.monotonic()
     can_rebalance = now_mono - _last_rebalance >= min_rebalance
+    lowcap_missing = [symbol for symbol in lowcap_priority if symbol not in current]
     rapid_missing = [symbol for symbol in rapid_priority if symbol not in current]
     budget = max_churn if can_rebalance else 0
-    if can_rebalance and rapid_missing:
-        # RAPID challengers can accelerate faster than the normal sticky-pool
-        # churn rate. Allow a small bounded burst so they hydrate before the
-        # move is over, without permitting a wholesale pool flip.
-        budget = min(12, max(budget, min(rapid_churn, len(rapid_missing))))
+    if can_rebalance and (lowcap_missing or rapid_missing):
+        # Early low-cap and RAPID challengers can accelerate faster than the
+        # normal sticky-pool churn rate. Permit only a bounded special-access
+        # burst; this changes hydration priority, never BUY authority.
+        special_needed = (
+            min(lowcap_churn, len(lowcap_missing))
+            + min(rapid_churn, len(rapid_missing))
+        )
+        budget = min(12, max(budget, special_needed))
 
     warmed = [symbol for symbol in current if _strict_micro_ready(symbol)]
     warmed_set = set(warmed)
@@ -381,11 +790,20 @@ def stable_micro_symbols():
 
     inject = []
     if budget:
-        # First reserve bounded access for live RAPID challengers such as GTC.
+        # Low-cap early-explosion candidates get bounded guaranteed hydration.
+        lowcap_target = min(budget, lowcap_churn)
+        for symbol in lowcap_priority:
+            if symbol not in current and symbol not in inject:
+                inject.append(symbol)
+            if len(inject) >= lowcap_target:
+                break
+
+        # Then reserve bounded access for full-universe RAPID challengers.
+        rapid_target = min(budget, len(inject) + rapid_churn)
         for symbol in rapid_priority:
             if symbol not in current and symbol not in inject:
                 inject.append(symbol)
-            if len(inject) >= min(budget, rapid_churn):
+            if len(inject) >= rapid_target:
                 break
 
         # Then preserve normal V12 execution-priority admission.
@@ -464,6 +882,15 @@ def stable_micro_symbols():
     core._redis_bridge_stats["micro_actual_removed"] = actual_removed
     core._redis_bridge_stats["micro_sustained_inactive"] = len(inactive)
     core._redis_bridge_stats["micro_activity_hunters"] = len(activity_hunters)
+    core._redis_bridge_stats["micro_lowcap_candidates"] = len(lowcap_details)
+    core._redis_bridge_stats["micro_lowcap_qualified"] = len(lowcap_ranked)
+    core._redis_bridge_stats["micro_lowcap_reserved"] = len(lowcap_priority)
+    core._redis_bridge_stats["micro_lowcap_in_pool"] = sum(
+        symbol in set(next_pool) for symbol in lowcap_priority
+    )
+    core._redis_bridge_stats["micro_lowcap_missing"] = sum(
+        symbol not in set(next_pool) for symbol in lowcap_priority
+    )
     core._redis_bridge_stats["micro_rapid_eligible"] = len(rapid_ranked)
     core._redis_bridge_stats["micro_rapid_reserved"] = len(rapid_priority)
     core._redis_bridge_stats["micro_rapid_in_pool"] = sum(
@@ -475,6 +902,26 @@ def stable_micro_symbols():
     core._redis_bridge_stats["micro_warmed_retained"] = sum(
         symbol in set(next_pool) for symbol in warmed
     )
+
+    if now_mono - _last_lowcap_diag_mono >= LOWCAP_DIAG_SECONDS:
+        _last_lowcap_diag_mono = now_mono
+        top_lowcap = ",".join(
+            f"{row.get('symbol')}:{_f(row.get('score')):.1f}/{row.get('state')}"
+            f"/VBP{_f((row.get('components') or {}).get('volume_before_price')):.0f}"
+            f"/FLOW{_f((row.get('components') or {}).get('flow_flip')):.0f}"
+            for row in lowcap_details[:min(8, len(lowcap_details))]
+        ) or "-"
+        missing_lowcap = ",".join(
+            symbol for symbol in lowcap_priority if symbol not in set(next_pool)
+        ) or "-"
+        print(
+            f"Ψ-V12.3 LOWCAP PROMOTION candidates={len(lowcap_details)} "
+            f"qualified={len(lowcap_ranked)} reserved={len(lowcap_priority)} "
+            f"inPool={core._redis_bridge_stats['micro_lowcap_in_pool']}/{len(lowcap_priority)} "
+            f"missing={missing_lowcap} injected={','.join([s for s in inject if s in lowcap_priority]) or '-'} "
+            f"top={top_lowcap}",
+            flush=True,
+        )
 
     if now_mono - _last_rapid_diag_mono >= RAPID_DIAG_SECONDS:
         _last_rapid_diag_mono = now_mono
@@ -734,6 +1181,7 @@ def _augment_response(response):
     data["authority_lane_health"] = lane_health
     data["authority_ready"] = bool(lane_health.get("all_ready"))
     data["legacy_pinpoint_role"] = "INPUT_TELEMETRY_ONLY"
+    data["low_cap_early_explosion"] = _lowcap_summary()
     distributed = data.setdefault("distributed_micro", {})
     distributed["coverage"] = micro_coverage()
     if _last_micro_diag:
@@ -912,6 +1360,6 @@ def install(core):
     core.app.health = _health_wrapper
 
     print(
-        f"Ψ-V12.3.4 HARDENING installed — {HARDENING_REVISION} + guaranteed RAPID challenger access + guarded workers + live gate diagnostics + fail-closed authority",
+        f"Ψ-V12.3.4 HARDENING installed — {HARDENING_REVISION} + low-cap early explosion promotion + guaranteed RAPID challenger access + guarded workers + live gate diagnostics + fail-closed authority",
         flush=True,
     )
