@@ -7,12 +7,14 @@ from typing import Dict, List
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.0-risk-data-worker-1"
+WORKER_VERSION = "12.3.1-risk-data-worker-2"
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_RISK_CONTROL_KEY", "psi:v12:risk-priority").strip()
 FALLBACK_CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
 KEY_PREFIX = os.getenv("PSI_RISK_REDIS_PREFIX", "psi:v12:risk-candle").strip()
-HEARTBEAT_KEY = os.getenv("PSI_RISK_HEARTBEAT_KEY", "psi:v12:risk-worker").strip()
+SHARD_INDEX = max(0, int(os.getenv("PSI_RISK_SHARD_INDEX", "0")))
+SHARD_COUNT = max(1, min(int(os.getenv("PSI_RISK_SHARD_COUNT", "2")), 8))
+HEARTBEAT_KEY = os.getenv("PSI_RISK_HEARTBEAT_KEY", f"psi:v12:risk-worker:{SHARD_INDEX}").strip()
 MAX_SYMBOLS = max(4, min(int(os.getenv("PSI_RISK_MAX_SYMBOLS", "32")), 80))
 BATCH_SIZE = max(1, min(int(os.getenv("PSI_RISK_BATCH_SIZE", "6")), 12))
 HTTP_CONCURRENCY = max(3, min(int(os.getenv("PSI_RISK_HTTP_CONCURRENCY", "12")), 24))
@@ -31,6 +33,8 @@ TF_LIMITS = (("1m",64),("5m",72),("15m",52))
 
 if not REDIS_URL:
     raise RuntimeError("REDIS_URL is required for risk-data worker")
+if SHARD_INDEX >= SHARD_COUNT:
+    raise RuntimeError("PSI_RISK_SHARD_INDEX must be less than PSI_RISK_SHARD_COUNT")
 
 
 def now_ms() -> int:
@@ -53,16 +57,17 @@ async def _symbols_from_key(r, key: str) -> List[str]:
         if sym.endswith("USDT") and sym not in seen:
             seen.add(sym)
             out.append(sym)
-        if len(out) >= MAX_SYMBOLS:
+        if len(out) >= min(80, MAX_SYMBOLS * SHARD_COUNT):
             break
     return out
 
 
 async def selected_symbols(r) -> List[str]:
     primary = await _symbols_from_key(r, CONTROL_KEY)
-    if primary:
-        return primary
-    return await _symbols_from_key(r, FALLBACK_CONTROL_KEY)
+    symbols = primary if primary else await _symbols_from_key(r, FALLBACK_CONTROL_KEY)
+    if SHARD_COUNT > 1:
+        symbols = symbols[SHARD_INDEX::SHARD_COUNT]
+    return symbols[:MAX_SYMBOLS]
 
 
 async def fetch_klines(session, sem, symbol: str, interval: str, limit: int):
@@ -136,6 +141,8 @@ async def hydrate_symbol(r, session, sem, symbol: str, stats: Dict[str, object])
 async def publish_heartbeat(r, active: List[str], stats: Dict[str, object], error: str = ""):
     payload = {
         "version": WORKER_VERSION,
+        "shard_index": SHARD_INDEX,
+        "shard_count": SHARD_COUNT,
         "symbols": len(active),
         "ok_1m": int(stats.get("ok_1m",0)),
         "ok_5m": int(stats.get("ok_5m",0)),
@@ -183,7 +190,11 @@ async def main():
     cursor = 0
     last_hb = 0.0
 
-    print(f"PSI-RISK-WORKER START version={WORKER_VERSION} maxSymbols={MAX_SYMBOLS}", flush=True)
+    print(
+        f"PSI-RISK-WORKER START version={WORKER_VERSION} "
+        f"shard={SHARD_INDEX + 1}/{SHARD_COUNT} maxSymbols={MAX_SYMBOLS}",
+        flush=True,
+    )
 
     try:
         while True:
