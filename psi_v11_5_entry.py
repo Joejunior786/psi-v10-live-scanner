@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.95-strict-rest-diagnostics"
+VERSION="11.0.5.96-reserved-micro-connector"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -173,6 +173,30 @@ _strict_rest_stats={
     "timeouts":0,"errors":0,"last_core":"",
     "trade_diag":"-","depth_diag":"-",
 }
+_strict_io_session=None
+
+def _strict_micro_session():
+    """Reserved connector for execution-critical micro telemetry.
+
+    The integrated scanner shares many long-lived sockets/background requests.
+    Keeping a tiny independent connector prevents those lanes from starving new
+    strict REST/stream handshakes. It does not alter any market-data gate.
+    """
+    global _strict_io_session
+    if _strict_io_session is None or _strict_io_session.closed:
+        _strict_io_session=aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=5.0,connect=1.4,sock_read=2.5),
+            connector=aiohttp.TCPConnector(
+                limit=10,
+                limit_per_host=4,
+                ttl_dns_cache=300,
+                keepalive_timeout=20,
+            ),
+            headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-strict-micro")},
+        )
+        _strict_rest_stats["reserved_connectors"]=_strict_rest_stats.get("reserved_connectors",0)+1
+    return _strict_io_session
+
 _micro_rest_stats={
     "trade_ok":0,"trade_fail":0,"trade_host":"-",
     "depth_ok":0,"depth_fail":0,"depth_host":"-",
@@ -4871,6 +4895,7 @@ async def ws_api_micro_log_loop():
                 f"strictMiss={_strict_rest_stats.get('trade_miss',0)}/{_strict_rest_stats.get('depth_miss',0)} "
                 f"strictTO={_strict_rest_stats.get('timeouts',0)} "
                 f"strictDiag={_strict_rest_stats.get('trade_diag','-')}|{_strict_rest_stats.get('depth_diag','-')} "
+                f"strictConn={_strict_rest_stats.get('reserved_connectors',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -4909,6 +4934,7 @@ async def strict_rest_micro_bridge_loop():
         nonlocal host_cursor
         if getattr(app,"session",None) is None or getattr(app.session,"closed",True):
             return None,None
+        session=_strict_micro_session()
 
         # Rotate the pair so a persistently bad first route does not monopolise
         # every cycle, while keeping total request fan-out bounded.
@@ -4919,7 +4945,7 @@ async def strict_rest_micro_bridge_loop():
         async def fetch_one(host):
             short=host.replace("https://","").split(".")[0]
             try:
-                async with app.session.get(
+                async with session.get(
                     f"{host}{path}",
                     params=dict(params or {}),
                     timeout=aiohttp.ClientTimeout(total=2.35,connect=.85,sock_read=1.65),
@@ -5172,10 +5198,11 @@ async def direct_strict_micro_stream_loop():
 
             ws=None
             try:
-                # Bound the handshake itself. The previous async-with connect
-                # could hang before either a success or error log was emitted.
+                # Use the reserved strict connector so background scanner
+                # sockets cannot starve this execution-critical handshake.
+                strict_session=_strict_micro_session()
                 ws=await asyncio.wait_for(
-                    app.session.ws_connect(
+                    strict_session.ws_connect(
                         url,
                         heartbeat=20,
                         receive_timeout=None,
