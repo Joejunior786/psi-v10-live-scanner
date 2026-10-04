@@ -147,6 +147,8 @@ async def main():
             try:
                 wanted = tuple(await selected_symbols(r))
                 if not wanted:
+                    if active:
+                        print(f"PSI-DISTRIBUTED-MICRO control_update role={ROLE} symbols=0", flush=True)
                     if task:
                         task.cancel()
                         try:
@@ -160,6 +162,12 @@ async def main():
                     continue
 
                 if wanted != active or task is None or task.done():
+                    if wanted != active:
+                        preview=",".join(wanted[:8])
+                        print(
+                            f"PSI-DISTRIBUTED-MICRO control_update role={ROLE} symbols={len(wanted)} preview={preview}",
+                            flush=True,
+                        )
                     if task:
                         task.cancel()
                         try:
