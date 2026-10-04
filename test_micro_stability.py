@@ -239,5 +239,41 @@ class MicroStabilityTests(unittest.TestCase):
         self.assertEqual(row["role"], "DISCOVERY_PROMOTION_ONLY")
 
 
+    def test_fresh_challenger_rotation_avoids_current_recent_and_priority(self):
+        original = dict(hardening._fresh_challenger_seen)
+        try:
+            hardening._fresh_challenger_seen.clear()
+            hardening._fresh_challenger_seen["RECENTUSDT"] = 950.0
+            universe = [
+                "PRIORITYUSDT",
+                "CURRENTUSDT",
+                "RECENTUSDT",
+                "FRESH1USDT",
+                "FRESH2USDT",
+                "FRESH3USDT",
+                "FRESH4USDT",
+            ]
+            ranked = list(universe)
+            result = hardening._fresh_challenger_symbols(
+                universe,
+                activity_ranked=ranked,
+                excluded={"PRIORITYUSDT"},
+                current={"CURRENTUSDT"},
+                limit=3,
+                cooldown_s=300.0,
+                now_mono=1000.0,
+            )
+            self.assertEqual(result, ["FRESH1USDT", "FRESH2USDT", "FRESH3USDT"])
+            self.assertNotIn("RECENTUSDT", result)
+        finally:
+            hardening._fresh_challenger_seen.clear()
+            hardening._fresh_challenger_seen.update(original)
+
+    def test_fresh_challenger_lane_cannot_override_execution_authority(self):
+        self.assertGreaterEqual(hardening.FRESH_CHALLENGER_SLOTS, 8)
+        self.assertLessEqual(hardening.FRESH_CHALLENGER_CHURN_PER_CYCLE, 8)
+        self.assertIn("FAIL_CLOSED_AUTHORITY", hardening.AUTHORITY_CHAIN)
+
+
 if __name__ == "__main__":
     unittest.main()
