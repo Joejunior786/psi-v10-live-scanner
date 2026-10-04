@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import time
 
 import ignition119_entry as base
@@ -11,10 +12,10 @@ q = base.q
 app = base.app
 
 VERSION = "10.19.9-reliable-riskmap-clean-diagnostics"
-SUPPORT_SAMPLE_SECONDS = 8.0
-SUPPORT_MAX_SYMBOLS = 8
+SUPPORT_SAMPLE_SECONDS = max(1.0, float(os.getenv("PSI_RISKMAP_SAMPLE_SECONDS", "8.0")))
+SUPPORT_MAX_SYMBOLS = max(8, min(32, int(os.getenv("PSI_RISKMAP_MAX_SYMBOLS", "8"))))
 SUPPORT_MAX_AGE = 120.0
-SUPPORT_BATCH_PER_CYCLE = 1
+SUPPORT_BATCH_PER_CYCLE = max(1, min(8, int(os.getenv("PSI_RISKMAP_BATCH_PER_CYCLE", "1"))))
 SUPPORT_BUILD_TIMEOUT = 10.0
 RISK_FETCH_BUDGET = 8.0
 ENTRY_MAX_DISTANCE_PCT = 3.0
