@@ -911,6 +911,6 @@ def install(core):
     core.app.health = _health_wrapper
 
     print(
-        "Ψ-V12.3.4 HARDENING installed — activity-qualified protected pool + guarded workers + live gate diagnostics + fail-closed authority",
+        f"Ψ-V12.3.4 HARDENING installed — {HARDENING_REVISION} + guaranteed RAPID challenger access + guarded workers + live gate diagnostics + fail-closed authority",
         flush=True,
     )
