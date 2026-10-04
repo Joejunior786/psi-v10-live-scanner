@@ -168,7 +168,8 @@ _micro_rest_stats={
     "trade_micro_ws_ok":0,"trade_micro_ws_fail":0,
     "depth_micro_ws_ok":0,"depth_micro_ws_fail":0,
     "trade_budget_timeout":0,"depth_budget_timeout":0,
-    "trade_race_ws_win":0,"trade_race_rest_win":0,"trade_race_fail":0,
+    "trade_race_dedicated_win":0,"trade_race_ws_win":0,"trade_race_rest_win":0,"trade_race_fail":0,
+    "trade_parallel_symbols_ok":0,"depth_parallel_symbols_ok":0,
     "rest_race_ok":0,"rest_race_fail":0,
 }
 
@@ -4503,106 +4504,106 @@ async def ws_api_micro_trade_loop():
     global _ws_market_trade_cursor,_strict_trade_cursor
     while True:
         try:
-            await asyncio.sleep(1.2)
+            # Keep strict trades comfortably inside app.micro_metrics()' 15s
+            # freshness gate. The old serial design could spend ~12s on one
+            # symbol before touching the second core symbol.
+            await asyncio.sleep(.85)
             trade_ready,_,_=_trade_ws_primitives()
             core=_micro_fallback_core_symbols()
             if not core:
                 continue
-            idx=_strict_trade_cursor%len(core)
-            targets=[core[idx]]
-            _strict_trade_cursor=(idx+1)%len(core)
+
+            # Refresh the entire strict core concurrently. Core defaults to two
+            # symbols and is already bounded by MICRO_FALLBACK_CORE_SIZE.
+            targets=list(core)[:MICRO_FALLBACK_CORE_SIZE]
+            _strict_trade_cursor=(_strict_trade_cursor+len(targets))%max(1,len(core))
             _ws_market_trade_cursor=_strict_trade_cursor
 
             async def one(sym):
                 rows=None
+                winner_source="-"
 
-                # Primary: dedicated strict-trade WS API while healthy.
-                if trade_ready.is_set():
-                    rows=await trade_ws_api_request(
-                        "trades.aggregate",{"symbol":sym,"limit":20},
-                        response_timeout=7.0,gate_timeout=2.0,
+                async def _dedicated_trade():
+                    if not trade_ready.is_set():
+                        return "TRADE_WS",None
+                    out=await trade_ws_api_request(
+                        "trades.aggregate",{"symbol":sym,"limit":40},
+                        wait_ready=.45,response_timeout=2.6,gate_timeout=.55,
                     )
+                    return "TRADE_WS",out
 
-                # Failover race: after the dedicated trade lane fails,
-                # run the independent shared WS-API and rotating REST race in
-                # parallel. The first valid Binance aggregate-trade payload
-                # wins. Both sources still flow through process_agg_trade(),
-                # preserving every existing sequence/freshness execution gate.
-                if not isinstance(rows,list):
-                    async def _shared_trade():
-                        out=await micro_ws_api_request(
-                            "trades.aggregate",{"symbol":sym,"limit":20},
-                            response_timeout=4.5,gate_timeout=1.0,
+                async def _shared_trade():
+                    out=await micro_ws_api_request(
+                        "trades.aggregate",{"symbol":sym,"limit":40},
+                        wait_ready=.45,response_timeout=2.4,gate_timeout=.55,
+                    )
+                    return "MICRO_WS",out
+
+                async def _rest_trade():
+                    out=await micro_rest_get(
+                        "/api/v3/aggTrades",
+                        {"symbol":sym,"limit":40},
+                        "trade",
+                        total_timeout=2.2,
+                    )
+                    return "REST_RACE",out
+
+                # Race all independent verified Binance transports from the
+                # start. Waiting for the dedicated lane to fail before trying
+                # fallbacks was the main source of stale trades.
+                tasks={
+                    asyncio.create_task(_dedicated_trade()),
+                    asyncio.create_task(_shared_trade()),
+                    asyncio.create_task(_rest_trade()),
+                }
+                pending=set(tasks)
+                deadline=asyncio.get_running_loop().time()+3.0
+                try:
+                    while pending and not isinstance(rows,list):
+                        remaining=max(0.0,deadline-asyncio.get_running_loop().time())
+                        if remaining<=0:
+                            break
+                        done,pending=await asyncio.wait(
+                            pending,
+                            timeout=remaining,
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
-                        return "MICRO_WS",out
-
-                    async def _rest_trade():
-                        out=await micro_rest_get(
-                            "/api/v3/aggTrades",
-                            {"symbol":sym,"limit":20},
-                            "trade",
-                            total_timeout=3.3,
-                        )
-                        return "REST_RACE",out
-
-                    tasks={
-                        asyncio.create_task(_shared_trade()),
-                        asyncio.create_task(_rest_trade()),
-                    }
-                    winner_source="-"
-                    deadline=asyncio.get_running_loop().time()+5.0
-                    try:
-                        while tasks and not isinstance(rows,list):
-                            remaining=max(0.0,deadline-asyncio.get_running_loop().time())
-                            if remaining<=0:
-                                break
-                            done,pending=await asyncio.wait(
-                                tasks,
-                                timeout=remaining,
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-                            if not done:
-                                tasks=set(pending)
-                                break
-                            tasks=set(pending)
-                            for task in done:
-                                try:
-                                    src,out=task.result()
-                                except asyncio.CancelledError:
-                                    raise
-                                except Exception:
-                                    src,out="-",None
-                                if src=="MICRO_WS":
-                                    if isinstance(out,list):
-                                        _micro_rest_stats["trade_micro_ws_ok"]+=1
-                                    else:
-                                        _micro_rest_stats["trade_micro_ws_fail"]+=1
+                        if not done:
+                            break
+                        for task in done:
+                            try:
+                                src,out=task.result()
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                src,out="-",None
+                            if src=="MICRO_WS":
                                 if isinstance(out,list):
-                                    rows=out
-                                    winner_source=src
-                                    break
-                    finally:
-                        # Do not block the hydration loop while a losing HTTP/
-                        # WS operation tears down; cancel and consume it later.
-                        for task in tasks:
-                            task.cancel()
-                            def _consume_done(t):
-                                try:
-                                    t.exception()
-                                except (asyncio.CancelledError,Exception):
-                                    pass
-                            task.add_done_callback(_consume_done)
+                                    _micro_rest_stats["trade_micro_ws_ok"]+=1
+                                else:
+                                    _micro_rest_stats["trade_micro_ws_fail"]+=1
+                            if isinstance(out,list) and out:
+                                rows=out
+                                winner_source=src
+                                break
+                finally:
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending,return_exceptions=True)
 
-                    if isinstance(rows,list):
-                        if winner_source=="MICRO_WS":
-                            _micro_rest_stats["trade_race_ws_win"]+=1
-                        elif winner_source=="REST_RACE":
-                            _micro_rest_stats["trade_race_rest_win"]+=1
-                    else:
-                        _micro_rest_stats["trade_race_fail"]+=1
-                        _micro_rest_stats["trade_budget_timeout"]+=1
-                if not isinstance(rows,list):
+                if isinstance(rows,list):
+                    if winner_source=="TRADE_WS":
+                        _micro_rest_stats["trade_race_dedicated_win"]=_micro_rest_stats.get("trade_race_dedicated_win",0)+1
+                    elif winner_source=="MICRO_WS":
+                        _micro_rest_stats["trade_race_ws_win"]+=1
+                    elif winner_source=="REST_RACE":
+                        _micro_rest_stats["trade_race_rest_win"]+=1
+                else:
+                    _micro_rest_stats["trade_race_fail"]+=1
+                    _micro_rest_stats["trade_budget_timeout"]+=1
                     return 0
+
                 last=int(tape._rest_agg_last_id.get(sym,-1))
                 added=0
                 now2=time.time()
@@ -4611,11 +4612,15 @@ async def ws_api_micro_trade_loop():
                     key=lambda d:int(d.get("a",-1) or -1),
                 )
                 for d in ordered:
-                    try: aid=int(d.get("a",-1))
-                    except Exception: continue
+                    try:
+                        aid=int(d.get("a",-1))
+                    except Exception:
+                        continue
                     if aid<0 or aid<=last:
                         continue
-                    event_ms=int(f(d.get("T"),0));price=f(d.get("p"));qty=f(d.get("q"))
+                    event_ms=int(f(d.get("T"),0))
+                    price=f(d.get("p"))
+                    qty=f(d.get("q"))
                     if event_ms<=0 or price<=0 or qty<=0:
                         continue
                     last=max(last,aid)
@@ -4625,9 +4630,11 @@ async def ws_api_micro_trade_loop():
                     tape.trade_events[sym].append(
                         (stamp,price,price*qty,not bool(d.get("m")),event_ms)
                     )
-                    payload=dict(d);payload["E"]=event_ms
+                    payload=dict(d)
+                    payload["E"]=event_ms
                     app.process_agg_trade(sym,payload)
                     added+=1
+
                 if last>=0:
                     tape._rest_agg_last_id[sym]=last
                 if added:
@@ -4636,11 +4643,13 @@ async def ws_api_micro_trade_loop():
                     _ws_market_stats["last_trade_ms"]=ms
                     tape.tape_stats["wsapi_last_trade_ms"]=ms
                     tape.tape_stats["wsapi_micro_trade_bridge"]+=added
+                    _micro_rest_stats["trade_parallel_symbols_ok"]=_micro_rest_stats.get("trade_parallel_symbols_ok",0)+1
                 return added
 
-            rs=await asyncio.gather(*(one(s) for s in targets),return_exceptions=True)
-            if any(isinstance(x,int) and x>0 for x in rs):
-                _ws_market_stats["trade_ok"]+=1
+            rs=await asyncio.gather(*(one(sym) for sym in targets),return_exceptions=True)
+            successes=sum(isinstance(x,int) and x>0 for x in rs)
+            if successes:
+                _ws_market_stats["trade_ok"]+=successes
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4651,101 +4660,133 @@ async def ws_api_micro_depth_loop():
     global _strict_depth_cursor
     while True:
         try:
-            await asyncio.sleep(.65)
+            # Book freshness must remain <=5s. Refresh the bounded strict core
+            # concurrently instead of serially walking one symbol at a time.
+            await asyncio.sleep(.70)
             depth_ready,_,_=_depth_ws_primitives()
             core=_micro_fallback_core_symbols()
             if not core:
                 continue
+            targets=list(core)[:MICRO_FALLBACK_CORE_SIZE]
+            _strict_depth_cursor=(_strict_depth_cursor+len(targets))%max(1,len(core))
 
-            idx=_strict_depth_cursor%len(core)
-            sym=core[idx]
-            _strict_depth_cursor=(idx+1)%len(core)
+            async def one(sym):
+                row=None
+                source="-"
 
-            row=None
-            source="-"
-
-            # Primary: dedicated sequence-critical depth transport.
-            if depth_ready.is_set():
-                row=await depth_ws_api_request(
-                    "depth",{"symbol":sym,"limit":10},
-                    response_timeout=5.5,gate_timeout=1.5,
-                )
-                if isinstance(row,dict):
-                    source="WSAPI"
-
-            # Secondary: independent shared micro WS-API. Same Binance depth
-            # snapshot schema, still passed through process_partial_depth_snapshot.
-            if not isinstance(row,dict):
-                row=await micro_ws_api_request(
-                    "depth",{"symbol":sym,"limit":10},
-                    response_timeout=5.0,gate_timeout=1.5,
-                )
-                if isinstance(row,dict):
-                    _micro_rest_stats["depth_micro_ws_ok"]+=1
-                    source="MICRO_WS"
-                else:
-                    _micro_rest_stats["depth_micro_ws_fail"]+=1
-
-            # Tertiary: parallel race across rotating official REST hosts.
-            if not isinstance(row,dict):
-                try:
-                    row=await asyncio.wait_for(
-                        micro_rest_get(
-                            "/api/v3/depth",
-                            {"symbol":sym,"limit":10},
-                            "depth",
-                            total_timeout=3.0,
-                        ),
-                        timeout=4.2,
+                async def _dedicated_depth():
+                    if not depth_ready.is_set():
+                        return "WSAPI",None
+                    out=await depth_ws_api_request(
+                        "depth",{"symbol":sym,"limit":10},
+                        wait_ready=.40,response_timeout=2.3,gate_timeout=.50,
                     )
-                except asyncio.TimeoutError:
+                    return "WSAPI",out
+
+                async def _shared_depth():
+                    out=await micro_ws_api_request(
+                        "depth",{"symbol":sym,"limit":10},
+                        wait_ready=.40,response_timeout=2.2,gate_timeout=.50,
+                    )
+                    return "MICRO_WS",out
+
+                async def _rest_depth():
+                    out=await micro_rest_get(
+                        "/api/v3/depth",
+                        {"symbol":sym,"limit":10},
+                        "depth",
+                        total_timeout=2.0,
+                    )
+                    return "REST_RACE",out
+
+                tasks={
+                    asyncio.create_task(_dedicated_depth()),
+                    asyncio.create_task(_shared_depth()),
+                    asyncio.create_task(_rest_depth()),
+                }
+                pending=set(tasks)
+                deadline=asyncio.get_running_loop().time()+2.7
+                try:
+                    while pending and not isinstance(row,dict):
+                        remaining=max(0.0,deadline-asyncio.get_running_loop().time())
+                        if remaining<=0:
+                            break
+                        done,pending=await asyncio.wait(
+                            pending,
+                            timeout=remaining,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not done:
+                            break
+                        for task in done:
+                            try:
+                                src,out=task.result()
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                src,out="-",None
+                            if src=="MICRO_WS":
+                                if isinstance(out,dict):
+                                    _micro_rest_stats["depth_micro_ws_ok"]+=1
+                                else:
+                                    _micro_rest_stats["depth_micro_ws_fail"]+=1
+                            if isinstance(out,dict):
+                                row=out
+                                source=src
+                                break
+                finally:
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending,return_exceptions=True)
+
+                if not isinstance(row,dict):
                     _micro_rest_stats["depth_budget_timeout"]+=1
-                    row=None
-                if isinstance(row,dict):
-                    source="REST_RACE"
+                    return 0
 
-            if not isinstance(row,dict):
-                continue
+                try:
+                    before=app.ensure_micro_state(sym)
+                    before_seq=int(before.get("book_sequence_samples",0) or 0)
+                    before_upd=int(before.get("book_updates",0) or 0)
+                    before_id=int(before.get("last_book_update_id",0) or 0)
+                    update_id=int(row.get("lastUpdateId") or row.get("u") or 0)
+                    bid_n=len(row.get("bids") or row.get("b") or [])
+                    ask_n=len(row.get("asks") or row.get("a") or [])
 
-            try:
-                before=app.ensure_micro_state(sym)
-                before_seq=int(before.get("book_sequence_samples",0) or 0)
-                before_upd=int(before.get("book_updates",0) or 0)
-                before_id=int(before.get("last_book_update_id",0) or 0)
-                update_id=int(row.get("lastUpdateId") or row.get("u") or 0)
-                bid_n=len(row.get("bids") or row.get("b") or [])
-                ask_n=len(row.get("asks") or row.get("a") or [])
+                    app.process_partial_depth_snapshot(sym,row)
 
-                app.process_partial_depth_snapshot(sym,row)
+                    after=app.ensure_micro_state(sym)
+                    seq=int(after.get("book_sequence_samples",0) or 0)
+                    updates=int(after.get("book_updates",0) or 0)
+                    last_id=int(after.get("last_book_update_id",0) or 0)
+                    ofi_n=len(after.get("ofi") or [])
+                    changed=(seq>before_seq or updates>before_upd or last_id>before_id)
+                    if changed:
+                        ms=int(time.time()*1000)
+                        _ws_market_stats["last_depth_ms"]=ms
+                        tape.tape_stats["wsapi_last_depth_ms"]=ms
+                        _ws_market_stats["depth_ok"]+=1
+                        _micro_rest_stats["depth_parallel_symbols_ok"]=_micro_rest_stats.get("depth_parallel_symbols_ok",0)+1
+                    print(
+                        f"Ψ-DEPTH-DIAG sym={sym} src={source} updateId={update_id} "
+                        f"levels={bid_n}/{ask_n} accepted={int(changed)} "
+                        f"seq={seq} updates={updates} ofi={ofi_n} lastId={last_id}",
+                        flush=True,
+                    )
+                    return 1 if changed else 0
+                except Exception as exc:
+                    print(
+                        f"Ψ-DEPTH-DIAG ERROR sym={sym} src={source} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    return 0
 
-                after=app.ensure_micro_state(sym)
-                seq=int(after.get("book_sequence_samples",0) or 0)
-                updates=int(after.get("book_updates",0) or 0)
-                last_id=int(after.get("last_book_update_id",0) or 0)
-                ofi_n=len(after.get("ofi") or [])
-                changed=(seq>before_seq or updates>before_upd or last_id>before_id)
-                if changed:
-                    ms=int(time.time()*1000)
-                    _ws_market_stats["last_depth_ms"]=ms
-                    tape.tape_stats["wsapi_last_depth_ms"]=ms
-                    _ws_market_stats["depth_ok"]+=1
-                print(
-                    f"Ψ-DEPTH-DIAG sym={sym} src={source} updateId={update_id} "
-                    f"levels={bid_n}/{ask_n} accepted={int(changed)} "
-                    f"seq={seq} updates={updates} ofi={ofi_n} lastId={last_id}",
-                    flush=True,
-                )
-            except Exception as exc:
-                print(
-                    f"Ψ-DEPTH-DIAG ERROR sym={sym} src={source} "
-                    f"{type(exc).__name__}: {exc}",
-                    flush=True,
-                )
+            await asyncio.gather(*(one(sym) for sym in targets),return_exceptions=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             print(f"Ψ-WSAPI MICRO-DEPTH ERROR {type(exc).__name__}: {exc}",flush=True)
-
 
 
 async def ws_api_micro_log_loop():
@@ -4795,7 +4836,8 @@ async def ws_api_micro_log_loop():
                 f"depthWSreq={_depth_ws_stats['requests']} depthOKws={_depth_ws_stats['ok']} "
                 f"depthFail={_depth_ws_stats['fail']} depthTO={_depth_ws_stats['timeouts']} "
                 f"microTradeFB={_micro_rest_stats['trade_micro_ws_ok']}/{_micro_rest_stats['trade_micro_ws_fail']} "
-                f"tradeRace={_micro_rest_stats['trade_race_ws_win']}/{_micro_rest_stats['trade_race_rest_win']}/{_micro_rest_stats['trade_race_fail']} "
+                f"tradeRace={_micro_rest_stats.get('trade_race_dedicated_win',0)}/{_micro_rest_stats['trade_race_ws_win']}/{_micro_rest_stats['trade_race_rest_win']}/{_micro_rest_stats['trade_race_fail']} "
+                f"parallelOK={_micro_rest_stats.get('trade_parallel_symbols_ok',0)}/{_micro_rest_stats.get('depth_parallel_symbols_ok',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
