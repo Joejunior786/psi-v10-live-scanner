@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.20-latency-aware-hydration"
+VERSION = "12.2.21-late-response-salvage"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -160,6 +160,8 @@ _v12_ws_locks = [None] * V12_WS_SHARDS
 _v12_ws_gates = [None] * V12_WS_SHARDS
 _v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
 _v12_ws_sent_at = [dict() for _ in range(V12_WS_SHARDS)]
+_v12_ws_meta = [dict() for _ in range(V12_WS_SHARDS)]
+_v12_ws_late_results = {}
 _v12_ws_ids = [0] * V12_WS_SHARDS
 _v12_ws_claims = [0] * V12_WS_SHARDS
 _v12_shard_pool = None
@@ -1353,6 +1355,7 @@ def _v12_ws_fail_pending(shard, reason):
                 pass
     pending.clear()
     _v12_ws_sent_at[shard].clear()
+    _v12_ws_meta[shard].clear()
 
 
 async def v12_ws_rpc_loop(shard):
@@ -1411,10 +1414,14 @@ async def v12_ws_rpc_loop(shard):
                     if rid:
                         _stats["ws_rx_id_frames"] += 1
                     sent_at = _v12_ws_sent_at[shard].pop(rid, None)
+                    meta = _v12_ws_meta[shard].pop(rid, None)
                     fut = _v12_ws_pending[shard].pop(rid, None)
+                    latency_ms = None
+                    if sent_at is not None:
+                        latency_ms = max(0.0, (time.monotonic() - float(sent_at)) * 1000.0)
+
                     if fut is not None and not fut.done():
-                        if sent_at is not None:
-                            latency_ms = max(0.0, (time.monotonic() - float(sent_at)) * 1000.0)
+                        if latency_ms is not None:
                             _stats["ws_last_latency_ms"] = round(latency_ms, 1)
                             _stats["ws_max_latency_ms"] = max(float(_stats.get("ws_max_latency_ms", 0.0)), latency_ms)
                             _stats[f"ws_shard_{shard}_last_latency_ms"] = round(latency_ms, 1)
@@ -1423,6 +1430,24 @@ async def v12_ws_rpc_loop(shard):
                         _stats["ws_orphan_frames"] += 1
                         _stats[f"ws_shard_{shard}_orphan_frames"] += 1
                         _stats["ws_orphan_last"] = f"shard={shard} id={rid or '-'} status={payload.get('status')}"
+                        if latency_ms is not None:
+                            _stats["ws_late_last_latency_ms"] = round(latency_ms, 1)
+                            _stats["ws_late_max_latency_ms"] = max(float(_stats.get("ws_late_max_latency_ms", 0.0)), latency_ms)
+
+                        rows = payload.get("result") if isinstance(payload, dict) else None
+                        status = int(payload.get("status") or 0) if isinstance(payload, dict) else 0
+                        if status == 200 and isinstance(rows, list) and rows and isinstance(meta, dict):
+                            sym = str(meta.get("symbol") or "")
+                            tf = str(meta.get("interval") or "")
+                            requested = int(meta.get("limit") or len(rows))
+                            if sym and tf:
+                                _v12_ws_late_results[(sym, tf)] = {
+                                    "rows": rows,
+                                    "limit": requested,
+                                    "received": time.time(),
+                                }
+                                _stats["ws_late_salvaged"] += 1
+                                _stats[f"ws_late_{tf}_salvaged"] += 1
                 elif msg.type in {
                     legacy.aiohttp.WSMsgType.CLOSED,
                     legacy.aiohttp.WSMsgType.CLOSE,
@@ -1491,6 +1516,7 @@ async def v12_ws_klines(
     acquired = False
     lock_acquired = False
     rid = None
+    preserve_late = False
     try:
         try:
             await asyncio.wait_for(gate.acquire(), timeout=gate_timeout)
@@ -1531,6 +1557,11 @@ async def v12_ws_klines(
                 timeout=send_timeout,
             )
             _v12_ws_sent_at[shard][rid] = time.monotonic()
+            _v12_ws_meta[shard][rid] = {
+                "symbol": str(symbol).upper(),
+                "interval": str(interval),
+                "limit": int(limit),
+            }
             _stats["ws_requests"] += 1
         except asyncio.TimeoutError:
             _stats["ws_send_timeout"] += 1
@@ -1567,6 +1598,7 @@ async def v12_ws_klines(
             # timeouts are already contained by the per-shard circuit breaker.
             _stats["ws_response_timeouts"] += 1
             _stats[f"ws_shard_{shard}_response_timeouts"] += 1
+            preserve_late = True
             _record_ws_timeout(shard)
         return None
     finally:
@@ -1576,7 +1608,9 @@ async def v12_ws_klines(
             except Exception:
                 pass
         if rid is not None:
-            _v12_ws_sent_at[shard].pop(rid, None)
+            if not preserve_late:
+                _v12_ws_sent_at[shard].pop(rid, None)
+                _v12_ws_meta[shard].pop(rid, None)
             fut = _v12_ws_pending[shard].pop(rid, None)
             if fut is not None and not fut.done():
                 fut.cancel()
@@ -1587,13 +1621,25 @@ async def v12_ws_klines(
 async def _fetch_tf(sym, tf, deep=False):
     if app.session is None:
         return False
-    if _tf_backoff_active(sym, tf, deep):
-        _stats["tf_backoff_skip"] += 1
-        return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
     need = DEEP_MIN_ROWS if deep else FAST_MIN_ROWS
     rows = None
+
+    late = _v12_ws_late_results.pop((str(sym).upper(), str(tf)), None)
+    if isinstance(late, dict):
+        late_rows = late.get("rows")
+        late_age = time.time() - f(late.get("received"))
+        if isinstance(late_rows, list) and late_rows and 0.0 <= late_age <= 90.0:
+            rows = late_rows
+            _stats["ws_late_used"] += 1
+            _stats[f"ws_late_{tf}_used"] += 1
+        else:
+            _stats["ws_late_expired"] += 1
+
+    if rows is None and _tf_backoff_active(sym, tf, deep):
+        _stats["tf_backoff_skip"] += 1
+        return False
 
     # 0) Reuse verified V11 1H/4H history at zero request cost.
     if tf in {"1h", "4h"}:
@@ -1618,7 +1664,7 @@ async def _fetch_tf(sym, tf, deep=False):
                 try:
                     rows = await v12_ws_klines(
                         sym, tf, limit, shard=ws_shard,
-                        response_timeout=10.0 if deep else 9.0,
+                        response_timeout=15.0 if deep else 12.0,
                         ready_timeout=0.8,
                         gate_timeout=1.6,
                         send_timeout=0.9,
@@ -1802,7 +1848,7 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
                 # so retain the 14-second outer safety budget there.
                 if not deep:
                     return await _fetch_tf(sym, tf, deep=False)
-                return await asyncio.wait_for(_fetch_tf(sym, tf, deep=True), timeout=22.0)
+                return await asyncio.wait_for(_fetch_tf(sym, tf, deep=True), timeout=28.0)
             except asyncio.TimeoutError:
                 _stats["fetch_timeout"] += 1
                 return False
@@ -2318,6 +2364,8 @@ async def strategy_loop():
                 f"sendTO={_stats.get('ws_send_timeout',0)} respTO={_stats.get('ws_response_timeouts',0)} "
                 f"rx={_stats.get('ws_rx_frames',0)} orphan={_stats.get('ws_orphan_frames',0)} "
                 f"lat={_stats.get('ws_last_latency_ms',0)}/{int(float(_stats.get('ws_max_latency_ms',0) or 0))}ms "
+                f"late={_stats.get('ws_late_salvaged',0)}/{_stats.get('ws_late_used',0)} "
+                f"lateLat={_stats.get('ws_late_last_latency_ms',0)}/{int(float(_stats.get('ws_late_max_latency_ms',0) or 0))}ms "
                 f"sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
                 f"{_stats.get('shared_ws_fallback_miss',0)} circuitFB={_stats.get('circuit_fallback_ok',0)}/{_stats.get('circuit_fallback_miss',0)} "
                 f"circuitWS={_stats.get('circuit_shared_win',0)} circuitREST={_stats.get('circuit_rest_win',0)} "
@@ -2445,7 +2493,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.20] MULTI-SETUP AUTHORITY + LATENCY-AWARE {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.21] MULTI-SETUP AUTHORITY + LATE-RESPONSE SALVAGE {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
