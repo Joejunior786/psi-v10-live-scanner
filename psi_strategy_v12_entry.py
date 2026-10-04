@@ -2790,6 +2790,25 @@ def _distributed_micro_symbols():
     except Exception:
         pass
 
+    # Cold-start bootstrap: never leave distributed micro workers idle merely
+    # because Pinpoint/structure ranking has not populated yet. Fill remaining
+    # slots from the live Binance universe, ranked by current 24h quote volume.
+    # Ranked V12 candidates still take priority and replace bootstrap symbols.
+    if len(out) < REDIS_MICRO_POOL_SIZE:
+        try:
+            universe = list(getattr(q, "universe", []) or [])
+            meta = getattr(app, "symbol_meta", {}) or {}
+            universe.sort(
+                key=lambda sym: float((meta.get(sym, {}) or {}).get("quote_volume_24h", 0.0) or 0.0),
+                reverse=True,
+            )
+            for sym in universe:
+                add(sym)
+                if len(out) >= REDIS_MICRO_POOL_SIZE:
+                    break
+        except Exception:
+            pass
+
     return out[:REDIS_MICRO_POOL_SIZE]
 
 
