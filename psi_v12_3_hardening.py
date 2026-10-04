@@ -2,12 +2,13 @@ import asyncio
 import json
 import os
 import time
+from collections import Counter
 
 import redis.asyncio as redis_async
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3_LANES->V12.3_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.2-micro-stability"
+HARDENING_REVISION = "12.3.3-micro-diagnostics"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -20,6 +21,8 @@ MIN_REBALANCE_S = 15.0
 _last_rebalance = 0.0
 _rotation_epoch = 0
 _protected_pool = []
+_last_micro_diag = {}
+_last_diag_mono = 0.0
 _original_gate = None
 _original_scan = None
 _original_health = None
@@ -219,6 +222,113 @@ def stable_micro_symbols():
     return list(_protected_pool)
 
 
+def micro_gate_diagnostics():
+    """Aggregate the strict distributed micro gate without relaxing any gate."""
+    core = _core()
+    try:
+        core._refresh_micro_snapshots_sync(force=True)
+    except Exception:
+        pass
+
+    symbols = list(_protected_pool or core._distributed_micro_sticky_pool or [])
+    symbols = [str(s).upper() for s in symbols if str(s).upper().endswith("USDT")]
+    counts = Counter()
+    combos = Counter()
+    low_activity = []
+
+    now_ms = int(time.time() * 1000)
+    for sym in symbols:
+        trade = core._distributed_micro_trade.get(sym)
+        book = core._distributed_micro_book.get(sym)
+        both = isinstance(trade, dict) and isinstance(book, dict)
+        if both:
+            counts["present_both"] += 1
+        else:
+            missing = []
+            if not isinstance(trade, dict):
+                missing.append("NO_TRADE_SNAPSHOT")
+            if not isinstance(book, dict):
+                missing.append("NO_BOOK_SNAPSHOT")
+            combos["+".join(missing) or "MISSING_SNAPSHOT"] += 1
+            continue
+
+        trade_snapshot_ms = int(trade.get("_snapshot_ms") or 0)
+        book_snapshot_ms = int(book.get("_snapshot_ms") or 0)
+        trade_transport = max(0, now_ms - trade_snapshot_ms) if trade_snapshot_ms > 0 else 999999999
+        book_transport = max(0, now_ms - book_snapshot_ms) if book_snapshot_ms > 0 else 999999999
+
+        trade_age = float(trade.get("trade_age_ms", 999999999.0)) + trade_transport
+        book_age = float(book.get("book_age_ms", 999999999.0)) + book_transport
+        trade_fresh = trade_age <= 15000.0
+        book_fresh = book_age <= 5000.0
+        trade_seq = bool(trade.get("sequence_verified"))
+        book_seq = bool(book.get("book_sequence_verified"))
+        trade_count = int(trade.get("trade_count_60s") or 0)
+        ofi_samples = int(book.get("ofi_samples") or 0)
+        book_updates = int(book.get("book_updates") or 0)
+
+        conds = {
+            "TRADE_STALE": not trade_fresh,
+            "BOOK_STALE": not book_fresh,
+            "TRADE_SEQ": not trade_seq,
+            "BOOK_SEQ": not book_seq,
+            "TRADE_COUNT": trade_count < 10,
+            "OFI_SAMPLES": ofi_samples < 6,
+            "BOOK_UPDATES": book_updates < 8,
+        }
+
+        if trade_fresh:
+            counts["trade_fresh"] += 1
+        if book_fresh:
+            counts["book_fresh"] += 1
+        if trade_seq:
+            counts["trade_sequence_verified"] += 1
+        if book_seq:
+            counts["book_sequence_verified"] += 1
+        if trade_count >= 10:
+            counts["trade_count_ge_10"] += 1
+        if ofi_samples >= 6:
+            counts["ofi_samples_ge_6"] += 1
+        if book_updates >= 8:
+            counts["book_updates_ge_8"] += 1
+
+        micro_ready = (
+            trade_fresh and book_fresh
+            and trade_count >= 10
+            and ofi_samples >= 6
+            and book_updates >= 8
+        )
+        if micro_ready:
+            counts["micro_ready"] += 1
+        if micro_ready and trade_seq and book_seq:
+            counts["micro_verified"] += 1
+
+        failed = [name for name, is_failed in conds.items() if is_failed]
+        combos["+".join(failed) if failed else "PASS_ALL"] += 1
+
+        if failed == ["TRADE_COUNT"] and len(low_activity) < 12:
+            low_activity.append({
+                "symbol": sym,
+                "trade_count_60s": trade_count,
+                "trade_age_ms": round(trade_age, 1),
+                "book_age_ms": round(book_age, 1),
+                "ofi_samples": ofi_samples,
+                "book_updates": book_updates,
+            })
+
+    return {
+        "revision": HARDENING_REVISION,
+        "pool": len(symbols),
+        "counts": dict(counts),
+        "failure_combinations": [
+            {"failure": name, "count": count}
+            for name, count in combos.most_common(15)
+        ],
+        "low_activity_examples": low_activity,
+        "generated_ms": now_ms,
+    }
+
+
 def _heartbeat_ready(name, timestamp_key, count_key="symbols", max_age_ms=15000):
     core = _core()
     hb = core._redis_worker_health.get(name) or {}
@@ -349,6 +459,8 @@ def _augment_response(response):
     data["legacy_pinpoint_role"] = "INPUT_TELEMETRY_ONLY"
     distributed = data.setdefault("distributed_micro", {})
     distributed["coverage"] = micro_coverage()
+    if _last_micro_diag:
+        distributed["gate_diagnostics"] = dict(_last_micro_diag)
     return core.app.web.json_response(data, status=response.status)
 
 
@@ -401,6 +513,7 @@ async def bootstrap():
 
 
 async def supervisor_loop():
+    global _last_micro_diag, _last_diag_mono
     core = _core()
     if not core.REDIS_URL:
         core._redis_bridge_stats["hardening_supervisor_disabled"] = 1
@@ -450,6 +563,35 @@ async def supervisor_loop():
                             core._redis_worker_health[f"risk{idx}"] = {"raw": raw}
 
                 core._redis_bridge_stats["hardening_last_ms"] = now_ms
+
+                now_mono = time.monotonic()
+                if now_mono - _last_diag_mono >= 30.0:
+                    try:
+                        _last_micro_diag = await asyncio.to_thread(micro_gate_diagnostics)
+                        _last_diag_mono = now_mono
+                        dc = _last_micro_diag.get("counts", {})
+                        top_fail = (_last_micro_diag.get("failure_combinations") or [{}])[0]
+                        print(
+                            "Ψ-V12.3.3 MICRO_DIAG "
+                            f"pool={_last_micro_diag.get('pool', 0)} "
+                            f"both={dc.get('present_both', 0)} "
+                            f"tradeFresh={dc.get('trade_fresh', 0)} "
+                            f"bookFresh={dc.get('book_fresh', 0)} "
+                            f"tradeSeq={dc.get('trade_sequence_verified', 0)} "
+                            f"bookSeq={dc.get('book_sequence_verified', 0)} "
+                            f"trade10={dc.get('trade_count_ge_10', 0)} "
+                            f"ofi6={dc.get('ofi_samples_ge_6', 0)} "
+                            f"book8={dc.get('book_updates_ge_8', 0)} "
+                            f"ready={dc.get('micro_ready', 0)} "
+                            f"verified={dc.get('micro_verified', 0)} "
+                            f"topFail={top_fail.get('failure', 'NONE')}:{top_fail.get('count', 0)}",
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        core._redis_bridge_stats["micro_diag_error"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
                 core._redis_bridge_stats["structure_workers_up"] = sum(
                     _heartbeat_ready(f"structure{idx}", "heartbeat_ms", "assigned")
                     for idx in range(STRUCTURE_WORKERS)
@@ -493,6 +635,6 @@ def install(core):
     core.app.health = _health_wrapper
 
     print(
-        "Ψ-V12.3.2 HARDENING installed — protected micro pool + guarded workers + fail-closed authority",
+        "Ψ-V12.3.3 HARDENING installed — protected micro pool + guarded workers + live gate diagnostics + fail-closed authority",
         flush=True,
     )
