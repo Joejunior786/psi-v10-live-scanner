@@ -70,6 +70,58 @@ class MicroStabilityTests(unittest.TestCase):
             hardening._activity_sort_key(stale, 50_000_000.0),
         )
 
+    def test_rapid_score_beats_absolute_liquidity_bias(self):
+        small_fast_mover = {
+            "ready": True,
+            "age_ms": 400.0,
+            "book_age_ms": 700.0,
+            "trades_5s": 6,
+            "notional_5s": 2500.0,
+            "spread_bps": 6.0,
+        }
+        huge_liquid_normal = {
+            "ready": True,
+            "age_ms": 250.0,
+            "book_age_ms": 300.0,
+            "trades_5s": 60,
+            "notional_5s": 5_000_000.0,
+            "spread_bps": 1.0,
+        }
+        self.assertGreater(
+            hardening._activity_sort_key(
+                small_fast_mover, 800_000.0, hardening.RAPID_MIN_SCORE + 20.0
+            ),
+            hardening._activity_sort_key(
+                huge_liquid_normal, 2_000_000_000.0, 0.0
+            ),
+        )
+
+    def test_subthreshold_rapid_does_not_override_normal_activity_rank(self):
+        normal_active = {
+            "ready": True,
+            "age_ms": 250.0,
+            "book_age_ms": 300.0,
+            "trades_5s": 25,
+            "notional_5s": 500_000.0,
+            "spread_bps": 2.0,
+        }
+        weak_challenger = {
+            "ready": True,
+            "age_ms": 300.0,
+            "book_age_ms": 350.0,
+            "trades_5s": 2,
+            "notional_5s": 1000.0,
+            "spread_bps": 8.0,
+        }
+        self.assertGreater(
+            hardening._activity_sort_key(normal_active, 50_000_000.0, 0.0),
+            hardening._activity_sort_key(
+                weak_challenger,
+                500_000.0,
+                hardening.RAPID_MIN_SCORE - 5.0,
+            ),
+        )
+
     def test_spare_capacity_fills_without_eviction(self):
         active={f"OLD{i}USDT" for i in range(40)}
         wanted=[f"OLD{i}USDT" for i in range(40)] + [f"NEW{i}USDT" for i in range(40)]
