@@ -7,6 +7,7 @@ import redis.asyncio as redis_async
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3_LANES->V12.3_FAIL_CLOSED_AUTHORITY->BUY_NOW"
+HARDENING_REVISION = "12.3.2-micro-stability"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -18,6 +19,7 @@ MIN_REBALANCE_S = 15.0
 
 _last_rebalance = 0.0
 _rotation_epoch = 0
+_protected_pool = []
 _original_gate = None
 _original_scan = None
 _original_health = None
@@ -43,8 +45,13 @@ def _strict_micro_ready(symbol):
 
 
 def stable_micro_symbols():
-    """Keep execution micro coverage sticky while preserving full discovery."""
-    global _last_rebalance, _rotation_epoch
+    """Keep execution micro coverage sticky while preserving full discovery.
+
+    The protected pool is private to this hardening layer. Core/legacy modules
+    may still mutate their own candidate lists, but they cannot replace the
+    execution subscription set wholesale.
+    """
+    global _last_rebalance, _rotation_epoch, _protected_pool
 
     core = _core()
     pool_size = int(core.REDIS_MICRO_POOL_SIZE)
@@ -106,23 +113,34 @@ def stable_micro_symbols():
 
     current = [
         str(symbol).upper()
-        for symbol in list(core._distributed_micro_sticky_pool or [])
+        for symbol in list(_protected_pool or [])
         if str(symbol).upper().endswith("USDT")
     ]
+    if not current:
+        current = [
+            str(symbol).upper()
+            for symbol in list(core._distributed_micro_sticky_pool or [])
+            if str(symbol).upper().endswith("USDT")
+        ]
 
     if not universe:
         if current:
-            return current[:pool_size]
-        core._distributed_micro_sticky_pool = desired[:pool_size]
-        return list(core._distributed_micro_sticky_pool)
+            _protected_pool[:] = current[:pool_size]
+            core._distributed_micro_sticky_pool = list(_protected_pool)
+            return list(_protected_pool)
+        _protected_pool[:] = desired[:pool_size]
+        core._distributed_micro_sticky_pool = list(_protected_pool)
+        return list(_protected_pool)
 
     current = [symbol for symbol in current if symbol in universe_set]
     if not current:
-        core._distributed_micro_sticky_pool = [
+        _protected_pool[:] = [
             symbol for symbol in desired if symbol in universe_set
         ][:pool_size]
+        core._distributed_micro_sticky_pool = list(_protected_pool)
         _last_rebalance = time.monotonic()
-        return list(core._distributed_micro_sticky_pool)
+        core._redis_bridge_stats["protected_pool_seeded"] = len(_protected_pool)
+        return list(_protected_pool)
 
     now_mono = time.monotonic()
     can_rebalance = now_mono - _last_rebalance >= min_rebalance
@@ -180,16 +198,25 @@ def stable_micro_symbols():
     for symbol in universe:
         add_out(symbol)
 
+    previous = set(current)
+    next_pool = out[:pool_size]
+    actual_added = len(set(next_pool) - previous)
+    actual_removed = len(previous - set(next_pool))
+
     if inject:
         _last_rebalance = now_mono
         core._redis_bridge_stats["micro_last_churn"] = len(inject)
         core._redis_bridge_stats["micro_last_churn_ms"] = int(time.time() * 1000)
 
+    core._redis_bridge_stats["micro_actual_added"] = actual_added
+    core._redis_bridge_stats["micro_actual_removed"] = actual_removed
     core._redis_bridge_stats["micro_warmed_retained"] = sum(
-        symbol in out_seen for symbol in warmed
+        symbol in set(next_pool) for symbol in warmed
     )
-    core._distributed_micro_sticky_pool = out[:pool_size]
-    return list(core._distributed_micro_sticky_pool)
+
+    _protected_pool[:] = next_pool
+    core._distributed_micro_sticky_pool = list(_protected_pool)
+    return list(_protected_pool)
 
 
 def _heartbeat_ready(name, timestamp_key, count_key="symbols", max_age_ms=15000):
@@ -316,6 +343,7 @@ def _augment_response(response):
     lane_health = authority_lane_health()
     data["execution_authority"] = "V12.3_FAIL_CLOSED"
     data["authority_chain"] = AUTHORITY_CHAIN
+    data["hardening_revision"] = HARDENING_REVISION
     data["authority_lane_health"] = lane_health
     data["authority_ready"] = bool(lane_health.get("all_ready"))
     data["legacy_pinpoint_role"] = "INPUT_TELEMETRY_ONLY"
@@ -333,6 +361,7 @@ async def _health_wrapper(request):
 
 
 async def bootstrap():
+    global _protected_pool
     core = _core()
     if not core.REDIS_URL:
         return
@@ -356,9 +385,13 @@ async def bootstrap():
                 if len(restored) >= core.REDIS_MICRO_POOL_SIZE:
                     break
             if restored:
-                core._distributed_micro_sticky_pool[:] = restored
+                _protected_pool[:] = restored
+                core._distributed_micro_sticky_pool = list(_protected_pool)
                 core._redis_bridge_stats["sticky_restored"] = len(restored)
-                print(f"Ψ-V12.3 HARDENING restoredSticky={len(restored)}", flush=True)
+                print(
+                    f"Ψ-V12.3.2 HARDENING restoredProtected={len(restored)}",
+                    flush=True,
+                )
     except Exception as exc:
         core._redis_bridge_stats["hardening_bootstrap_error"] = (
             f"{type(exc).__name__}: {exc}"
@@ -392,7 +425,7 @@ async def supervisor_loop():
                         {
                             "version": core.VERSION,
                             "authority": "V12_ONLY",
-                            "symbols": list(core._distributed_micro_sticky_pool),
+                            "symbols": list(_protected_pool),
                             "generated_ms": now_ms,
                         },
                         separators=(",", ":"),
@@ -460,6 +493,6 @@ def install(core):
     core.app.health = _health_wrapper
 
     print(
-        "Ψ-V12.3 HARDENING installed — sticky micro + lane health + fail-closed authority",
+        "Ψ-V12.3.2 HARDENING installed — protected micro pool + guarded workers + fail-closed authority",
         flush=True,
     )
