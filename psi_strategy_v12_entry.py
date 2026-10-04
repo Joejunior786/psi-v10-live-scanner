@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.6-nonblocking-micro-race"
+VERSION = "12.2.7-direct-micro-stream"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -2278,7 +2278,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.6] MULTI-SETUP AUTHORITY + NONBLOCKING MICRO RACE active — "
+        "[v12.2.7] MULTI-SETUP AUTHORITY + DIRECT MICRO STREAM active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
