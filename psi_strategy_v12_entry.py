@@ -563,6 +563,58 @@ def _load_cache_sync():
         return 0
 
 
+def _bridge_deep_cache_to_legacy_structure(symbols=None):
+    """Reuse authoritative V12 DEEP 1H/4H Binance rows in legacy structure.
+
+    Legacy structure still computes its own indicators and still requires its
+    independent 15m packet. This bridge only removes duplicate 1H/4H history
+    downloads; it does not alter any signal threshold or freshness gate.
+    """
+    raw=getattr(legacy,"_structure_raw_cache",None)
+    tf_cache=getattr(legacy,"_structure_tf_cache",None)
+    raw_key_fn=getattr(legacy,"_raw_key",None)
+    if not isinstance(raw,dict) or not isinstance(tf_cache,dict) or not callable(raw_key_fn):
+        return 0
+
+    wanted=set(str(s).upper() for s in symbols) if symbols else None
+    now=time.time()
+    bridged=0
+    for sym,tfmap in list(_cache.items()):
+        sym=str(sym).upper()
+        if wanted is not None and sym not in wanted:
+            continue
+        if not isinstance(tfmap,dict):
+            continue
+        for tf in ("1h","4h"):
+            item=tfmap.get(tf) or {}
+            rows=item.get("rows") or []
+            if not isinstance(rows,list) or len(rows)<DEEP_MIN_ROWS:
+                continue
+            # app.load_structure asks for 260 rows. Preserve the full verified
+            # V12 history up to that request size and never pad insufficient data.
+            payload=list(rows)[-260:]
+            if len(payload)<DEEP_MIN_ROWS:
+                continue
+            key=raw_key_fn(sym,tf,260)
+            existing=(raw.get(key) or {}).get("rows") if isinstance(raw.get(key),dict) else None
+            if isinstance(existing,list) and len(existing)>=len(payload):
+                # Refresh the hot in-memory cache even when the persisted seed is
+                # already at least as complete.
+                tf_cache[(sym,tf,260)]=(now,payload)
+                continue
+            raw[key]={"rows":payload,"saved":now}
+            tf_cache[(sym,tf,260)]=(now,payload)
+            bridged+=1
+
+    if bridged:
+        try:
+            legacy._structure_raw_dirty=True
+        except Exception:
+            pass
+        _stats["legacy_structure_bridge"]+=bridged
+    return bridged
+
+
 async def cache_persist_loop():
     global _last_cache_ready
     while True:
@@ -1871,6 +1923,8 @@ def _commit_authoritative_rows(sym, tf, rows, requested_limit, source="WS"):
     deep = requested_limit >= DEEP_MIN_ROWS
     _tf_mark_success(sym, tf, deep)
     _stats[f"authoritative_commit_{source.lower()}"] += 1
+    if deep and tf in {"1h","4h"}:
+        _bridge_deep_cache_to_legacy_structure([sym])
     return True
 
 
@@ -3431,7 +3485,11 @@ async def main():
             pass
     app.USER_AGENT = f"psi-v10-live-scanner/{VERSION}"
     loaded = await asyncio.to_thread(_load_cache_sync)
-    print(f"Ψ-V12 CACHE loadedItems={loaded} path={V12_CACHE_PATH}", flush=True)
+    bridged = _bridge_deep_cache_to_legacy_structure()
+    print(
+        f"Ψ-V12 CACHE loadedItems={loaded} legacyStructureBridge={bridged} path={V12_CACHE_PATH}",
+        flush=True,
+    )
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
