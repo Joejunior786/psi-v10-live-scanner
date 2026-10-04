@@ -1,6 +1,7 @@
 import asyncio, json, math, statistics, time, os, contextvars
 from collections import defaultdict, Counter
 import aiohttp
+import redis.asyncio as redis_async
 import psi_v11_4_entry as rescue
 import psi_v11_2_2_entry as extrest
 import psi_v11_3_1_entry as continuity_guard
@@ -1490,14 +1491,69 @@ STRUCTURE_TF_CACHE_S = 180.0
 STRUCTURE_TF_RETRY_DELAY_S = 0.12
 STRUCTURE_TF_ATTEMPTS = 1
 STRUCTURE_RAW_MAX_INCREMENTAL_BARS = 48
+STRUCTURE_WORKER_REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+STRUCTURE_WORKER_REDIS_PREFIX = os.environ.get("PSI_STRUCTURE_REDIS_PREFIX", "psi:v12:structure").strip()
+STRUCTURE_WORKER_MAX_AGE_S = max(10.0, float(os.environ.get("PSI_STRUCTURE_WORKER_MAX_AGE_S", "90")))
+_structure_worker_redis = None
 _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
     "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"ws_refresh":0,"bar_reuse":0,
     "watchdog_rest_ok":0,"watchdog_rest_fail":0,
+    "worker_hit":0,"worker_miss":0,"worker_stale":0,"worker_error":0,
 }
 
 def _raw_key(symbol, interval, limit):
     return f"{symbol}|{interval}|{int(limit)}"
+
+
+async def _structure_worker_rows(symbol, interval):
+    global _structure_worker_redis
+    if not STRUCTURE_WORKER_REDIS_URL:
+        return None
+    try:
+        if _structure_worker_redis is None:
+            _structure_worker_redis = redis_async.from_url(
+                STRUCTURE_WORKER_REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=0.25,
+                socket_timeout=0.25,
+                health_check_interval=15,
+            )
+        key=f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:{interval}"
+        raw=await asyncio.wait_for(_structure_worker_redis.get(key),timeout=0.30)
+        if not raw:
+            _structure_tf_stats["worker_miss"]+=1
+            return None
+        payload=json.loads(raw)
+        if not isinstance(payload,dict):
+            _structure_tf_stats["worker_miss"]+=1
+            return None
+        fetched_ms=float(payload.get("fetched_ms") or 0.0)
+        age_s=(time.time()*1000.0-fetched_ms)/1000.0 if fetched_ms>0 else 999999.0
+        if age_s<0:
+            age_s=0.0
+        if age_s>STRUCTURE_WORKER_MAX_AGE_S:
+            _structure_tf_stats["worker_stale"]+=1
+            return None
+        rows=payload.get("rows")
+        if not isinstance(rows,list) or len(rows)<_minimum_structure_rows(interval):
+            _structure_tf_stats["worker_miss"]+=1
+            return None
+        _structure_tf_stats["worker_hit"]+=1
+        return rows
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _structure_tf_stats["worker_error"]+=1
+        try:
+            if _structure_worker_redis is not None:
+                await _structure_worker_redis.aclose()
+        except Exception:
+            pass
+        _structure_worker_redis=None
+        return None
+
 
 def _interval_ms(interval):
     return {"15m":900000,"1h":3600000,"4h":14400000}.get(str(interval),0)
@@ -1908,6 +1964,21 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
     if isinstance(seed,list) and seed:
         _structure_tf_stats["raw_hit"]+=1
 
+    # Dedicated Railway structure workers own historical/catch-up network I/O.
+    # A fresh verified worker packet is merged with any deeper local seed and
+    # promoted into the exact same legacy structure cache. All downstream
+    # structure/EMA/BUY gates remain unchanged.
+    worker_rows=await _structure_worker_rows(symbol,interval)
+    if isinstance(worker_rows,list) and worker_rows:
+        merged=_merge_kline_rows(seed,worker_rows,limit)
+        if len(merged)>=_minimum_structure_rows(interval):
+            stamp=time.time()
+            _structure_tf_cache[key]=(stamp,merged)
+            _structure_raw_cache[raw_key]={"rows":merged,"saved":stamp}
+            _structure_raw_dirty=True
+            return merged
+
+    if isinstance(seed,list) and seed:
         # Preferred live path: historical seed + Binance kline WebSocket current
         # candle. This keeps the mandatory structure state current without REST.
         wsrow=_structure_ws_row(symbol,interval)
