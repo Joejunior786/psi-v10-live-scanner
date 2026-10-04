@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.100-preconnected-raw-micro"
+VERSION="11.0.5.101-persistent-raw-receive"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -180,6 +180,15 @@ _strict_raw_stats={
     "trade_events":0,"depth_events":0,"last_trade_ms":0,"last_depth_ms":0,
     "lane0_host":"-","lane1_host":"-","lane0_symbol":"-","lane1_symbol":"-",
 }
+_strict_raw_symbol_ts=defaultdict(lambda:{"trade":0,"depth":0})
+
+def _strict_raw_symbol_fresh(sym, need_trade=True, need_depth=True):
+    x=_strict_raw_symbol_ts.get(str(sym).upper()) or {}
+    now_ms=int(time.time()*1000)
+    trade_ok=(not need_trade) or (now_ms-int(x.get("trade",0) or 0) <= 12000)
+    depth_ok=(not need_depth) or (now_ms-int(x.get("depth",0) or 0) <= 3500)
+    return bool(trade_ok and depth_ok)
+
 
 def _strict_micro_session():
     """Reserved connector for execution-critical micro telemetry.
@@ -4562,6 +4571,9 @@ async def ws_api_micro_trade_loop():
             _ws_market_trade_cursor=_strict_trade_cursor
 
             async def one(sym):
+                if _strict_raw_symbol_fresh(sym,need_trade=True,need_depth=False):
+                    _micro_rest_stats["trade_raw_skip"]=_micro_rest_stats.get("trade_raw_skip",0)+1
+                    return 0
                 rows=None
                 winner_source="-"
 
@@ -4721,6 +4733,9 @@ async def ws_api_micro_depth_loop():
             _strict_depth_cursor=(_strict_depth_cursor+len(targets))%max(1,len(core))
 
             async def one(sym):
+                if _strict_raw_symbol_fresh(sym,need_trade=False,need_depth=True):
+                    _micro_rest_stats["depth_raw_skip"]=_micro_rest_stats.get("depth_raw_skip",0)+1
+                    return 0
                 row=None
                 source="-"
 
@@ -4908,6 +4923,7 @@ async def ws_api_micro_log_loop():
                 f"rawStrict={_strict_raw_stats.get('trade_events',0)}/{_strict_raw_stats.get('depth_events',0)} "
                 f"rawSym={_strict_raw_stats.get('lane0_symbol','-')},{_strict_raw_stats.get('lane1_symbol','-')} "
                 f"rawErr={_strict_raw_stats.get('errors',0)} "
+                f"rawSkip={_micro_rest_stats.get('trade_raw_skip',0)}/{_micro_rest_stats.get('depth_raw_skip',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -4981,6 +4997,7 @@ async def strict_raw_ws_backbone_lane(lane_idx):
             )
 
             active=None
+            recv_task=asyncio.create_task(ws.receive())
             while True:
                 core=tuple(_micro_fallback_core_symbols())
                 target=core[lane_idx] if len(core)>lane_idx else None
@@ -5014,10 +5031,13 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                             flush=True,
                         )
 
-                try:
-                    msg=await asyncio.wait_for(ws.receive(),timeout=.75)
-                except asyncio.TimeoutError:
+                done,_=await asyncio.wait({recv_task},timeout=.50)
+                if not done:
                     continue
+                try:
+                    msg=recv_task.result()
+                finally:
+                    recv_task=asyncio.create_task(ws.receive())
 
                 if msg.type==aiohttp.WSMsgType.TEXT:
                     try:
@@ -5067,6 +5087,7 @@ async def strict_raw_ws_backbone_lane(lane_idx):
 
                         _strict_raw_stats["trade_events"]+=1
                         _strict_raw_stats["last_trade_ms"]=now_ms
+                        _strict_raw_symbol_ts[sym]["trade"]=now_ms
                         _ws_market_stats["last_trade_ms"]=now_ms
                         _ws_market_stats["trade_rows"]+=1
                         tape.tape_stats["wsapi_last_trade_ms"]=now_ms
@@ -5093,6 +5114,7 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                         if after_id>before_id or after_updates>before_updates:
                             _strict_raw_stats["depth_events"]+=1
                             _strict_raw_stats["last_depth_ms"]=now_ms
+                            _strict_raw_symbol_ts[sym]["depth"]=now_ms
                             _ws_market_stats["last_depth_ms"]=now_ms
                             _ws_market_stats["last_book_ms"]=now_ms
                             _ws_market_stats["depth_ok"]+=1
@@ -5117,6 +5139,12 @@ async def strict_raw_ws_backbone_lane(lane_idx):
             host_cursor=(host_cursor+1)%len(hosts)
             await asyncio.sleep(1.0)
         finally:
+            try:
+                if 'recv_task' in locals() and recv_task is not None and not recv_task.done():
+                    recv_task.cancel()
+                    recv_task.add_done_callback(lambda t: None)
+            except Exception:
+                pass
             if session is not None and not session.closed:
                 try:
                     await session.close()
@@ -5419,8 +5447,16 @@ async def strict_rest_micro_bridge_loop():
             # Two symbols x two endpoints remains a tiny, bounded request set.
             jobs=[]
             for sym in core:
-                jobs.append(asyncio.create_task(hydrate_trade(sym)))
-                jobs.append(asyncio.create_task(hydrate_depth(sym)))
+                if not _strict_raw_symbol_fresh(sym,need_trade=True,need_depth=False):
+                    jobs.append(asyncio.create_task(hydrate_trade(sym)))
+                else:
+                    _strict_rest_stats["trade_raw_skip"]=_strict_rest_stats.get("trade_raw_skip",0)+1
+                if not _strict_raw_symbol_fresh(sym,need_trade=False,need_depth=True):
+                    jobs.append(asyncio.create_task(hydrate_depth(sym)))
+                else:
+                    _strict_rest_stats["depth_raw_skip"]=_strict_rest_stats.get("depth_raw_skip",0)+1
+            if not jobs:
+                continue
             done,pending=await asyncio.wait(jobs,timeout=4.6)
             if pending:
                 _strict_rest_stats["timeouts"]+=len(pending)
