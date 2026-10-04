@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 
 import redis.asyncio as redis_async
+import redis as redis_sync
 
 import psi_v11_5_entry as legacy
 
@@ -42,9 +43,101 @@ _redis_worker_health = {}
 _distributed_tape_metrics = {}
 _distributed_tape_snapshot_meta = {}
 _legacy_tape_metric = tape.tape_metric
+_sync_tape_client = None
+_sync_snapshot_last_mono = 0.0
+
+
+def _refresh_tape_snapshots_sync(force=False):
+    global _sync_tape_client, _sync_snapshot_last_mono
+    if not REDIS_URL:
+        return False
+    now_mono=time.monotonic()
+    if not force and now_mono-_sync_snapshot_last_mono < 0.35:
+        return True
+    try:
+        if _sync_tape_client is None:
+            _sync_tape_client=redis_sync.from_url(
+                REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=0.4,
+                socket_timeout=0.4,
+                health_check_interval=15,
+            )
+        keys=[f"{REDIS_TAPE_SNAPSHOT_PREFIX}:{idx}" for idx in range(REDIS_TAPE_WORKERS)]
+        raws=_sync_tape_client.mget(keys)
+        now_ms=int(time.time()*1000)
+        snapshot_symbols=0
+        snapshot_trade_ms=0
+        snapshot_book_ms=0
+        snapshot_trades=0
+        snapshot_books=0
+        valid_snapshots=0
+        for idx,raw in enumerate(raws or []):
+            if not raw:
+                continue
+            try:
+                snap=json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(snap,dict):
+                continue
+            generated_ms=int(snap.get("generated_ms") or 0)
+            snapshot_age=now_ms-generated_ms if generated_ms>0 else 999999
+            _distributed_tape_snapshot_meta[idx]={
+                "generated_ms":generated_ms,
+                "age_ms":snapshot_age,
+                "metric_symbols":int(snap.get("metric_symbols") or 0),
+                "source_symbols":int(snap.get("source_symbols") or 0),
+                "host":snap.get("host"),
+            }
+            if snapshot_age<0 or snapshot_age>15000:
+                continue
+            metrics=snap.get("metrics") or {}
+            if not isinstance(metrics,dict):
+                continue
+            valid_snapshots+=1
+            for sym,metric in metrics.items():
+                if not isinstance(metric,dict):
+                    continue
+                item=dict(metric)
+                item["_snapshot_ms"]=generated_ms
+                item["_snapshot_shard"]=idx
+                _distributed_tape_metrics[str(sym).upper()]=item
+            snapshot_symbols+=len(metrics)
+            snapshot_trade_ms=max(snapshot_trade_ms,int(snap.get("last_trade_event_ms") or 0))
+            snapshot_book_ms=max(snapshot_book_ms,int(snap.get("last_book_receipt_ms") or 0))
+            snapshot_trades+=int(snap.get("trades") or 0)
+            snapshot_books+=int(snap.get("books") or 0)
+
+        if snapshot_trade_ms>0:
+            tape.tape_stats["distributed_last_trade_ms"]=snapshot_trade_ms
+        if snapshot_book_ms>0:
+            tape.tape_stats["distributed_last_book_ms"]=snapshot_book_ms
+        tape.tape_stats["distributed_trades"]=snapshot_trades
+        tape.tape_stats["distributed_books"]=snapshot_books
+        tape.tape_stats["distributed_snapshot_symbols"]=snapshot_symbols
+        tape.tape_stats["distributed_snapshot_sync_valid"]=valid_snapshots
+        _redis_bridge_stats["tape_snapshot_sync_ok"]+=1
+        _redis_bridge_stats["tape_snapshot_sync_symbols"]=snapshot_symbols
+        _redis_bridge_stats["tape_snapshot_sync_last_ms"]=now_ms
+        _sync_snapshot_last_mono=now_mono
+        return valid_snapshots>0
+    except Exception as exc:
+        _redis_bridge_stats["tape_snapshot_sync_fail"]+=1
+        _redis_bridge_stats["tape_snapshot_sync_error"]=f"{type(exc).__name__}: {exc}"
+        _sync_snapshot_last_mono=now_mono
+        try:
+            if _sync_tape_client is not None:
+                _sync_tape_client.close()
+        except Exception:
+            pass
+        _sync_tape_client=None
+        return False
 
 
 def _snapshot_tape_metric(symbol):
+    _refresh_tape_snapshots_sync()
     sym=str(symbol or "").upper()
     legacy_metric=_legacy_tape_metric(sym) or {}
     snap=_distributed_tape_metrics.get(sym)
