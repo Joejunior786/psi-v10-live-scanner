@@ -58,8 +58,9 @@ COPY psi_v11_4_entry.py .
 COPY psi_v11_5_entry.py .
 COPY psi_strategy_v12_entry.py .
 COPY psi_micro_worker.py .
+COPY psi_tape_worker.py .
 COPY test_v12_execution_gate.py .
-RUN python -m py_compile psi_strategy_v12_entry.py psi_micro_worker.py && python -m unittest -v test_v12_execution_gate.py
+RUN python -m py_compile psi_strategy_v12_entry.py psi_micro_worker.py psi_tape_worker.py && python -m unittest -v test_v12_execution_gate.py
 
 ENV PORT=8080
 ENV PSI_SCANNER_VERSION=12.3.0-strict-buy-now-gate
