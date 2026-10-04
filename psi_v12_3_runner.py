@@ -4,6 +4,8 @@ import psi_strategy_v12_entry as core
 import psi_v12_3_hardening as hardening
 import psi_outcome_learning as outcome_learning
 
+OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
+
 
 async def main():
     hardening.install(core)
