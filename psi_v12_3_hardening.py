@@ -7,8 +7,8 @@ from collections import Counter
 import redis.asyncio as redis_async
 
 CORE = None
-AUTHORITY_CHAIN = "V12.3_LANES->V12.3_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.3-micro-diagnostics"
+AUTHORITY_CHAIN = "V12.3.4_LANES->V12.3.4_FAIL_CLOSED_AUTHORITY->BUY_NOW"
+HARDENING_REVISION = "12.3.4-activity-qualified-pool"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -17,12 +17,18 @@ ROTATION_SLOTS = 2
 ROTATION_PERIOD_S = 120.0
 MAX_CHURN = 2
 MIN_REBALANCE_S = 15.0
+ACTIVITY_HUNTER_SLOTS = 48
+ACTIVITY_GRACE_S = 120.0
+ACTIVITY_RANK_REFRESH_S = 15.0
 
 _last_rebalance = 0.0
 _rotation_epoch = 0
 _protected_pool = []
 _last_micro_diag = {}
 _last_diag_mono = 0.0
+_activity_rank_cache = []
+_activity_rank_mono = 0.0
+_inactive_since = {}
 _original_gate = None
 _original_scan = None
 _original_health = None
@@ -47,6 +53,99 @@ def _strict_micro_ready(symbol):
     )
 
 
+def _activity_sort_key(metric, quote_volume=0.0):
+    metric = metric or {}
+    try:
+        age = float(metric.get("age_ms", 999999.0) or 999999.0)
+    except (TypeError, ValueError):
+        age = 999999.0
+    try:
+        book_age = float(metric.get("book_age_ms", 999999.0) or 999999.0)
+    except (TypeError, ValueError):
+        book_age = 999999.0
+    try:
+        trades5 = int(metric.get("trades_5s") or 0)
+    except (TypeError, ValueError):
+        trades5 = 0
+    try:
+        notional5 = float(metric.get("notional_5s") or 0.0)
+    except (TypeError, ValueError):
+        notional5 = 0.0
+    try:
+        spread = float(metric.get("spread_bps", 999.0) or 999.0)
+    except (TypeError, ValueError):
+        spread = 999.0
+    try:
+        quote_volume = float(quote_volume or 0.0)
+    except (TypeError, ValueError):
+        quote_volume = 0.0
+
+    ready = bool(metric.get("ready")) and age <= 1500.0
+    return (
+        1 if ready else 0,
+        1 if age <= 1500.0 else 0,
+        min(trades5, 100),
+        min(notional5, 10_000_000.0),
+        1 if book_age <= 5000.0 else 0,
+        -min(spread, 999.0),
+        quote_volume,
+    )
+
+
+def _activity_ranked_symbols(universe, refresh_seconds=ACTIVITY_RANK_REFRESH_S):
+    global _activity_rank_cache, _activity_rank_mono
+    core = _core()
+    now_mono = time.monotonic()
+    if (
+        _activity_rank_cache
+        and now_mono - _activity_rank_mono < max(5.0, float(refresh_seconds))
+    ):
+        universe_set = set(universe)
+        return [sym for sym in _activity_rank_cache if sym in universe_set]
+
+    try:
+        core._refresh_tape_snapshots_sync(force=True)
+    except Exception:
+        pass
+
+    meta = getattr(core.app, "symbol_meta", {}) or {}
+    ranked = []
+    for sym in universe:
+        try:
+            tm = core.tape.tape_metric(sym) or {}
+        except Exception:
+            tm = {}
+        qv = float((meta.get(sym, {}) or {}).get("quote_volume_24h", 0.0) or 0.0)
+        ranked.append((_activity_sort_key(tm, qv), sym))
+    ranked.sort(reverse=True)
+    _activity_rank_cache = [sym for _, sym in ranked]
+    _activity_rank_mono = now_mono
+    return list(_activity_rank_cache)
+
+
+def _strict_trade_activity_ok(symbol):
+    core = _core()
+    try:
+        core._refresh_micro_snapshots_sync()
+    except Exception:
+        pass
+    trade = core._distributed_micro_trade.get(str(symbol).upper())
+    if not isinstance(trade, dict):
+        return False
+    now_ms = int(time.time() * 1000)
+    snapshot_ms = int(trade.get("_snapshot_ms") or 0)
+    transport = max(0, now_ms - snapshot_ms) if snapshot_ms > 0 else 999999999
+    try:
+        age = float(trade.get("trade_age_ms", 999999999.0)) + transport
+    except (TypeError, ValueError):
+        age = 999999999.0
+    try:
+        count = int(trade.get("trade_count_60s") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return bool(age <= 15000.0 and count >= 10)
+
+
 def stable_micro_symbols():
     """Keep execution micro coverage sticky while preserving full discovery.
 
@@ -54,7 +153,7 @@ def stable_micro_symbols():
     may still mutate their own candidate lists, but they cannot replace the
     execution subscription set wholesale.
     """
-    global _last_rebalance, _rotation_epoch, _protected_pool
+    global _last_rebalance, _rotation_epoch, _protected_pool, _inactive_since
 
     core = _core()
     pool_size = int(core.REDIS_MICRO_POOL_SIZE)
@@ -73,6 +172,16 @@ def stable_micro_symbols():
     min_rebalance = max(
         5.0, float(os.getenv("PSI_MICRO_MIN_REBALANCE_S", str(MIN_REBALANCE_S)))
     )
+    activity_hunter_slots = max(
+        8,
+        min(
+            int(os.getenv("PSI_MICRO_ACTIVITY_HUNTER_SLOTS", str(ACTIVITY_HUNTER_SLOTS))),
+            max(8, pool_size - priority_slots),
+        ),
+    )
+    activity_grace = max(
+        60.0, float(os.getenv("PSI_MICRO_ACTIVITY_GRACE_S", str(ACTIVITY_GRACE_S)))
+    )
 
     desired = []
     seen = set()
@@ -83,19 +192,42 @@ def stable_micro_symbols():
             seen.add(symbol)
             desired.append(symbol)
 
-    for symbol in list(getattr(core.app, "selected_micro_symbols", []) or []):
-        add_desired(symbol)
-
+    # Execution priority is V12 board first, then the already activity-aware
+    # legacy micro ranking. This does not change any BUY condition.
     try:
         for row in core._board():
             add_desired(row.get("symbol"))
-            if len(desired) >= max(pool_size * 2, 120):
+            if len(desired) >= priority_slots:
                 break
     except Exception:
         pass
 
+    for symbol in list(getattr(core.app, "selected_micro_symbols", []) or []):
+        add_desired(symbol)
+
     universe = list(getattr(core.q, "universe", []) or [])
     universe_set = set(universe)
+
+    activity_ranked = _activity_ranked_symbols(universe)
+    priority = [symbol for symbol in desired[:priority_slots] if symbol in universe_set]
+    priority_set = set(priority)
+
+    # Reserve a large hunter tier for symbols with live full-universe tape
+    # activity. A final fair/discovery tier remains after these slots.
+    activity_hunters = []
+    for symbol in activity_ranked:
+        if symbol in universe_set and symbol not in priority_set:
+            activity_hunters.append(symbol)
+        if len(activity_hunters) >= activity_hunter_slots:
+            break
+
+    ordered = []
+    ordered_seen = set()
+    for symbol in priority + activity_hunters + desired + universe:
+        if symbol in universe_set and symbol not in ordered_seen:
+            ordered_seen.add(symbol)
+            ordered.append(symbol)
+    desired = ordered
 
     if len(desired) < pool_size:
         try:
@@ -151,12 +283,45 @@ def stable_micro_symbols():
 
     warmed = [symbol for symbol in current if _strict_micro_ready(symbol)]
     warmed_set = set(warmed)
-    warming = [symbol for symbol in current if symbol not in warmed_set]
-    priority = [symbol for symbol in desired[:priority_slots] if symbol in universe_set]
+
+    # Hunter slots get a sustained-activity grace period. Priority V12
+    # candidates are never demoted solely for quiet tape, and verified symbols
+    # remain first-class retained history.
+    inactive = []
+    active_warming = []
+    for symbol in current:
+        if symbol in priority_set or symbol in warmed_set:
+            _inactive_since.pop(symbol, None)
+            active_warming.append(symbol)
+            continue
+        if _strict_trade_activity_ok(symbol):
+            _inactive_since.pop(symbol, None)
+            active_warming.append(symbol)
+            continue
+        since = _inactive_since.setdefault(symbol, now_mono)
+        if now_mono - since >= activity_grace:
+            inactive.append(symbol)
+        else:
+            active_warming.append(symbol)
+
+    # Drop timers for symbols no longer in the live protected pool.
+    for symbol in list(_inactive_since):
+        if symbol not in current:
+            _inactive_since.pop(symbol, None)
 
     inject = []
     if budget:
         for symbol in priority:
+            if symbol not in current and symbol not in inject:
+                inject.append(symbol)
+            if len(inject) >= budget:
+                break
+
+    # If hunter slots have been persistently unable to satisfy the unchanged
+    # strict Trade gate, use the remaining churn budget on the highest-current
+    # full-universe tape challengers.
+    if inactive and len(inject) < budget:
+        for symbol in activity_hunters:
             if symbol not in current and symbol not in inject:
                 inject.append(symbol)
             if len(inject) >= budget:
@@ -192,9 +357,15 @@ def stable_micro_symbols():
 
     for symbol in inject:
         add_out(symbol)
+    for symbol in priority:
+        add_out(symbol)
     for symbol in warmed:
         add_out(symbol)
-    for symbol in warming:
+    for symbol in active_warming:
+        add_out(symbol)
+    # Sustained inactive hunters are retained only if no better candidate can
+    # use the bounded replacement budget.
+    for symbol in inactive:
         add_out(symbol)
     for symbol in desired:
         add_out(symbol)
@@ -213,6 +384,8 @@ def stable_micro_symbols():
 
     core._redis_bridge_stats["micro_actual_added"] = actual_added
     core._redis_bridge_stats["micro_actual_removed"] = actual_removed
+    core._redis_bridge_stats["micro_sustained_inactive"] = len(inactive)
+    core._redis_bridge_stats["micro_activity_hunters"] = len(activity_hunters)
     core._redis_bridge_stats["micro_warmed_retained"] = sum(
         symbol in set(next_pool) for symbol in warmed
     )
@@ -635,6 +808,6 @@ def install(core):
     core.app.health = _health_wrapper
 
     print(
-        "Ψ-V12.3.3 HARDENING installed — protected micro pool + guarded workers + live gate diagnostics + fail-closed authority",
+        "Ψ-V12.3.4 HARDENING installed — activity-qualified protected pool + guarded workers + live gate diagnostics + fail-closed authority",
         flush=True,
     )
