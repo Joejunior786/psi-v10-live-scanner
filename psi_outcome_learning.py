@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 
 import redis.asyncio as redis_async
 
-REVISION = "12.3.4-outcome-memory-probability-shadow-v1"
+REVISION = "12.3.4-outcome-memory-probability-shadow-v2"
 ROLE = "SHADOW_CALIBRATION_ONLY"
 EXECUTION_AUTHORITY = False
 
@@ -29,6 +29,10 @@ POLL_SECONDS = max(2.0, float(os.getenv("PSI_ML_POLL_SECONDS", "5.0")))
 SIGNAL_BUCKET_SECONDS = max(60, int(os.getenv("PSI_ML_SIGNAL_BUCKET_SECONDS", "900")))
 ANALYSIS_STOP_PCT = max(0.5, min(float(os.getenv("PSI_ML_ANALYSIS_STOP_PCT", "2.0")), 10.0))
 MIN_CALIBRATION_SAMPLES = max(10, int(os.getenv("PSI_ML_MIN_CALIBRATION_SAMPLES", "30")))
+CLEAN_MAE_PCT = max(0.25, min(float(os.getenv("PSI_ML_CLEAN_MAE_PCT", "1.5")), 5.0))
+MIN_70_TOTAL_SAMPLES = max(100, int(os.getenv("PSI_ML_MIN_70_TOTAL_SAMPLES", "300")))
+MIN_70_TEST_SAMPLES = max(30, int(os.getenv("PSI_ML_MIN_70_TEST_SAMPLES", "75")))
+DAY_MS = 24 * 60 * 60 * 1000
 
 TARGETS = (3.0, 5.0, 10.0, 20.0, 40.0)
 HORIZONS_MS = {
@@ -276,6 +280,18 @@ def _cohort(features, signal_class):
     return "|".join((setup, signal_class, micro, flow, book, persist, chase))
 
 
+def _dataset_split(created_ms):
+    # Time-blocked 20-day cycle: 14 train, 3 validation, 3 untouched test.
+    # This avoids random leakage from adjacent market regimes while keeping
+    # enough fresh shadow samples flowing into every split.
+    day_bucket = int(created_ms // DAY_MS) % 20
+    if day_bucket < 14:
+        return "TRAIN"
+    if day_bucket < 17:
+        return "VALIDATION"
+    return "TEST"
+
+
 def _event_id(symbol, setup, signal_class, now_ms):
     bucket = int(now_ms // (SIGNAL_BUCKET_SECONDS * 1000))
     raw = f"{symbol}|{setup}|{signal_class}|{bucket}".encode()
@@ -309,10 +325,12 @@ def _new_event(symbol, structural, legacy, now_ms=None):
         "peak_price": entry,
         "trough_price": entry,
         "first_target_ms": {},
+        "mae_at_target": {},
         "stop_hit_ms": 0,
         "horizon_returns": {},
         "resolved": False,
         "resolution": "OPEN",
+        "dataset_split": _dataset_split(now_ms),
         "role": ROLE,
         "execution_authority": False,
     }
@@ -335,6 +353,7 @@ def _update_event(event, price, now_ms=None):
         key = str(int(target))
         if key not in hits and ret >= target:
             hits[key] = now_ms
+            event.setdefault("mae_at_target", {})[key] = _f(event.get("mae_pct"))
 
     stop = _f(event.get("stop_price"))
     if not int(event.get("stop_hit_ms") or 0) and stop > 0 and price <= stop:
@@ -370,12 +389,21 @@ def _target_before_stop(event, target):
     return None
 
 
+def _clean_target_before_stop(event, target):
+    result = _target_before_stop(event, target)
+    if result is not True:
+        return result
+    key = str(int(target))
+    mae_at_hit = _f((event.get("mae_at_target") or {}).get(key), _f(event.get("mae_pct")))
+    return mae_at_hit >= -CLEAN_MAE_PCT
+
+
 def _blank_stat():
     return {
         "n": 0,
         "stop_first": 0,
         "targets": {
-            str(int(t)): {"win": 0, "loss": 0}
+            str(int(t)): {"win": 0, "loss": 0, "clean_win": 0, "clean_loss": 0}
             for t in TARGETS
         },
     }
@@ -390,12 +418,14 @@ def _stat(key):
 
 
 def _apply_resolution(event):
-    keys = [
+    split = str(event.get("dataset_split") or "TRAIN")
+    base_keys = [
         "GLOBAL",
         f"SETUP::{event.get('setup')}",
         f"CLASS::{event.get('signal_class')}",
         f"COHORT::{event.get('cohort')}",
     ]
+    keys = list(base_keys) + [f"SPLIT::{split}::{key}" for key in base_keys]
     for blocker in list((event.get("features") or {}).get("blockers") or [])[:16]:
         keys.append(f"BLOCKER::{blocker}")
 
@@ -407,11 +437,16 @@ def _apply_resolution(event):
         for target in TARGETS:
             tkey = str(int(target))
             result = _target_before_stop(event, target)
-            bucket = row["targets"].setdefault(tkey, {"win": 0, "loss": 0})
+            bucket = row["targets"].setdefault(tkey, {"win": 0, "loss": 0, "clean_win": 0, "clean_loss": 0})
             if result is True:
                 bucket["win"] = int(bucket.get("win") or 0) + 1
             elif result is False:
                 bucket["loss"] = int(bucket.get("loss") or 0) + 1
+            clean = _clean_target_before_stop(event, target)
+            if clean is True:
+                bucket["clean_win"] = int(bucket.get("clean_win") or 0) + 1
+            elif clean is False:
+                bucket["clean_loss"] = int(bucket.get("clean_loss") or 0) + 1
 
 
 def _posterior(win, loss):
@@ -437,7 +472,7 @@ def _posterior(win, loss):
         "probability": round(p, 4),
         "ci95": [round(lo, 4), round(hi, 4)],
         "confidence": confidence,
-        "qualified_for_70pct_claim": bool(n >= 300 and lo >= 0.70),
+        "qualified_for_70pct_claim": bool(n >= MIN_70_TOTAL_SAMPLES and lo >= 0.70),
     }
 
 
@@ -449,10 +484,16 @@ def _calibration(key):
         "samples": int(row.get("n") or 0),
         "stop_first": int(row.get("stop_first") or 0),
         "targets": {
-            f"plus_{int(target)}_before_stop": _posterior(
-                (targets.get(str(int(target))) or {}).get("win"),
-                (targets.get(str(int(target))) or {}).get("loss"),
-            )
+            f"plus_{int(target)}_before_stop": {
+                **_posterior(
+                    (targets.get(str(int(target))) or {}).get("win"),
+                    (targets.get(str(int(target))) or {}).get("loss"),
+                ),
+                "clean_entry": _posterior(
+                    (targets.get(str(int(target))) or {}).get("clean_win"),
+                    (targets.get(str(int(target))) or {}).get("clean_loss"),
+                ),
+            }
             for target in TARGETS
         },
     }
@@ -467,6 +508,34 @@ def _top(prefix, limit=8):
     return [_calibration(k) for k in keys[:limit]]
 
 
+def _validated_70_claim(key="GLOBAL", target=5.0, clean=True):
+    overall = _calibration(key)
+    test = _calibration(f"SPLIT::TEST::{key}")
+    name = f"plus_{int(target)}_before_stop"
+    overall_metric = (overall.get("targets") or {}).get(name) or {}
+    test_metric = (test.get("targets") or {}).get(name) or {}
+    if clean:
+        overall_metric = overall_metric.get("clean_entry") or {}
+        test_metric = test_metric.get("clean_entry") or {}
+    test_samples = int(test_metric.get("samples") or 0)
+    overall_samples = int(overall_metric.get("samples") or 0)
+    test_lo = _f((test_metric.get("ci95") or [0.0])[0])
+    overall_lo = _f((overall_metric.get("ci95") or [0.0])[0])
+    qualified = bool(
+        overall_samples >= MIN_70_TOTAL_SAMPLES
+        and test_samples >= MIN_70_TEST_SAMPLES
+        and overall_lo >= 0.70
+        and test_lo >= 0.70
+    )
+    return {
+        "qualified": qualified,
+        "target_pct": target,
+        "clean_entry_required": clean,
+        "overall": overall_metric,
+        "test": test_metric,
+    }
+
+
 def summary():
     return {
         "revision": REVISION,
@@ -478,13 +547,18 @@ def summary():
         "max_resolved_redis_budget": MAX_RESOLVED,
         "targets_pct": list(TARGETS),
         "horizons": list(HORIZONS_MS),
+        "clean_entry_mae_limit_pct": CLEAN_MAE_PCT,
+        "dataset_split_policy": "20-day time blocks: 14 TRAIN / 3 VALIDATION / 3 TEST",
         "global": _calibration("GLOBAL"),
+        "test_global": _calibration("SPLIT::TEST::GLOBAL"),
         "setup_calibration": _top("SETUP::"),
         "signal_class_calibration": _top("CLASS::"),
+        "test_setup_calibration": _top("SPLIT::TEST::SETUP::"),
         "blocker_outcomes": _top("BLOCKER::"),
+        "validated_70pct_clean_plus5": _validated_70_claim("GLOBAL", 5.0, True),
         "claim_policy": (
-            "70pct only when >=300 comparable resolved samples "
-            "and lower 95% confidence bound >=70%"
+            "70pct claim requires both overall and untouched TEST lower 95% "
+            "confidence bounds >=70%, with >= configured minimum samples"
         ),
         "last_error": _last_error,
         "generated_ms": _now_ms(),
@@ -681,11 +755,15 @@ async def supervisor_loop():
                 s = summary()
                 p5 = s["global"]["targets"]["plus_5_before_stop"]
                 p10 = s["global"]["targets"]["plus_10_before_stop"]
+                clean5 = p5.get("clean_entry") or {}
+                test5 = (s.get("test_global", {}).get("targets", {}).get("plus_5_before_stop", {}).get("clean_entry") or {})
                 print(
                     "Ψ-ML CALIBRATION "
                     f"open={len(_open)} resolvedRecent={len(_recent)} "
                     f"n5={p5['samples']} p5={100*_f(p5['probability']):.1f}% "
                     f"n10={p10['samples']} p10={100*_f(p10['probability']):.1f}% "
+                    f"clean5={100*_f(clean5.get('probability')):.1f}% "
+                    f"testN5={int(test5.get('samples') or 0)} testClean5={100*_f(test5.get('probability')):.1f}% "
                     f"new={created} resolvedNow={len(resolved_ids)} "
                     f"role={ROLE}",
                     flush=True,
