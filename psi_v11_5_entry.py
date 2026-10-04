@@ -1635,6 +1635,107 @@ def _prefetch_structure_worker_symbols(symbols):
         return 0
 
 
+def _structure_worker_payload_rows(symbol, interval):
+    bundle=_structure_worker_symbol_cache.get(str(symbol))
+    if not isinstance(bundle,dict):
+        return None
+    payload=bundle.get(str(interval))
+    if not isinstance(payload,dict):
+        return None
+    try:
+        fetched_ms=float(payload.get("fetched_ms") or 0.0)
+    except (TypeError,ValueError):
+        return None
+    age_s=(time.time()*1000.0-fetched_ms)/1000.0 if fetched_ms>0 else 999999.0
+    if age_s<0:
+        age_s=0.0
+    if age_s>STRUCTURE_WORKER_MAX_AGE_S:
+        return None
+    rows=payload.get("rows")
+    if not isinstance(rows,list) or len(rows)<_minimum_structure_rows(str(interval)):
+        return None
+    return rows
+
+
+def _structure_from_worker_cache(symbol):
+    """Build the exact legacy structure payload from prefetched worker candles.
+
+    No await/network path is involved, so recovery cannot be delayed by other
+    coroutine traffic once its batch starts.
+    """
+    symbol=str(symbol)
+    rows15=_structure_worker_payload_rows(symbol,"15m")
+    rows1=_structure_worker_payload_rows(symbol,"1h")
+    rows4=_structure_worker_payload_rows(symbol,"4h")
+    if not rows1 or not rows4 or not rows15:
+        _structure_tf_stats["worker_direct_miss"]=_structure_tf_stats.get("worker_direct_miss",0)+1
+        return None
+
+    m1=app.ma_snapshot(rows1 or [])
+    m4=app.ma_snapshot(rows4 or [])
+    if not m1 or not m4:
+        _structure_tf_stats["worker_direct_miss"]=_structure_tf_stats.get("worker_direct_miss",0)+1
+        return None
+
+    closed4=rows4[:-1]
+    highs4=[app.safe_float(r[2]) for r in closed4]
+    lows4=[app.safe_float(r[3]) for r in closed4]
+    vols4=[app.safe_float(r[5]) for r in closed4]
+    if not highs4 or not lows4 or not vols4:
+        return None
+    current=app.safe_float(rows4[-1][4])
+    volume4=app.safe_div(vols4[-1],app.average(vols4[-21:-1]),0.0)
+    closed15=rows15[:-1]
+    vols15=[app.safe_float(r[7]) for r in closed15]
+    if not vols15:
+        return None
+    volume15=app.safe_div(vols15[-1],app.average(vols15[-21:-1]),0.0)
+    recent_ranges=[highs4[i]-lows4[i] for i in range(max(0,len(highs4)-6),len(highs4))]
+    baseline_ranges=[highs4[i]-lows4[i] for i in range(max(0,len(highs4)-26),max(0,len(highs4)-6))]
+    compression_ratio=app.safe_div(app.average(recent_ranges),app.average(baseline_ranges),1.0)
+    compression=compression_ratio<=0.82
+    resistance_window=highs4[-21:-1]
+    resistance=max(resistance_window) if resistance_window else highs4[-1]
+    breakout_distance_pct=app.safe_div(resistance-current,current)*100.0
+    breakout_near=-0.6<=breakout_distance_pct<=app.BREAKOUT_NEAR_PCT
+    breakout=current>resistance
+    full_harmony=m1["bullish_stack"] and m4["bullish_stack"]
+    reclaim_regime=(m1["reclaim_path"] or m4["reclaim_path"]) and m1["improving_slope"] and m4["improving_slope"]
+    ma_regime=full_harmony or reclaim_regime
+    ma_support=m1["structural_support"] or m4["structural_support"]
+    dist50=app.safe_div(current-m4["ema50"],m4["atr14"])
+    dist200=app.safe_div(current-m4["ema200"],m4["atr14"])
+    anti_chase=dist50>app.ANTI_CHASE_ATR and dist200>app.ANTI_CHASE_ATR
+    confirmations=[]
+    if full_harmony: confirmations.append("FULL_1H_4H_MA_HARMONY")
+    if reclaim_regime: confirmations.append("MA_RECLAIM_REGIME")
+    if ma_support: confirmations.append("MA_SUPPORT")
+    if compression: confirmations.append("4H_COMPRESSION")
+    if breakout_near: confirmations.append("NEAR_RESISTANCE")
+    if breakout: confirmations.append("BREAKOUT")
+    if volume15>=1.20: confirmations.append("15M_VOLUME_ACCELERATION")
+    if volume4>=1.20: confirmations.append("4H_VOLUME_ACCELERATION")
+
+    _structure_tf_stats["worker_direct_hit"]=_structure_tf_stats.get("worker_direct_hit",0)+1
+    return {
+        "symbol":symbol,"price":current,"ma_1h":m1,"ma_4h":m4,
+        "ma_harmony":full_harmony,"ma_reclaim_regime":reclaim_regime,
+        "ma_regime":ma_regime,"structural_support":ma_support,
+        "ema50_1h":m1["ema50"],"ema200_1h":m1["ema200"],"sma50_1h":m1["sma50"],"sma200_1h":m1["sma200"],
+        "ema50_4h":m4["ema50"],"ema200_4h":m4["ema200"],"sma50_4h":m4["sma50"],"sma200_4h":m4["sma200"],
+        "atr14_1h":m1["atr14"],"atr14_4h":m4["atr14"],
+        "distance_ema50_atr":dist50,"distance_ema200_atr":dist200,
+        "ema50_near":m4["near"]["ema50"],"ema200_near":m4["near"]["ema200"],
+        "volume_acceleration":volume4,"volume_acceleration_15m":volume15,
+        "compression_ratio":compression_ratio,"compression":compression,
+        "resistance":resistance,"breakout_distance_pct":breakout_distance_pct,
+        "breakout_near":breakout_near,"breakout":breakout,"anti_chase":anti_chase,
+        "structure_confirmations":confirmations,
+        "quote_volume_24h":app.symbol_meta.get(symbol,{}).get("quote_volume_24h",0.0),
+        "updated_ms":app.now_ms(),
+    }
+
+
 def _interval_ms(interval):
     return {"15m":900000,"1h":3600000,"4h":14400000}.get(str(interval),0)
 
@@ -3723,24 +3824,27 @@ async def _hydrate_one(sym, lane="FAST"):
         if app.session is None or app.session.closed:
             raise RuntimeError("shared REST session unavailable")
         client=app.session
-        owner_token=_structure_owner_ctx.set(True)
-        rest_token=None
-        try:
-            # Normal FAST recovery remains WS-API first. Watchdog rescue has an
-            # independent direct-REST lane so a stalled WS kline route cannot
-            # consume the entire 120s structure-freshness budget.
-            if lane=="WATCHDOG_REST":
-                rest_token=_structure_watchdog_rest_ctx.set(True)
-                timeout_s=14.0
-            elif lane=="WATCHDOG":
-                timeout_s=28.0
-            else:
-                timeout_s=32.0 if lane=="FAST" else 32.0
-            sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=timeout_s)
-        finally:
-            if rest_token is not None:
-                _structure_watchdog_rest_ctx.reset(rest_token)
-            _structure_owner_ctx.reset(owner_token)
+        if STRUCTURE_WORKER_MODE:
+            # Batch prefetch has already loaded all three timeframes. Build the
+            # exact structure payload locally without yielding the event loop.
+            sd=_structure_from_worker_cache(sym)
+        else:
+            owner_token=_structure_owner_ctx.set(True)
+            rest_token=None
+            try:
+                # Legacy fallback only when distributed structure is disabled.
+                if lane=="WATCHDOG_REST":
+                    rest_token=_structure_watchdog_rest_ctx.set(True)
+                    timeout_s=14.0
+                elif lane=="WATCHDOG":
+                    timeout_s=28.0
+                else:
+                    timeout_s=32.0 if lane=="FAST" else 32.0
+                sd=await asyncio.wait_for(app.load_structure(client,sym),timeout=timeout_s)
+            finally:
+                if rest_token is not None:
+                    _structure_watchdog_rest_ctx.reset(rest_token)
+                _structure_owner_ctx.reset(owner_token)
         if not isinstance(sd,dict):
             raise RuntimeError("structure payload incomplete")
         app.structure[sym]=sd
@@ -3860,6 +3964,7 @@ async def structure_recovery_loop():
                 f"workerReqMiss={_structure_tf_stats['worker_required_miss']} "
                 f"prefetch={prefetched}/{_structure_tf_stats.get('worker_prefetch_ms',0)}ms "
                 f"prefetchOK={_structure_tf_stats.get('worker_prefetch_ok',0)} prefetchFail={_structure_tf_stats.get('worker_prefetch_fail',0)} "
+                f"direct={_structure_tf_stats.get('worker_direct_hit',0)}/{_structure_tf_stats.get('worker_direct_miss',0)} "
                 f"workerErr={str(_structure_tf_stats.get('worker_last_error','-'))[:80]} "
                 f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} reuse={_structure_tf_stats['bar_reuse']} "
                 f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
