@@ -49,6 +49,80 @@ INTEGRITY_RISK_MAX_AGE_S = float(os.environ.get("PSI_INTEGRITY_RISK_MAX_AGE_S", 
 INTEGRITY_CACHE_TTL_S = float(os.environ.get("PSI_INTEGRITY_CACHE_TTL_S", "0.25"))
 _integrity_cache = {}
 
+EXTENSION_REDIS_URL = os.environ.get("REDIS_URL","").strip()
+EXTENSION_SNAPSHOT_KEY = os.environ.get("PSI_EXTENSION_SNAPSHOT_KEY","psi:v12:extension-snapshot").strip()
+EXTENSION_SNAPSHOT_MAX_AGE_S = max(5.0,float(os.environ.get("PSI_EXTENSION_SNAPSHOT_MAX_AGE_S","15")))
+_extension_sync_client = None
+_extension_sync_last_mono = 0.0
+_extension_sync_stats = {"ok":0,"miss":0,"stale":0,"error":0,"last_error":"","last_symbols":0}
+
+
+def _refresh_extension_from_redis(force=False):
+    global _extension_sync_client,_extension_sync_last_mono
+    if not EXTENSION_REDIS_URL:
+        return 0
+    now_mono=time.monotonic()
+    if not force and now_mono-_extension_sync_last_mono<0.75:
+        return len(getattr(extrest,"ext_cache",{}) or {})
+    try:
+        if _extension_sync_client is None:
+            _extension_sync_client=redis_sync.from_url(
+                EXTENSION_REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=0.5,
+                socket_timeout=0.5,
+                health_check_interval=15,
+            )
+        raw=_extension_sync_client.get(EXTENSION_SNAPSHOT_KEY)
+        _extension_sync_last_mono=now_mono
+        if not raw:
+            _extension_sync_stats["miss"]+=1
+            return 0
+        snap=json.loads(raw)
+        if not isinstance(snap,dict):
+            _extension_sync_stats["miss"]+=1
+            return 0
+        generated_ms=int(snap.get("generated_ms") or 0)
+        age_s=(time.time()*1000.0-generated_ms)/1000.0 if generated_ms>0 else 999999.0
+        if age_s<0:
+            age_s=0.0
+        if age_s>EXTENSION_SNAPSHOT_MAX_AGE_S:
+            _extension_sync_stats["stale"]+=1
+            return 0
+        rows=snap.get("rows") or []
+        if not isinstance(rows,list) or not rows:
+            _extension_sync_stats["miss"]+=1
+            return 0
+        n=extrest.v71._mini_ingest(rows,"REDIS_24HR_MINI")
+        if n>0:
+            extrest.v71.radar_mini_connected=True
+            extrest.v71.mini_source="REDIS_24HR_MINI"
+            extrest.sync_extension_from_ws()
+            _extension_sync_stats["ok"]+=1
+            _extension_sync_stats["last_symbols"]=n
+            return n
+        _extension_sync_stats["miss"]+=1
+        return 0
+    except Exception as exc:
+        _extension_sync_stats["error"]+=1
+        _extension_sync_stats["last_error"]=f"{type(exc).__name__}: {exc}"
+        _extension_sync_last_mono=now_mono
+        try:
+            if _extension_sync_client is not None:
+                _extension_sync_client.close()
+        except Exception:
+            pass
+        _extension_sync_client=None
+        return 0
+
+
+_legacy_extension_status = extrest._rest_status
+def _extension_status_with_redis(symbol):
+    _refresh_extension_from_redis()
+    return _legacy_extension_status(symbol)
+extrest._rest_status = _extension_status_with_redis
+
 _discovery_cycle = 0
 _discovery_cursor = 0
 _discovery_last_seen = {}
@@ -4092,7 +4166,9 @@ async def cold_seed_loop():
 
 
 async def _watchdog_refresh_extension():
-    n=extrest.sync_extension_from_ws()
+    n=_refresh_extension_from_redis(force=True)
+    if n<=0:
+        n=extrest.sync_extension_from_ws()
     if n<=0:
         try:
             fallback=getattr(getattr(extrest,"v71",None),"_mini_rest_snapshot",None)
@@ -4375,7 +4451,11 @@ async def watchdog_loop():
                 except Exception as exc:
                     watchdog_stats["errors"]+=1
                     actions.append("EXT_REFRESH_FAIL")
-                    print(f"Ψ-WATCHDOG ERROR EXT_REFRESH {type(exc).__name__}: {exc}",flush=True)
+                    print(
+                        f"Ψ-WATCHDOG ERROR EXT_REFRESH {type(exc).__name__}: {exc} "
+                        f"redisExt={_extension_sync_stats}",
+                        flush=True,
+                    )
 
             # Seed expansion is non-blocking. FAST recovery owns all stale
             # already-seeded structure; Watchdog only schedules one missing
