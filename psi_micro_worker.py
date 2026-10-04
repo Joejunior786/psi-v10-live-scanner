@@ -461,10 +461,20 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
         timeout=timeout,
         max_msg_size=4 * 1024 * 1024,
     ) as ws:
+        # Keep a raw /ws connection so subscriptions can change in place, but
+        # request combined envelopes so partial-depth packets retain their
+        # stream name/symbol. Trade events already include s; depth20 does not
+        # reliably include it without the combined wrapper.
+        await ws.send_json({
+            "method":"SET_PROPERTY",
+            "params":["combined",True],
+            "id":request_id,
+        })
+        request_id+=1
         request_id=await _subscription_change(ws,"SUBSCRIBE",active,request_id)
         print(
             f"PSI-DISTRIBUTED-MICRO connected role={ROLE} symbols={len(active)} "
-            f"host={host} mode=INCREMENTAL",
+            f"host={host} mode=INCREMENTAL combined=YES",
             flush=True,
         )
         await publish_heartbeat(r, sorted(active), events, host)
