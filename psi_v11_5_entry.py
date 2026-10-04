@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.92-bounded-direct-micro-stream"
+VERSION="11.0.5.93-strict-rest-micro-priority"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -168,6 +168,10 @@ _direct_micro_stats={
     "last_trade_ms":0,"last_depth_ms":0,"last_core":"",
 }
 _direct_micro_last_core=()
+_strict_rest_stats={
+    "cycles":0,"trade_ok":0,"trade_miss":0,"depth_ok":0,"depth_miss":0,
+    "timeouts":0,"errors":0,"last_core":"",
+}
 _micro_rest_stats={
     "trade_ok":0,"trade_fail":0,"trade_host":"-",
     "depth_ok":0,"depth_fail":0,"depth_host":"-",
@@ -4862,6 +4866,9 @@ async def ws_api_micro_log_loop():
                 f"parallelOK={_micro_rest_stats.get('trade_parallel_symbols_ok',0)}/{_micro_rest_stats.get('depth_parallel_symbols_ok',0)} "
                 f"direct={_direct_micro_stats.get('trade_accepted',0)}/{_direct_micro_stats.get('depth_accepted',0)} "
                 f"directErr={_direct_micro_stats.get('errors',0)} "
+                f"strictREST={_strict_rest_stats.get('trade_ok',0)}/{_strict_rest_stats.get('depth_ok',0)} "
+                f"strictMiss={_strict_rest_stats.get('trade_miss',0)}/{_strict_rest_stats.get('depth_miss',0)} "
+                f"strictTO={_strict_rest_stats.get('timeouts',0)} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -4876,6 +4883,73 @@ async def ws_api_micro_log_loop():
             )
         except Exception as exc:
             print(f"Ψ-WSAPI MICRO-LOG ERROR {type(exc).__name__}: {exc}",flush=True)
+
+
+async def strict_rest_micro_bridge_loop():
+    """Prioritise the tiny strict execution core on the proven REST fallback.
+
+    Uses the existing tape._rest_fetch_agg/_rest_fetch_depth functions, which
+    already feed canonical app micro validators. This changes scheduling only.
+    """
+    while True:
+        try:
+            await asyncio.sleep(1.0)
+            core=list(_micro_fallback_core_symbols())[:MICRO_FALLBACK_CORE_SIZE]
+            if not core:
+                continue
+            _strict_rest_stats["cycles"]+=1
+            _strict_rest_stats["last_core"]=",".join(core)
+
+            async def one(sym):
+                agg_task=asyncio.create_task(tape._rest_fetch_agg(sym))
+                depth_task=asyncio.create_task(tape._rest_fetch_depth(sym))
+                agg=0
+                dep=0
+                try:
+                    agg,dep=await asyncio.wait_for(
+                        asyncio.gather(agg_task,depth_task,return_exceptions=True),
+                        timeout=6.0,
+                    )
+                except asyncio.TimeoutError:
+                    _strict_rest_stats["timeouts"]+=1
+                    for task in (agg_task,depth_task):
+                        if not task.done():
+                            task.cancel()
+                    return 0,0
+                except Exception:
+                    _strict_rest_stats["errors"]+=1
+                    return 0,0
+
+                agg=agg if isinstance(agg,int) else 0
+                dep=dep if isinstance(dep,int) else 0
+                now_ms=int(time.time()*1000)
+
+                if agg>0:
+                    _strict_rest_stats["trade_ok"]+=1
+                    _ws_market_stats["last_trade_ms"]=now_ms
+                    _ws_market_stats["trade_rows"]+=agg
+                else:
+                    _strict_rest_stats["trade_miss"]+=1
+
+                if dep>0:
+                    _strict_rest_stats["depth_ok"]+=1
+                    _ws_market_stats["last_depth_ms"]=now_ms
+                    _ws_market_stats["depth_ok"]+=dep
+                else:
+                    _strict_rest_stats["depth_miss"]+=1
+
+                return agg,dep
+
+            await asyncio.gather(*(one(sym) for sym in core),return_exceptions=True)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _strict_rest_stats["errors"]+=1
+            print(
+                f"Ψ-STRICT-REST ERROR {type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
 
 async def direct_strict_micro_stream_loop():
@@ -5295,6 +5369,6 @@ async def main():
         try: mod.VERSION=VERSION
         except Exception: pass
     print("[v11.0.5.90] Ψ PARALLEL TRADE FAILOVER RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), direct_strict_micro_stream_loop())
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), direct_strict_micro_stream_loop(), strict_rest_micro_bridge_loop())
 
 if __name__=="__main__":asyncio.run(main())
