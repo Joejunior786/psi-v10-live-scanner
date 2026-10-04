@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.98-prewarmed-strict-rest"
+VERSION="11.0.5.99-sticky-prewarmed-rest"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -188,7 +188,7 @@ def _strict_micro_session():
             timeout=aiohttp.ClientTimeout(total=5.0,connect=1.4,sock_read=2.5),
             connector=aiohttp.TCPConnector(
                 limit=10,
-                limit_per_host=4,
+                limit_per_host=2,
                 ttl_dns_cache=300,
                 keepalive_timeout=60,
                 family=2,
@@ -4935,11 +4935,11 @@ async def strict_micro_transport_warmup_loop():
 
             session=_strict_micro_session()
             preferred=str(_strict_rest_stats.get("warm_host") or "")
-            ordered=([preferred] if preferred in hosts else []) + [
-                h for h in hosts if h!=preferred
-            ]
-            host=ordered[cursor % len(ordered)]
-            cursor=(cursor+1)%len(ordered)
+            if preferred in hosts:
+                host=preferred
+            else:
+                host=hosts[cursor % len(hosts)]
+                cursor=(cursor+1)%len(hosts)
             short=host.replace("https://","").split(".")[0]
             try:
                 async with session.get(
@@ -4951,17 +4951,22 @@ async def strict_micro_transport_warmup_loop():
                         payload=await resp.json(content_type=None)
                         if isinstance(payload,dict) and f(payload.get("bidPrice"))>0 and f(payload.get("askPrice"))>0:
                             _strict_rest_stats["warm_host"]=host
+                            _strict_rest_stats["warm_last"]=time.time()
                             _strict_rest_stats["warm_ok"]=_strict_rest_stats.get("warm_ok",0)+1
                             _strict_rest_stats["warm_diag"]=f"{short}:OK"
                             continue
                     body=(await resp.text())[:60].replace("\n"," ")
                     _strict_rest_stats["warm_fail"]=_strict_rest_stats.get("warm_fail",0)+1
                     _strict_rest_stats["warm_diag"]=f"{short}:HTTP{resp.status}:{body}"
+                    if str(_strict_rest_stats.get("warm_host") or "")==host:
+                        _strict_rest_stats["warm_host"]=""
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 _strict_rest_stats["warm_fail"]=_strict_rest_stats.get("warm_fail",0)+1
                 _strict_rest_stats["warm_diag"]=f"{short}:{type(exc).__name__}"
+                if str(_strict_rest_stats.get("warm_host") or "")==host:
+                    _strict_rest_stats["warm_host"]=""
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4997,7 +5002,10 @@ async def strict_rest_micro_bridge_loop():
         # every cycle, while keeping total request fan-out bounded.
         n=len(hosts)
         preferred=str(_strict_rest_stats.get("warm_host") or "")
-        if preferred in hosts:
+        warm_age=time.time()-f(_strict_rest_stats.get("warm_last"),0.0)
+        if preferred in hosts and warm_age<=7.0:
+            pair=(preferred,)
+        elif preferred in hosts:
             fallback=next(
                 (h for h in hosts[host_cursor:]+hosts[:host_cursor] if h!=preferred),
                 hosts[(hosts.index(preferred)+1)%n],
