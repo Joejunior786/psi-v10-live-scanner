@@ -1583,6 +1583,58 @@ async def _structure_worker_rows(symbol, interval):
     return rows
 
 
+def _prefetch_structure_worker_symbols(symbols):
+    """Bulk-load all three structure packets for a recovery batch in one Redis MGET."""
+    global _structure_worker_sync
+    syms=[str(s) for s in symbols if s]
+    if not STRUCTURE_WORKER_MODE or not syms:
+        return 0
+    try:
+        if _structure_worker_sync is None:
+            _structure_worker_sync = redis_sync.from_url(
+                STRUCTURE_WORKER_REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=1.5,
+                socket_timeout=1.5,
+                health_check_interval=15,
+                max_connections=32,
+            )
+        keys=[]
+        mapping=[]
+        for sym in syms:
+            for tf in ("15m","1h","4h"):
+                keys.append(f"{STRUCTURE_WORKER_REDIS_PREFIX}:{sym}:{tf}")
+                mapping.append((sym,tf))
+        started=time.time()
+        raws=_structure_worker_sync.mget(keys)
+        loaded_at=time.time()
+        bundles={sym:{"_loaded":loaded_at} for sym in syms}
+        for (sym,tf),raw in zip(mapping,raws or []):
+            if not raw:
+                bundles[sym][tf]=None
+                continue
+            try:
+                bundles[sym][tf]=json.loads(raw)
+            except Exception:
+                bundles[sym][tf]=None
+        _structure_worker_symbol_cache.update(bundles)
+        _structure_tf_stats["worker_prefetch_ok"]=_structure_tf_stats.get("worker_prefetch_ok",0)+1
+        _structure_tf_stats["worker_prefetch_symbols"]=_structure_tf_stats.get("worker_prefetch_symbols",0)+len(syms)
+        _structure_tf_stats["worker_prefetch_ms"]=round((time.time()-started)*1000.0,1)
+        return len(syms)
+    except Exception as exc:
+        _structure_tf_stats["worker_prefetch_fail"]=_structure_tf_stats.get("worker_prefetch_fail",0)+1
+        _structure_tf_stats["worker_last_error"]=f"PREFETCH {type(exc).__name__}: {exc}"
+        try:
+            if _structure_worker_sync is not None:
+                _structure_worker_sync.close()
+        except Exception:
+            pass
+        _structure_worker_sync=None
+        return 0
+
+
 def _interval_ms(interval):
     return {"15m":900000,"1h":3600000,"4h":14400000}.get(str(interval),0)
 
@@ -3793,6 +3845,7 @@ async def structure_recovery_loop():
         if targets:
             batch=targets[:RECOVERY_BATCH]
             batch_started=time.time()
+            prefetched=_prefetch_structure_worker_symbols(batch) if STRUCTURE_WORKER_MODE else 0
             results=await asyncio.gather(*[_hydrate_one(s,"FAST") for s in batch])
             batch_s=time.time()-batch_started
             fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
@@ -3805,6 +3858,8 @@ async def structure_recovery_loop():
                 f"tfCache={_structure_tf_stats['cache_hit']} rawHit={_structure_tf_stats['raw_hit']} "
                 f"worker={_structure_tf_stats['worker_hit']}/{_structure_tf_stats['worker_miss']}/{_structure_tf_stats['worker_stale']}/{_structure_tf_stats['worker_error']} "
                 f"workerReqMiss={_structure_tf_stats['worker_required_miss']} "
+                f"prefetch={prefetched}/{_structure_tf_stats.get('worker_prefetch_ms',0)}ms "
+                f"prefetchOK={_structure_tf_stats.get('worker_prefetch_ok',0)} prefetchFail={_structure_tf_stats.get('worker_prefetch_fail',0)} "
                 f"workerErr={str(_structure_tf_stats.get('worker_last_error','-'))[:80]} "
                 f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} reuse={_structure_tf_stats['bar_reuse']} "
                 f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
