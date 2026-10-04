@@ -3950,7 +3950,15 @@ async def structure_recovery_loop():
             batch=targets[:RECOVERY_BATCH]
             batch_started=time.time()
             prefetched=_prefetch_structure_worker_symbols(batch) if STRUCTURE_WORKER_MODE else 0
-            results=await asyncio.gather(*[_hydrate_one(s,"FAST") for s in batch])
+            if STRUCTURE_WORKER_MODE:
+                # Redis packets are already prefetched and _hydrate_one has no
+                # network awaits in worker mode. Execute inline so a busy event
+                # loop cannot delay the eight cache-only hydrations by 10-20s.
+                results=[]
+                for s in batch:
+                    results.append(await _hydrate_one(s,"FAST"))
+            else:
+                results=await asyncio.gather(*[_hydrate_one(s,"FAST") for s in batch])
             batch_s=time.time()-batch_started
             fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
             ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
@@ -4253,7 +4261,12 @@ async def _watchdog_structure_rescue(scope, fresh_cov):
     recovery_stats["rescue_cycles"]+=1
     started=time.time()
     before={sym:_raw_seed_count(sym) for sym in chosen}
-    results=await asyncio.gather(*[_hydrate_one(sym,lane) for sym in chosen])
+    if STRUCTURE_WORKER_MODE:
+        results=[]
+        for sym in chosen:
+            results.append(await _hydrate_one(sym,lane))
+    else:
+        results=await asyncio.gather(*[_hydrate_one(sym,lane) for sym in chosen])
     after={sym:_raw_seed_count(sym) for sym in chosen}
     ok=sum(x is True for x in results)
     fail=len(chosen)-ok
