@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.94-bounded-strict-rest-race"
+VERSION="11.0.5.95-strict-rest-diagnostics"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -171,6 +171,7 @@ _direct_micro_last_core=()
 _strict_rest_stats={
     "cycles":0,"trade_ok":0,"trade_miss":0,"depth_ok":0,"depth_miss":0,
     "timeouts":0,"errors":0,"last_core":"",
+    "trade_diag":"-","depth_diag":"-",
 }
 _micro_rest_stats={
     "trade_ok":0,"trade_fail":0,"trade_host":"-",
@@ -4869,6 +4870,7 @@ async def ws_api_micro_log_loop():
                 f"strictREST={_strict_rest_stats.get('trade_ok',0)}/{_strict_rest_stats.get('depth_ok',0)} "
                 f"strictMiss={_strict_rest_stats.get('trade_miss',0)}/{_strict_rest_stats.get('depth_miss',0)} "
                 f"strictTO={_strict_rest_stats.get('timeouts',0)} "
+                f"strictDiag={_strict_rest_stats.get('trade_diag','-')}|{_strict_rest_stats.get('depth_diag','-')} "
                 f"microDepthFB={_micro_rest_stats['depth_micro_ws_ok']}/{_micro_rest_stats['depth_micro_ws_fail']} "
                 f"tradeBudgetTO={_micro_rest_stats['trade_budget_timeout']} "
                 f"depthBudgetTO={_micro_rest_stats['depth_budget_timeout']} "
@@ -4915,6 +4917,7 @@ async def strict_rest_micro_bridge_loop():
         host_cursor=(host_cursor+1) % n
 
         async def fetch_one(host):
+            short=host.replace("https://","").split(".")[0]
             try:
                 async with app.session.get(
                     f"{host}{path}",
@@ -4922,10 +4925,15 @@ async def strict_rest_micro_bridge_loop():
                     timeout=aiohttp.ClientTimeout(total=2.35,connect=.85,sock_read=1.65),
                 ) as resp:
                     if resp.status!=200:
-                        return host,None
-                    payload=await resp.json(content_type=None)
+                        body=(await resp.text())[:80].replace("\n"," ")
+                        return host,None,f"{short}:HTTP{resp.status}:{body}"
+                    try:
+                        payload=await resp.json(content_type=None)
+                    except Exception as exc:
+                        return host,None,f"{short}:JSON:{type(exc).__name__}"
                     if kind=="trade":
                         valid=isinstance(payload,list) and bool(payload)
+                        shape=f"list:{len(payload)}" if isinstance(payload,list) else type(payload).__name__
                     else:
                         valid=(
                             isinstance(payload,dict)
@@ -4933,11 +4941,15 @@ async def strict_rest_micro_bridge_loop():
                             and bool(payload.get("asks"))
                             and int(payload.get("lastUpdateId") or 0)>0
                         )
-                    return host,payload if valid else None
+                        shape=(
+                            f"depth:{len(payload.get('bids') or [])}/{len(payload.get('asks') or [])}"
+                            if isinstance(payload,dict) else type(payload).__name__
+                        )
+                    return host,(payload if valid else None),f"{short}:HTTP200:{shape}"
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                return host,None
+            except Exception as exc:
+                return host,None,f"{short}:{type(exc).__name__}"
 
         tasks={asyncio.create_task(fetch_one(host)) for host in pair}
         pending=set(tasks)
@@ -4958,11 +4970,13 @@ async def strict_rest_micro_bridge_loop():
                     break
                 for task in done:
                     try:
-                        host,payload=task.result()
+                        host,payload,diag=task.result()
+                        _strict_rest_stats[f"{kind}_diag"]=diag
                     except asyncio.CancelledError:
                         raise
                     except Exception:
-                        host,payload=None,None
+                        host,payload,diag=None,None,f"task:{type(exc).__name__}"
+                        _strict_rest_stats[f"{kind}_diag"]=diag
                     if payload is not None:
                         winner=payload
                         winner_host=host
