@@ -7,6 +7,8 @@ import statistics
 import time
 from collections import defaultdict
 
+import redis.asyncio as redis_async
+
 import psi_v11_5_entry as legacy
 
 app = legacy.app
