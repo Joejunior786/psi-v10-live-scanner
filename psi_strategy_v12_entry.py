@@ -2977,6 +2977,8 @@ async def redis_micro_ingest_loop():
                             except (TypeError, ValueError):
                                 event_ms = int(now * 1000)
                             stamp = event_ms / 1000.0
+                            tape.tape_stats["distributed_event_ms"] = event_ms
+                            tape.tape_stats["distributed_event_skew_ms"] = int(time.time() * 1000) - event_ms
                             if stamp >= now - float(getattr(tape, "WINDOW", 35.0)) - 5.0:
                                 try:
                                     aid = int(data.get("a", -1))
