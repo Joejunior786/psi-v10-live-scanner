@@ -1500,7 +1500,7 @@ _structure_tf_stats = {
     "cache_hit":0,"fetch_ok":0,"retry_ok":0,"fail":0,
     "raw_load":0,"raw_save":0,"raw_hit":0,"incremental_ok":0,"full_seed":0,"ws_refresh":0,"bar_reuse":0,
     "watchdog_rest_ok":0,"watchdog_rest_fail":0,
-    "worker_hit":0,"worker_miss":0,"worker_stale":0,"worker_error":0,
+    "worker_hit":0,"worker_miss":0,"worker_stale":0,"worker_error":0,"worker_required_miss":0,
 }
 
 def _raw_key(symbol, interval, limit):
@@ -1517,12 +1517,13 @@ async def _structure_worker_rows(symbol, interval):
                 STRUCTURE_WORKER_REDIS_URL,
                 encoding="utf-8",
                 decode_responses=True,
-                socket_connect_timeout=0.25,
-                socket_timeout=0.25,
+                socket_connect_timeout=1.2,
+                socket_timeout=1.2,
                 health_check_interval=15,
+                max_connections=64,
             )
         key=f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:{interval}"
-        raw=await asyncio.wait_for(_structure_worker_redis.get(key),timeout=0.30)
+        raw=await asyncio.wait_for(_structure_worker_redis.get(key),timeout=1.5)
         if not raw:
             _structure_tf_stats["worker_miss"]+=1
             return None
@@ -1998,6 +1999,13 @@ async def _structure_resilient_load_klines(client, symbol, interval, limit):
             _structure_tf_cache[key]=(time.time(),reusable)
             _structure_tf_stats["bar_reuse"]+=1
             return reusable
+
+    # In distributed structure mode the Railway workers are the sole owner of
+    # historical/catch-up Binance I/O. Never let a Redis miss push the decision
+    # service back into slow 15-32s WS/REST fallbacks; fail closed and retry.
+    if STRUCTURE_WORKER_MODE:
+        _structure_tf_stats["worker_required_miss"]+=1
+        return None
 
     async with _structure_symbol_gate(symbol,interval):
         cached=_structure_tf_cache.get(key)
@@ -3253,7 +3261,7 @@ RECOVERY_STALE_S = INTEGRITY_STRUCTURE_MAX_AGE_S
 recovery_stats = {"passes":0,"ok":0,"fail":0,"fast_ok":0,"fast_fail":0,"seed_ok":0,"seed_fail":0,"seed_cycles":0,"rescue_ok":0,"rescue_fail":0,"rescue_cycles":0,"rescue_stale_ok":0,"rescue_stale_fail":0,"rescue_seed_ok":0,"rescue_seed_fail":0,"route_resets":0,"pool_kicks":0,"ext_ok":0,"ext_err":0,"cache_load":0,"cache_save":0}
 _recovery_retry_after = {}
 _recovery_inflight = set()
-RECOVERY_FAIL_COOLDOWN_S = 20.0
+RECOVERY_FAIL_COOLDOWN_S = 3.0 if STRUCTURE_WORKER_MODE else 20.0
 COLD_SEED_SLEEP_S = 2.0
 COLD_SEED_BACKOFF_S = 35.0
 COLD_SEED_REST_QUIET_S = 12.0
@@ -3749,6 +3757,8 @@ async def structure_recovery_loop():
                 f"batchSec={batch_s:.2f} ok={recovery_stats['ok']} fail={recovery_stats['fail']} "
                 f"structHosts={sorted({str(_rest_good_host.get('structure_klines:'+s,'-')).replace('https://','') for s in batch})} "
                 f"tfCache={_structure_tf_stats['cache_hit']} rawHit={_structure_tf_stats['raw_hit']} "
+                f"worker={_structure_tf_stats['worker_hit']}/{_structure_tf_stats['worker_miss']}/{_structure_tf_stats['worker_stale']}/{_structure_tf_stats['worker_error']} "
+                f"workerReqMiss={_structure_tf_stats['worker_required_miss']} "
                 f"incOK={_structure_tf_stats['incremental_ok']} seed={_structure_tf_stats['full_seed']} reuse={_structure_tf_stats['bar_reuse']} "
                 f"tfRetryOK={_structure_tf_stats['retry_ok']} tfFail={_structure_tf_stats['fail']}",
                 flush=True,
