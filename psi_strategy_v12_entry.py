@@ -17,7 +17,7 @@ q = legacy.q
 base = legacy.base
 tape = legacy.tape
 
-VERSION = "12.3.0-strict-buy-now-gate"
+VERSION = "12.3.4-strict-buy-now-gate"
 SCANNER_VERSION_ENV = os.getenv("PSI_SCANNER_VERSION", "").strip()
 APPROVED_SCANNER_VERSION = os.getenv("PSI_APPROVED_SCANNER_VERSION", VERSION).strip()
 STRATEGY_AUTHORITY = os.getenv("PSI_STRATEGY_AUTHORITY", "V12_ONLY").strip().upper()
@@ -3855,7 +3855,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.3.0] STRICT BUY NOW GATE + MULTI-SETUP AUTHORITY + BREADTH-FIRST FAST CORE {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.3.4] STRICT BUY NOW GATE + MULTI-SETUP AUTHORITY + BREADTH-FIRST FAST CORE {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
