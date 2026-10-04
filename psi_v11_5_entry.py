@@ -4795,13 +4795,13 @@ async def ws_api_micro_trade_loop():
                     qty=f(d.get("q"))
                     if event_ms<=0 or price<=0 or qty<=0:
                         continue
-                    last=max(last,aid)
                     stamp=event_ms/1000.0
                     if stamp<now2-tape.WINDOW-5:
                         continue
                     tape.trade_events[sym].append(
                         (stamp,price,price*qty,not bool(d.get("m")),event_ms)
                     )
+                    last=max(last,aid)
                     payload=dict(d)
                     payload["E"]=event_ms
                     app.process_agg_trade(sym,payload)
@@ -5953,13 +5953,13 @@ async def independent_market_feed_fallback_loop():
                         price=f(d.get("p")); qty=f(d.get("q"))
                         if event_ms<=0 or price<=0 or qty<=0:
                             continue
-                        last_id=max(last_id,aid)
                         stamp=event_ms/1000.0
                         if stamp<now-tape.WINDOW-5:
                             continue
                         tape.trade_events[sym].append(
                             (stamp,price,price*qty,not bool(d.get("m")),event_ms)
                         )
+                        last_id=max(last_id,aid)
                         payload=dict(d); payload["E"]=event_ms
                         if sym in set(getattr(app,"selected_micro_symbols",[]) or []):
                             try:
