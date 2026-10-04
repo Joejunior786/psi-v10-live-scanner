@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.23-latency-margin"
+VERSION = "12.2.24-breadth-first-fast-core"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1876,7 +1876,7 @@ async def _fetch_tf(sym, tf, deep=False):
     return False
 
 
-async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=False, weekly_deep=False):
+async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=False, weekly_deep=False, fast_single=False):
     now = time.time()
     ttl = ACTIVE_TF_TTL if active else TF_TTL
 
@@ -1926,6 +1926,13 @@ async def refresh_symbol(sym, sem, active=False, force_deep=False, weekly_only=F
     if not force_deep and not active:
         priority = {"1d": 0, "1h": 1, "4h": 2}
         needed.sort(key=lambda tf: priority.get(tf, 9))
+        if fast_single and needed:
+            # FAST_CORE is breadth-first. Each scheduled market gets one
+            # missing timeframe packet, then releases its universe slot. The
+            # bootstrap selector already prioritises 2/3-complete markets, so
+            # this converts partials quickly without increasing Binance load.
+            needed = needed[:1]
+            _stats["fast_single_jobs"] += 1
     for tf in needed:
         await one(tf, deep=(force_deep or active))
 
@@ -2253,7 +2260,8 @@ async def strategy_loop():
             # ---------------------------------------------------------------
             # PHASE A: FAST CORE
             # Complete 1H + 4H + Daily snapshots for the whole universe before
-            # spending bandwidth on deep/weekly/active refreshes.
+            # spending bandwidth on deep/weekly/active refreshes. Use one missing
+            # FAST timeframe per symbol per pass so six permits serve six markets.
             # ---------------------------------------------------------------
             if core_resolved < len(universe):
                 phase = "FAST_CORE"
@@ -2263,7 +2271,7 @@ async def strategy_loop():
                         break
                     if sym not in refresh_tasks:
                         refresh_tasks[sym] = asyncio.create_task(
-                            refresh_symbol(sym, sem, active=False)
+                            refresh_symbol(sym, sem, active=False, fast_single=True)
                         )
 
             # ---------------------------------------------------------------
@@ -2391,6 +2399,7 @@ async def strategy_loop():
                 f"mtfReady={ready_now}/{len(universe)} coreResolved={core_resolved}/{len(universe)} partial1={partial_1} partial2={partial_2} "f"deepMAReady={deep_ready}/{len(universe)} deepResolved={deep_resolved}/{len(universe)} "
                 f"weeklyReady={weekly_ready}/{len(universe)} weeklyDeep={weekly_deep_ready}/{len(universe)} "f"weeklyDeepResolved={weekly_deep_resolved}/{len(universe)} "
                 f"inFlight={len(refresh_tasks)}/{MAX_INFLIGHT_SYMBOLS} permits={FETCH_CONCURRENCY} "
+                f"fastSingle={_stats.get('fast_single_jobs',0)} "
                 f"fetchOK={_stats.get('fetch_ok', 0)} fastOK={_stats.get('fetch_fast_ok', 0)} "
                 f"deepOK={_stats.get('fetch_deep_ok', 0)} v11Reuse={_stats.get('fetch_v11_cache_ok',0)} "
                 f"v11Bulk={_stats.get('v11_imported',0)} restOK={_stats.get('rest_race_ok',0)} "
@@ -2537,7 +2546,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.22] MULTI-SETUP AUTHORITY + DIRECT LATE COMMIT {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.24] MULTI-SETUP AUTHORITY + BREADTH-FIRST FAST CORE {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
