@@ -36,8 +36,51 @@ REDIS_UNIVERSE_KEY = os.getenv("PSI_TAPE_UNIVERSE_KEY", "psi:v12:universe").stri
 REDIS_TAPE_TRADE_CHANNEL = "psi:v12:tape-trade"
 REDIS_TAPE_BOOK_CHANNEL = "psi:v12:tape-book"
 REDIS_TAPE_WORKERS = max(1, min(int(os.getenv("PSI_TAPE_WORKERS", "2")), 8))
+REDIS_TAPE_SNAPSHOT_PREFIX = os.getenv("PSI_TAPE_SNAPSHOT_PREFIX", "psi:v12:tape-snapshot").strip()
 _redis_bridge_stats = defaultdict(int)
 _redis_worker_health = {}
+_distributed_tape_metrics = {}
+_distributed_tape_snapshot_meta = {}
+_legacy_tape_metric = tape.tape_metric
+
+
+def _snapshot_tape_metric(symbol):
+    sym=str(symbol or "").upper()
+    legacy_metric=_legacy_tape_metric(sym) or {}
+    snap=_distributed_tape_metrics.get(sym)
+    if not isinstance(snap,dict):
+        return legacy_metric
+
+    now_ms=int(time.time()*1000)
+    generated_ms=int(snap.get("_snapshot_ms") or 0)
+    transport_age=max(0.0, float(now_ms-generated_ms)) if generated_ms>0 else 999999.0
+
+    out={k:v for k,v in snap.items() if not str(k).startswith("_")}
+    try:
+        snap_trade_age=float(out.get("age_ms",999999.0))
+    except (TypeError,ValueError):
+        snap_trade_age=999999.0
+    try:
+        snap_book_age=float(out.get("book_age_ms",999999.0))
+    except (TypeError,ValueError):
+        snap_book_age=999999.0
+
+    out["age_ms"]=snap_trade_age+transport_age
+    out["book_age_ms"]=snap_book_age+transport_age
+    out["snapshot_age_ms"]=transport_age
+    out["snapshot_source"]="DISTRIBUTED"
+    out["ready"]=bool(out.get("ready")) and out["age_ms"]<=1500.0 and transport_age<=2500.0
+
+    try:
+        legacy_age=float(legacy_metric.get("age_ms",999999.0))
+    except (TypeError,ValueError):
+        legacy_age=999999.0
+    if out["age_ms"] <= legacy_age:
+        return out
+    return legacy_metric
+
+
+tape.tape_metric = _snapshot_tape_metric
 
 
 def _version_lock_snapshot():
@@ -2877,26 +2920,76 @@ async def redis_control_loop():
 
                 tape_up = 0
                 now_ms = int(time.time() * 1000)
+                snapshot_symbols=0
+                snapshot_trade_ms=0
+                snapshot_book_ms=0
+                snapshot_trades=0
+                snapshot_books=0
                 for idx in range(REDIS_TAPE_WORKERS):
                     key = f"psi:v12:tape-worker:{idx}"
                     raw = await client.get(key)
-                    if not raw:
+                    if raw:
+                        try:
+                            hb = json.loads(raw)
+                        except Exception:
+                            hb = {"raw": raw}
+                        _redis_worker_health[f"tape{idx}"] = hb
+                        age = now_ms - int(hb.get("last_event_ms") or 0) if isinstance(hb, dict) else 999999
+                        if (
+                            isinstance(hb, dict)
+                            and int(hb.get("symbols") or 0) > 0
+                            and not str(hb.get("error") or "")
+                            and 0 <= age <= 15000
+                        ):
+                            tape_up += 1
+
+                    snap_raw=await client.get(f"{REDIS_TAPE_SNAPSHOT_PREFIX}:{idx}")
+                    if not snap_raw:
                         continue
                     try:
-                        hb = json.loads(raw)
+                        snap=json.loads(snap_raw)
                     except Exception:
-                        hb = {"raw": raw}
-                    _redis_worker_health[f"tape{idx}"] = hb
-                    age = now_ms - int(hb.get("last_event_ms") or 0) if isinstance(hb, dict) else 999999
-                    if (
-                        isinstance(hb, dict)
-                        and int(hb.get("symbols") or 0) > 0
-                        and not str(hb.get("error") or "")
-                        and 0 <= age <= 15000
-                    ):
-                        tape_up += 1
+                        continue
+                    if not isinstance(snap,dict):
+                        continue
+                    generated_ms=int(snap.get("generated_ms") or 0)
+                    snapshot_age=now_ms-generated_ms if generated_ms>0 else 999999
+                    _distributed_tape_snapshot_meta[idx]={
+                        "generated_ms":generated_ms,
+                        "age_ms":snapshot_age,
+                        "metric_symbols":int(snap.get("metric_symbols") or 0),
+                        "source_symbols":int(snap.get("source_symbols") or 0),
+                        "host":snap.get("host"),
+                    }
+                    if snapshot_age<0 or snapshot_age>15000:
+                        continue
+                    metrics=snap.get("metrics") or {}
+                    if not isinstance(metrics,dict):
+                        continue
+                    for sym,metric in metrics.items():
+                        if not isinstance(metric,dict):
+                            continue
+                        item=dict(metric)
+                        item["_snapshot_ms"]=generated_ms
+                        item["_snapshot_shard"]=idx
+                        _distributed_tape_metrics[str(sym).upper()]=item
+                    snapshot_symbols+=len(metrics)
+                    snapshot_trade_ms=max(snapshot_trade_ms,int(snap.get("last_trade_event_ms") or 0))
+                    snapshot_book_ms=max(snapshot_book_ms,int(snap.get("last_book_receipt_ms") or 0))
+                    snapshot_trades+=int(snap.get("trades") or 0)
+                    snapshot_books+=int(snap.get("books") or 0)
+
                 tape.tape_stats["distributed_shards_up"] = tape_up
                 _redis_bridge_stats["tape_workers_up"] = tape_up
+                _redis_bridge_stats["tape_snapshot_symbols"] = snapshot_symbols
+                _redis_bridge_stats["tape_snapshot_last_ms"] = now_ms
+                if snapshot_trade_ms>0:
+                    tape.tape_stats["distributed_last_trade_ms"]=snapshot_trade_ms
+                if snapshot_book_ms>0:
+                    tape.tape_stats["distributed_last_book_ms"]=snapshot_book_ms
+                tape.tape_stats["distributed_trades"]=snapshot_trades
+                tape.tape_stats["distributed_books"]=snapshot_books
+                tape.tape_stats["distributed_snapshot_symbols"]=snapshot_symbols
                 await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             raise
@@ -2928,14 +3021,12 @@ async def redis_micro_ingest_loop():
             await pubsub.subscribe(
                 REDIS_TRADE_CHANNEL,
                 REDIS_DEPTH_CHANNEL,
-                REDIS_TAPE_TRADE_CHANNEL,
-                REDIS_TAPE_BOOK_CHANNEL,
             )
             _redis_bridge_stats["ingest_connects"] += 1
             print(
                 f"Ψ-V12 REDIS_MICRO connected pool={REDIS_MICRO_POOL_SIZE} "
-                f"channels={REDIS_TRADE_CHANNEL},{REDIS_DEPTH_CHANNEL},"
-                f"{REDIS_TAPE_TRADE_CHANNEL},{REDIS_TAPE_BOOK_CHANNEL}",
+                f"channels={REDIS_TRADE_CHANNEL},{REDIS_DEPTH_CHANNEL} "
+                f"tapeMode=SNAPSHOT workers={REDIS_TAPE_WORKERS}",
                 flush=True,
             )
 
