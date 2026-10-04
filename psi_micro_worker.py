@@ -135,7 +135,18 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
 
 async def main():
     r = redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-    await r.ping()
+    while True:
+        try:
+            await r.ping()
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(
+                f"PSI-DISTRIBUTED-MICRO redis_wait role={ROLE} {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            await asyncio.sleep(RECONNECT_BACKOFF)
     print(f"PSI-DISTRIBUTED-MICRO START version={WORKER_VERSION} role={ROLE}", flush=True)
     host_index = 0
 
