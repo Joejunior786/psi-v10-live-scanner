@@ -119,9 +119,10 @@ def _activity_sort_key(metric, quote_volume=0.0, rapid_score=0.0):
         rapid_score = 0.0
 
     ready = bool(metric.get("ready")) and age <= 1500.0
+    rapid_qualified = rapid_score >= RAPID_MIN_SCORE
     return (
-        1 if rapid_score >= RAPID_MIN_SCORE else 0,
-        min(rapid_score, 250.0),
+        1 if rapid_qualified else 0,
+        min(rapid_score, 250.0) if rapid_qualified else 0.0,
         1 if ready else 0,
         1 if age <= 1500.0 else 0,
         min(trades5, 100),
