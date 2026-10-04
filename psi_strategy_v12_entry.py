@@ -14,6 +14,49 @@ q = legacy.q
 base = legacy.base
 
 VERSION = "12.3.0-strict-buy-now-gate"
+SCANNER_VERSION_ENV = os.getenv("PSI_SCANNER_VERSION", "").strip()
+APPROVED_SCANNER_VERSION = os.getenv("PSI_APPROVED_SCANNER_VERSION", VERSION).strip()
+STRATEGY_AUTHORITY = os.getenv("PSI_STRATEGY_AUTHORITY", "V12_ONLY").strip().upper()
+BUILD_COMMIT = (
+    os.getenv("RAILWAY_GIT_COMMIT_SHA")
+    or os.getenv("GIT_COMMIT_SHA")
+    or os.getenv("SOURCE_COMMIT_SHA")
+    or "unknown"
+).strip()
+
+
+def _version_lock_snapshot():
+    mismatches = []
+    if SCANNER_VERSION_ENV != VERSION:
+        mismatches.append(
+            f"PSI_SCANNER_VERSION={SCANNER_VERSION_ENV or '<missing>'} expected={VERSION}"
+        )
+    if APPROVED_SCANNER_VERSION != VERSION:
+        mismatches.append(
+            f"PSI_APPROVED_SCANNER_VERSION={APPROVED_SCANNER_VERSION or '<missing>'} expected={VERSION}"
+        )
+    if STRATEGY_AUTHORITY != "V12_ONLY":
+        mismatches.append(
+            f"PSI_STRATEGY_AUTHORITY={STRATEGY_AUTHORITY or '<missing>'} expected=V12_ONLY"
+        )
+    return {
+        "pass": not mismatches,
+        "required_version": VERSION,
+        "configured_version": SCANNER_VERSION_ENV or None,
+        "approved_version": APPROVED_SCANNER_VERSION or None,
+        "strategy_authority": STRATEGY_AUTHORITY or None,
+        "build_commit": BUILD_COMMIT,
+        "legacy_signal_authority": False,
+        "mismatches": mismatches,
+    }
+
+
+def _assert_version_lock():
+    lock = _version_lock_snapshot()
+    if not lock["pass"]:
+        raise RuntimeError("SCANNER_VERSION_LOCK_FAILED: " + " | ".join(lock["mismatches"]))
+    return lock
+
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -263,6 +306,11 @@ def _load_cache_sync():
             return 0
         with open(V12_CACHE_PATH, "rb") as fh:
             payload = pickle.load(fh)
+        stored_version = str(payload.get("version") or "") if isinstance(payload, dict) else ""
+        if stored_version != VERSION:
+            _stats["cache_version_reject"] += 1
+            _stats["cache_version_found"] = stored_version or "missing"
+            return 0
         raw = payload.get("cache") if isinstance(payload, dict) else None
         if not isinstance(raw, dict):
             return 0
@@ -2711,6 +2759,13 @@ async def strategy_loop():
 
 
 async def v12_scan(req):
+    version_lock = _version_lock_snapshot()
+    if not version_lock["pass"]:
+        return app.web.json_response({
+            "ok": False,
+            "error": "SCANNER_VERSION_LOCK_FAILED",
+            "version_lock": version_lock,
+        }, status=503)
     rows = _board()
     try:
         limit = max(1, min(int(req.query.get("limit", "60")), 100))
@@ -2744,6 +2799,8 @@ async def v12_scan(req):
         "ok": True,
         "scanner": "Ψ-V12 Strict Structural + Pinpoint Execution Authority",
         "version": VERSION,
+        "version_lock": version_lock,
+        "build_commit": BUILD_COMMIT,
         "legacy_buy_authority": False,
         "structural_authority": "V12_SETUP_FAMILIES",
         "execution_authority": "PINPOINT_FAIL_CLOSED",
@@ -2767,6 +2824,15 @@ async def v12_scan(req):
 
 
 async def v12_health(req):
+    version_lock = _version_lock_snapshot()
+    if not version_lock["pass"]:
+        return app.web.json_response({
+            "ok": False,
+            "error": "SCANNER_VERSION_LOCK_FAILED",
+            "version": VERSION,
+            "version_lock": version_lock,
+            "build_commit": BUILD_COMMIT,
+        }, status=503)
     universe = list(getattr(q, "universe", []) or [])
     ready = sum(all((_cache.get(s, {}).get(tf) or {}).get("snap") for tf in ("1h", "4h", "1d")) for s in universe)
     weekly_ready = sum(bool((_cache.get(s, {}).get("1w") or {}).get("snap")) for s in universe)
@@ -2781,6 +2847,8 @@ async def v12_health(req):
     return app.web.json_response({
         "ok": True,
         "version": VERSION,
+        "version_lock": version_lock,
+        "build_commit": BUILD_COMMIT,
         "legacy_buy_authority": False,
         "structural_authority": "V12_SETUP_FAMILIES",
         "execution_authority": "PINPOINT_FAIL_CLOSED",
@@ -2806,6 +2874,11 @@ app.health = v12_health
 
 
 async def main():
+    version_lock = _assert_version_lock()
+    print(
+        f"Ψ-V12 VERSION_LOCK PASS version={VERSION} authority={STRATEGY_AUTHORITY} commit={BUILD_COMMIT}",
+        flush=True,
+    )
     for mod in (app, q, base, legacy):
         try:
             mod.VERSION = VERSION
