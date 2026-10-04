@@ -2802,6 +2802,8 @@ async def redis_control_loop():
             client = redis_async.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
             await client.ping()
             _redis_bridge_stats["control_connects"] += 1
+            print("Ψ-V12 REDIS_CONTROL connected", flush=True)
+            last_logged_symbols = None
             while True:
                 symbols = _distributed_micro_symbols()
                 payload = json.dumps(
@@ -2815,6 +2817,12 @@ async def redis_control_loop():
                 )
                 await client.set(REDIS_CONTROL_KEY, payload, ex=10)
                 _redis_bridge_stats["control_symbols"] = len(symbols)
+                if len(symbols) != last_logged_symbols:
+                    print(
+                        f"Ψ-V12 REDIS_CONTROL symbols={len(symbols)} preview={','.join(symbols[:8])}",
+                        flush=True,
+                    )
+                    last_logged_symbols = len(symbols)
                 _redis_bridge_stats["control_last_ms"] = int(time.time() * 1000)
 
                 for role in ("trade", "book"):
@@ -2830,6 +2838,7 @@ async def redis_control_loop():
         except Exception as exc:
             _redis_bridge_stats["control_errors"] += 1
             _redis_bridge_stats["control_last_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"Ψ-V12 REDIS_CONTROL error={type(exc).__name__}:{exc}", flush=True)
             await asyncio.sleep(1.5)
         finally:
             if client is not None:
@@ -2888,6 +2897,7 @@ async def redis_micro_ingest_loop():
         except Exception as exc:
             _redis_bridge_stats["ingest_errors"] += 1
             _redis_bridge_stats["ingest_last_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"Ψ-V12 REDIS_MICRO error={type(exc).__name__}:{exc}", flush=True)
             await asyncio.sleep(1.5)
         finally:
             if pubsub is not None:
