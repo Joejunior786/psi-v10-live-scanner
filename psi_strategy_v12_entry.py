@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.15-multishard-hydration"
+VERSION = "12.2.16-resilient-multishard-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1322,7 +1322,7 @@ async def v12_ws_rpc_loop(shard):
             ws = await asyncio.wait_for(
                 session.ws_connect(
                     V12_WS_API_URL,
-                    heartbeat=20,
+                    heartbeat=None,
                     autoping=True,
                     receive_timeout=None,
                     max_msg_size=0,
@@ -1377,17 +1377,19 @@ async def v12_ws_rpc_loop(shard):
             _v12_ws_fail_pending(shard, f"V12 WS RPC shard {shard} reset")
             if ws is not None and not ws.closed:
                 try:
-                    await asyncio.wait_for(ws.close(), timeout=0.75)
+                    task = asyncio.create_task(ws.close())
+                    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
                 except Exception:
                     pass
             if session is not None and not session.closed:
                 try:
-                    await session.close()
+                    task = asyncio.create_task(session.close())
+                    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
                 except Exception:
                     pass
             if _v12_ws_sessions[shard] is session:
                 _v12_ws_sessions[shard] = None
-        await asyncio.sleep(0.75 + 0.25 * shard)
+        await asyncio.sleep(0.35 + 0.20 * shard)
 
 
 async def _v12_close_ws_quick(shard):
@@ -2336,7 +2338,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.15] MULTI-SETUP AUTHORITY + {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.16] MULTI-SETUP AUTHORITY + RESILIENT {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
