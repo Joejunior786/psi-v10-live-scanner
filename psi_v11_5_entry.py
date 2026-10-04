@@ -3693,6 +3693,26 @@ async def _hydrate_one(sym, lane="FAST"):
             raise RuntimeError("structure payload incomplete")
         app.structure[sym]=sd
         q.structure_ms[sym]=q.ms()
+
+        # Dedicated structure mode is deliberately structure-only. The recovery
+        # lane must never block on 1m anomaly REST or full candidate evaluation;
+        # those are already handled by the normal discovery/evaluation loops.
+        # This keeps structure freshness independent and lets 8-symbol Redis
+        # batches complete at cache speed.
+        if STRUCTURE_WORKER_MODE:
+            _recovery_retry_after.pop(sym,None)
+            _structure_cache_dirty=True
+            recovery_stats["ok"]+=1
+            if lane=="FAST":
+                recovery_stats["fast_ok"]+=1
+            elif lane in {"WATCHDOG","WATCHDOG_REST"}:
+                recovery_stats["rescue_ok"]+=1
+                if lane=="WATCHDOG_REST": recovery_stats["rescue_stale_ok"]+=1
+                else: recovery_stats["rescue_seed_ok"]+=1
+            else:
+                recovery_stats["seed_ok"]+=1
+            return True
+
         if not isinstance(app.anomaly_state.get(sym),dict):
             try:
                 an=await asyncio.wait_for(app.load_fast_anomaly(client,sym),timeout=3.0)
