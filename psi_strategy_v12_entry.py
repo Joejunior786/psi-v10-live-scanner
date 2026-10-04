@@ -2841,7 +2841,7 @@ async def redis_control_loop():
                     },
                     separators=(",", ":"),
                 )
-                await client.set(REDIS_CONTROL_KEY, payload, ex=10)
+                await client.set(REDIS_CONTROL_KEY, payload, ex=120)
                 _redis_bridge_stats["control_symbols"] = len(symbols)
 
                 universe = list(getattr(q, "universe", []) or [])
@@ -2856,7 +2856,7 @@ async def redis_control_loop():
                         },
                         separators=(",", ":"),
                     ),
-                    ex=15,
+                    ex=120,
                 )
                 _redis_bridge_stats["universe_symbols"] = len(universe)
                 if len(symbols) != last_logged_symbols:
@@ -2961,6 +2961,10 @@ async def redis_micro_ingest_loop():
                         _redis_bridge_stats["depth_events"] += 1
                         _redis_bridge_stats["depth_last_ms"] = int(time.time() * 1000)
                     elif channel == REDIS_TAPE_TRADE_CHANNEL:
+                        _redis_bridge_stats["tape_trade_rx"] += 1
+                        _redis_bridge_stats["tape_trade_last_rx_ms"] = int(time.time() * 1000)
+                        tape.tape_stats["distributed_trade_rx"] += 1
+                        tape.tape_stats["distributed_last_trade_ms"] = int(time.time() * 1000)
                         try:
                             price = float(data.get("p") or 0.0)
                             qty = float(data.get("q") or 0.0)
