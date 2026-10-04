@@ -41,6 +41,10 @@ REDIS_TAPE_WORKERS = max(1, min(int(os.getenv("PSI_TAPE_WORKERS", "2")), 8))
 REDIS_TAPE_SNAPSHOT_PREFIX = os.getenv("PSI_TAPE_SNAPSHOT_PREFIX", "psi:v12:tape-snapshot").strip()
 REDIS_RISK_CONTROL_KEY = os.getenv("PSI_RISK_CONTROL_KEY", "psi:v12:risk-priority").strip()
 REDIS_RISK_CONTROL_SIZE = max(8, min(int(os.getenv("PSI_RISK_CONTROL_SIZE", "32")), 80))
+RISK_FAST_BATCH = max(1, min(int(os.getenv("PSI_RISK_FAST_BATCH", "8")), 16))
+RISK_FAST_MIN_INTERVAL_S = max(0.5, float(os.getenv("PSI_RISK_FAST_MIN_INTERVAL_S", "2.0")))
+_risk_fast_cursor = 0
+_risk_fast_last_mono = 0.0
 _redis_bridge_stats = defaultdict(int)
 _redis_worker_health = {}
 _distributed_tape_metrics = {}
@@ -2952,6 +2956,66 @@ def print_board(force=False):
         )
 
 
+async def _v12_refresh_risk_fast():
+    """Run the existing authoritative RiskMap builder on the active V12 cadence.
+
+    This does not change risk maths or execution gates. In worker mode its
+    1m/5m/15m inputs come from local Redis, so the main V12 cycle can refresh
+    current plans without waiting for the legacy RiskMap timer to be scheduled.
+    """
+    global _risk_fast_cursor, _risk_fast_last_mono
+    if str(os.getenv("PSI_RISK_WORKER_MODE","0")).strip().lower() not in {"1","true","yes","on"}:
+        return 0
+    now_mono=time.monotonic()
+    if now_mono-_risk_fast_last_mono < RISK_FAST_MIN_INTERVAL_S:
+        return 0
+
+    ordered=[]
+    seen=set()
+    try:
+        provider=getattr(legacy,"_monster_risk_priority",None)
+        if callable(provider):
+            for sym in provider() or []:
+                sym=str(sym or "").upper()
+                if sym.endswith("USDT") and sym not in seen:
+                    seen.add(sym);ordered.append(sym)
+    except Exception:
+        pass
+    for sym in list(getattr(app,"selected_micro_symbols",[]) or []):
+        sym=str(sym or "").upper()
+        if sym.endswith("USDT") and sym not in seen:
+            seen.add(sym);ordered.append(sym)
+    if not ordered:
+        return 0
+
+    n=min(RISK_FAST_BATCH,len(ordered))
+    start=_risk_fast_cursor % len(ordered)
+    batch=[ordered[(start+i)%len(ordered)] for i in range(n)]
+    _risk_fast_cursor=(start+n)%max(1,len(ordered))
+    riskmap=getattr(getattr(legacy,"move_engine",None),"riskmap",None)
+    build=getattr(riskmap,"build_risk_map",None)
+    if not callable(build):
+        return 0
+
+    started=time.monotonic()
+    results=await asyncio.gather(*(build(sym) for sym in batch),return_exceptions=True)
+    ok=sum(not isinstance(x,BaseException) for x in results)
+    _redis_bridge_stats["risk_fast_cycles"]+=1
+    _redis_bridge_stats["risk_fast_ok"]+=ok
+    _redis_bridge_stats["risk_fast_fail"]+=len(results)-ok
+    _redis_bridge_stats["risk_fast_last_ms"]=int((time.monotonic()-started)*1000)
+    _redis_bridge_stats["risk_fast_batch"]=len(batch)
+    _risk_fast_last_mono=time.monotonic()
+    if _redis_bridge_stats["risk_fast_cycles"] % 5 == 1:
+        print(
+            f"Ψ-V12 RISK_FAST batch={len(batch)} ok={ok} "
+            f"ms={_redis_bridge_stats['risk_fast_last_ms']} "
+            f"tracked={len(getattr(riskmap,'risk_cache',{}) or {})}",
+            flush=True,
+        )
+    return ok
+
+
 async def strategy_loop():
     global _cycle, _results
     print("Ψ-V12 STRATEGY_LOOP starting; waiting for Binance session/universe", flush=True)
@@ -3213,6 +3277,10 @@ async def strategy_loop():
                 f"lastWS={_stats.get('ws_last_error','-')}",
                 flush=True,
             )
+
+            # Refresh existing RiskMap calculations from the dedicated Redis
+            # candle lane on the same cadence as structural evaluation.
+            await _v12_refresh_risk_fast()
 
             new_results = {}
             for sym in universe:
