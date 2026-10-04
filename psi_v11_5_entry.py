@@ -1858,6 +1858,19 @@ async def _structure_historical_klines(client, symbol, interval, limit):
             _structure_tf_stats["watchdog_rest_fail"]+=1
         return rows
 
+    # Small packets are incremental catch-up requests against an already
+    # verified deep seed. Route these directly through the bounded two-host
+    # REST race: they are cheap, latency-sensitive, and avoid waiting 15s on
+    # WS-API for only a handful of missing bars. Full/seed hydration remains
+    # WS-API-first and all downstream structure checks stay unchanged.
+    if int(limit)<=24:
+        rows=await _structure_fetch_race(client,symbol,interval,limit)
+        if isinstance(rows,list) and rows:
+            _structure_tf_stats["fetch_ok"]+=1
+            return rows
+        _structure_tf_stats["fail"]+=1
+        return None
+
     # Normal hydration stays on the verified WS-API lane. Production V12
     # telemetry now shows Railway→Binance historical replies commonly land in
     # ~12–14s. The old 10s timeout created false misses and an immediate second
