@@ -191,6 +191,12 @@ async def main():
             try:
                 wanted = tuple(await universe_symbols(r))
                 if not wanted:
+                    if active and task is not None and not task.done():
+                        await publish_heartbeat(
+                            r, list(active), 0, 0, "", "control_stale_holding_last_universe"
+                        )
+                        await asyncio.sleep(POLL_SECONDS)
+                        continue
                     if task:
                         task.cancel()
                         try:
