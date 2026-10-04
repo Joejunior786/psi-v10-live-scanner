@@ -5,7 +5,7 @@ import os
 import pickle
 import statistics
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import redis.asyncio as redis_async
 import redis as redis_sync
@@ -33,6 +33,7 @@ REDIS_CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip
 REDIS_MICRO_POOL_SIZE = max(10, min(int(os.getenv("PSI_REDIS_MICRO_POOL_SIZE", "40")), 80))
 REDIS_TRADE_CHANNEL = "psi:v12:trade"
 REDIS_DEPTH_CHANNEL = "psi:v12:depth"
+REDIS_MICRO_SNAPSHOT_PREFIX = os.getenv("PSI_MICRO_SNAPSHOT_PREFIX", "psi:v12:micro-snapshot").strip()
 REDIS_UNIVERSE_KEY = os.getenv("PSI_TAPE_UNIVERSE_KEY", "psi:v12:universe").strip()
 REDIS_TAPE_TRADE_CHANNEL = "psi:v12:tape-trade"
 REDIS_TAPE_BOOK_CHANNEL = "psi:v12:tape-book"
@@ -176,6 +177,230 @@ def _snapshot_tape_metric(symbol):
 
 
 tape.tape_metric = _snapshot_tape_metric
+
+_legacy_micro_metrics = app.micro_metrics
+_legacy_current_symbol_price = app.current_symbol_price
+_sync_micro_client = None
+_sync_micro_last_mono = 0.0
+_distributed_micro_trade = {}
+_distributed_micro_book = {}
+_distributed_micro_meta = {}
+_micro_snapshot_hist = defaultdict(lambda: defaultdict(lambda: deque(maxlen=240)))
+_micro_snapshot_hist_last_ms = defaultdict(int)
+
+
+def _refresh_micro_snapshots_sync(force=False):
+    global _sync_micro_client, _sync_micro_last_mono
+    if not REDIS_URL:
+        return False
+    now_mono=time.monotonic()
+    if not force and now_mono-_sync_micro_last_mono<0.25:
+        return True
+    try:
+        if _sync_micro_client is None:
+            _sync_micro_client=redis_sync.from_url(
+                REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=0.4,
+                socket_timeout=0.4,
+                health_check_interval=15,
+            )
+        keys=[
+            f"{REDIS_MICRO_SNAPSHOT_PREFIX}:trade",
+            f"{REDIS_MICRO_SNAPSHOT_PREFIX}:book",
+        ]
+        raws=_sync_micro_client.mget(keys)
+        now_ms=int(time.time()*1000)
+        valid=0
+        for expected,raw in zip(("TRADE","BOOK"),raws or []):
+            if not raw:
+                continue
+            try:
+                snap=json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(snap,dict):
+                continue
+            role=str(snap.get("role") or expected).upper()
+            generated_ms=int(snap.get("generated_ms") or 0)
+            age=now_ms-generated_ms if generated_ms>0 else 999999
+            if role not in {"TRADE","BOOK"} or age<0 or age>10000:
+                continue
+            metrics=snap.get("metrics") or {}
+            if not isinstance(metrics,dict):
+                continue
+            target=_distributed_micro_trade if role=="TRADE" else _distributed_micro_book
+            for sym,metric in metrics.items():
+                if not isinstance(metric,dict):
+                    continue
+                item=dict(metric)
+                item["_snapshot_ms"]=generated_ms
+                target[str(sym).upper()]=item
+            _distributed_micro_meta[role]={
+                "generated_ms":generated_ms,
+                "age_ms":age,
+                "metric_symbols":len(metrics),
+                "source_symbols":int(snap.get("source_symbols") or 0),
+                "events":int(snap.get("events") or 0),
+                "host":snap.get("host"),
+                "publish_raw":bool(snap.get("publish_raw")),
+            }
+            valid+=1
+        _redis_bridge_stats["micro_snapshot_sync_ok"]+=1
+        _redis_bridge_stats["micro_snapshot_sync_valid"]=valid
+        _redis_bridge_stats["micro_snapshot_sync_last_ms"]=now_ms
+        _sync_micro_last_mono=now_mono
+        return valid==2
+    except Exception as exc:
+        _redis_bridge_stats["micro_snapshot_sync_fail"]+=1
+        _redis_bridge_stats["micro_snapshot_sync_error"]=f"{type(exc).__name__}: {exc}"
+        _sync_micro_last_mono=now_mono
+        try:
+            if _sync_micro_client is not None:
+                _sync_micro_client.close()
+        except Exception:
+            pass
+        _sync_micro_client=None
+        return False
+
+
+def _snapshot_micro_metrics(symbol):
+    sym=str(symbol or "").upper()
+    legacy_metric=None
+    _refresh_micro_snapshots_sync()
+    trade=_distributed_micro_trade.get(sym)
+    book=_distributed_micro_book.get(sym)
+    if not isinstance(trade,dict) or not isinstance(book,dict):
+        return _legacy_micro_metrics(sym)
+
+    now_ms=int(time.time()*1000)
+    trade_snapshot_ms=int(trade.get("_snapshot_ms") or 0)
+    book_snapshot_ms=int(book.get("_snapshot_ms") or 0)
+    trade_transport=max(0,now_ms-trade_snapshot_ms) if trade_snapshot_ms>0 else 999999
+    book_transport=max(0,now_ms-book_snapshot_ms) if book_snapshot_ms>0 else 999999
+    if trade_transport>3000 or book_transport>3000:
+        return _legacy_micro_metrics(sym)
+
+    trade_age=float(trade.get("trade_age_ms",999999999.0))+trade_transport
+    book_age=float(book.get("book_age_ms",999999999.0))+book_transport
+    trade_fresh=trade_age<=15000.0
+    book_fresh=book_age<=5000.0
+    trade_seq=bool(trade.get("sequence_verified"))
+    book_seq=bool(book.get("book_sequence_verified"))
+    trade_count=int(trade.get("trade_count_60s") or 0)
+    ofi_samples=int(book.get("ofi_samples") or 0)
+    book_updates=int(book.get("book_updates") or 0)
+    micro_ready=(
+        trade_fresh and book_fresh
+        and trade_count>=10 and ofi_samples>=6 and book_updates>=8
+    )
+
+    cvd_acc=float(trade.get("cvd_acceleration") or 0.0)
+    rv30=float(trade.get("relative_volume_30s") or 0.0)
+    trade_acc=float(trade.get("trade_acceleration") or 0.0)
+    trade_size_shift=float(trade.get("trade_size_shift") or 0.0)
+    ofi=float(book.get("ofi") or 0.0)
+    ofi_acc=float(book.get("ofi_acceleration") or 0.0)
+    obi=float(book.get("obi") or 0.0)
+    ask_dep=float(book.get("ask_depletion") or 0.0)
+
+    raw={
+        "ofi":ofi,
+        "obi":obi,
+        "cvd_acc":cvd_acc,
+        "rv30":rv30,
+        "trade_acc":trade_acc,
+        "ask_dep":ask_dep,
+        "trade_size_shift":trade_size_shift,
+    }
+    hist=_micro_snapshot_hist[sym]
+    ranks={k:app.percentile_rank(hist[k],v) for k,v in raw.items()}
+    if now_ms-_micro_snapshot_hist_last_ms[sym]>=5000 and micro_ready:
+        for k,v in raw.items():
+            hist[k].append(v)
+        _micro_snapshot_hist_last_ms[sym]=now_ms
+
+    relative_flow=(
+        ((len(hist["ofi"])<12 and ofi>0.03) or ranks["ofi"]>=0.70)
+        and ofi_acc>=0
+    )
+    relative_book=(
+        ((len(hist["obi"])<12 and obi>0.03) or ranks["obi"]>=0.65)
+        and ((len(hist["ask_dep"])<12 and ask_dep>0.0) or ranks["ask_dep"]>=0.60)
+    )
+    relative_activity=(
+        ((len(hist["rv30"])<12 and rv30>=1.0) or ranks["rv30"]>=0.65)
+        and ((len(hist["trade_acc"])<12 and trade_acc>=1.0) or ranks["trade_acc"]>=0.60)
+    )
+
+    last_trade_ms=int(trade.get("last_trade_ms") or 0)
+    last_book_ms=int(book.get("last_book_ms") or 0)
+    try:
+        st=app.ensure_micro_state(sym)
+        if last_trade_ms>0:
+            st["last_trade_ms"]=max(int(st.get("last_trade_ms",0) or 0),last_trade_ms)
+        if last_book_ms>0:
+            st["last_book_ms"]=max(int(st.get("last_book_ms",0) or 0),last_book_ms)
+    except Exception:
+        pass
+
+    return {
+        "micro_ready":micro_ready,
+        "sequence_verified":trade_seq,
+        "book_sequence_verified":book_seq,
+        "cvd_quote_60s":float(trade.get("cvd_quote_60s") or 0.0),
+        "cvd_acceleration":cvd_acc,
+        "aggressive_buy_ratio":float(trade.get("aggressive_buy_ratio") or 0.5),
+        "trade_count_60s":trade_count,
+        "trade_acceleration":trade_acc,
+        "trade_size_shift":trade_size_shift,
+        "relative_volume_10s":float(trade.get("relative_volume_10s") or 0.0),
+        "relative_volume_30s":rv30,
+        "vwap_60s":float(trade.get("vwap_60s") or 0.0),
+        "vwap_reclaim":bool(trade.get("vwap_reclaim")),
+        "ofi":ofi,
+        "ofi_acceleration":ofi_acc,
+        "ofi_persistence":float(book.get("ofi_persistence") or 0.0),
+        "flow_persistence":float(trade.get("flow_persistence") or 0.0),
+        "obi":obi,
+        "ask_depletion":ask_dep,
+        "bid_depletion":float(book.get("bid_depletion") or 0.0),
+        "spread_bps":book.get("spread_bps"),
+        "slippage_bps":book.get("slippage_bps"),
+        "last_price":float(trade.get("last_price") or 0.0),
+        "relative_ranks":ranks,
+        "relative_flow":relative_flow,
+        "relative_book":relative_book,
+        "relative_activity":relative_activity,
+        "last_trade_ms":last_trade_ms,
+        "last_book_ms":last_book_ms,
+        "snapshot_source":"DISTRIBUTED_MICRO",
+        "snapshot_trade_age_ms":trade_age,
+        "snapshot_book_age_ms":book_age,
+        "snapshot_transport_ms":max(trade_transport,book_transport),
+    }
+
+
+def _snapshot_current_symbol_price(symbol):
+    try:
+        mm=_snapshot_micro_metrics(symbol) or {}
+        p=float(mm.get("last_price") or 0.0)
+        if p>0:
+            return p
+    except Exception:
+        pass
+    return _legacy_current_symbol_price(symbol)
+
+
+app.micro_metrics = _snapshot_micro_metrics
+app.current_symbol_price = _snapshot_current_symbol_price
+print(
+    "Ψ-V12 DISTRIBUTED_MICRO_SNAPSHOT active — strict Trade/Book metrics prefer "
+    "fresh worker snapshots; stale/missing snapshots fall back fail-closed",
+    flush=True,
+)
+
 _legacy_discovery_hot = q.hot
 
 
@@ -1041,13 +1266,17 @@ def _closest_level(current, levels):
 
 def _micro_confirm(sym):
     row = q.latest.get(sym) or {}
+    try:
+        mm=app.micro_metrics(sym) or {}
+    except Exception:
+        mm={}
     now = int(time.time() * 1000)
-    trade_ms = int(f(row.get("last_trade_ms"), f((app.micro_state.get(sym) or {}).get("last_trade_ms"))))
-    book_ms = int(f(row.get("last_book_ms"), f((app.micro_state.get(sym) or {}).get("last_book_ms"))))
+    trade_ms = int(f(mm.get("last_trade_ms"), f(row.get("last_trade_ms"), f((app.micro_state.get(sym) or {}).get("last_trade_ms")))))
+    book_ms = int(f(mm.get("last_book_ms"), f(row.get("last_book_ms"), f((app.micro_state.get(sym) or {}).get("last_book_ms")))))
     fresh = trade_ms > 0 and book_ms > 0 and now - trade_ms <= 15000 and now - book_ms <= 7000
-    buy = f(row.get("aggressive_buy_ratio"), f(row.get("buy_ratio"), 0.5))
-    cvd = f(row.get("cvd_acceleration"), f(row.get("cvd_1s"), 0.0))
-    ofi = f(row.get("ofi"), f(row.get("order_flow_imbalance"), 0.0))
+    buy = f(mm.get("aggressive_buy_ratio"), f(row.get("aggressive_buy_ratio"), f(row.get("buy_ratio"), 0.5)))
+    cvd = f(mm.get("cvd_acceleration"), f(row.get("cvd_acceleration"), f(row.get("cvd_1s"), 0.0)))
+    ofi = f(mm.get("ofi"), f(row.get("ofi"), f(row.get("order_flow_imbalance"), 0.0)))
     return {
         "fresh": fresh,
         "buy_ratio": buy,
