@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.104-liquidity-aware-micro-core"
+VERSION="11.0.5.105-structure-latency-margin"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -1843,23 +1843,19 @@ async def _structure_historical_klines(client, symbol, interval, limit):
             _structure_tf_stats["watchdog_rest_fail"]+=1
         return rows
 
-    # Normal hydration stays on the verified WS-API lane. The Railway REST
-    # kline routes are materially less reliable than WS-API here; falling into
-    # a multi-host REST race after one missed RPC only lengthens recovery and
-    # starves other symbols. Retry WS-API once, then fail closed and let the
-    # next recovery cycle retry the symbol.
-    for attempt in range(2):
-        rows=await binance_ws_api_klines(
-            symbol,interval,limit,
-            wait_ready=2.5,response_timeout=10.0,gate_timeout=3.0,
-        )
-        if isinstance(rows,list) and rows:
-            _ws_api_stats["structure_ok"]+=1
-            if attempt:
-                _structure_tf_stats["retry_ok"]+=1
-            return rows
-        if attempt==0:
-            await asyncio.sleep(.20)
+    # Normal hydration stays on the verified WS-API lane. Production V12
+    # telemetry now shows Railway→Binance historical replies commonly land in
+    # ~12–14s. The old 10s timeout created false misses and an immediate second
+    # request, doubling load. Give one request a realistic bounded window and
+    # let the next recovery cycle retry if it genuinely fails.
+    rows=await binance_ws_api_klines(
+        symbol,interval,limit,
+        wait_ready=1.5,response_timeout=15.5,gate_timeout=1.5,
+    )
+    if isinstance(rows,list) and rows:
+        _ws_api_stats["structure_ok"]+=1
+        return rows
+    _structure_tf_stats["fail"]+=1
     return None
 
 async def _structure_resilient_load_klines(client, symbol, interval, limit):
