@@ -9,17 +9,17 @@ import psi_outcome_learning as outcome_learning
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3.4_LANES->V12.3.4_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.4-lowcap+outcome-learning+rapid-guaranteed-promotion"
+HARDENING_REVISION = "12.3.4-fresh-challenger-rotation+lowcap+outcome-learning+rapid-guaranteed-promotion"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
 PRIORITY_SLOTS = 16
-ROTATION_SLOTS = 2
-ROTATION_PERIOD_S = 120.0
-MAX_CHURN = 2
-MIN_REBALANCE_S = 15.0
+ROTATION_SLOTS = 8
+ROTATION_PERIOD_S = 60.0
+MAX_CHURN = 6
+MIN_REBALANCE_S = 10.0
 ACTIVITY_HUNTER_SLOTS = 48
-ACTIVITY_GRACE_S = 120.0
+ACTIVITY_GRACE_S = 90.0
 ACTIVITY_RANK_REFRESH_S = 15.0
 RAPID_PROMOTION_SLOTS = 10
 RAPID_MIN_SCORE = 85.0
@@ -29,6 +29,10 @@ LOWCAP_PROMOTION_SLOTS = 12
 LOWCAP_MIN_SCORE = 65.0
 LOWCAP_CHURN_PER_CYCLE = 4
 LOWCAP_DIAG_SECONDS = 15.0
+FRESH_CHALLENGER_SLOTS = 10
+FRESH_CHALLENGER_CHURN_PER_CYCLE = 4
+FRESH_CHALLENGER_COOLDOWN_S = 300.0
+FRESH_CHALLENGER_DIAG_SECONDS = 15.0
 LOWCAP_PROXY_MIN_QUOTE_VOLUME_24H = 250_000.0
 LOWCAP_PROXY_MAX_QUOTE_VOLUME_24H = 75_000_000.0
 LOWCAP_MICRO_CAP_MAX_USD = 25_000_000.0
@@ -45,6 +49,9 @@ _last_rapid_diag_mono = 0.0
 _last_lowcap_diag_mono = 0.0
 _lowcap_rank_cache = []
 _lowcap_rank_mono = 0.0
+_last_fresh_challenger_diag_mono = 0.0
+_fresh_challenger_seen = {}
+_last_fresh_challengers = []
 _inactive_since = {}
 _original_gate = None
 _original_scan = None
@@ -540,6 +547,95 @@ def _activity_ranked_symbols(universe, refresh_seconds=ACTIVITY_RANK_REFRESH_S):
     return list(_activity_rank_cache)
 
 
+def _fresh_challenger_symbols(
+    universe,
+    activity_ranked=None,
+    excluded=None,
+    current=None,
+    limit=None,
+    cooldown_s=None,
+    now_mono=None,
+):
+    """Return high-activity names that have not recently had micro hydration.
+
+    This lane broadens discovery coverage only. It has zero execution authority
+    and cannot bypass the strict V12.3.4 fail-closed BUY gate.
+    """
+    universe = [
+        str(sym).upper()
+        for sym in (universe or [])
+        if str(sym).upper().endswith("USDT")
+    ]
+    if not universe:
+        return []
+
+    activity_ranked = list(activity_ranked or _activity_ranked_symbols(universe))
+    excluded = {str(sym).upper() for sym in (excluded or set())}
+    current = {str(sym).upper() for sym in (current or set())}
+    slots = max(1, int(limit or FRESH_CHALLENGER_SLOTS))
+    cooldown = max(60.0, float(cooldown_s or FRESH_CHALLENGER_COOLDOWN_S))
+    now_mono = time.monotonic() if now_mono is None else float(now_mono)
+
+    ranked = []
+    seen_local = set()
+
+    def consider(symbol, enforce_cooldown=True):
+        symbol = str(symbol or "").upper()
+        if (
+            not symbol.endswith("USDT")
+            or symbol in seen_local
+            or symbol in excluded
+            or symbol in current
+        ):
+            return
+        last_seen = _fresh_challenger_seen.get(symbol)
+        if (
+            enforce_cooldown
+            and last_seen is not None
+            and now_mono - float(last_seen) < cooldown
+        ):
+            return
+        seen_local.add(symbol)
+        ranked.append(symbol)
+
+    for symbol in activity_ranked:
+        consider(symbol, enforce_cooldown=True)
+        if len(ranked) >= slots:
+            return ranked
+
+    epoch = int(time.time() / 60.0)
+    start = (epoch * slots) % len(universe)
+    for offset in range(len(universe)):
+        consider(universe[(start + offset) % len(universe)], enforce_cooldown=True)
+        if len(ranked) >= slots:
+            return ranked
+
+    for symbol in activity_ranked:
+        consider(symbol, enforce_cooldown=False)
+        if len(ranked) >= slots:
+            break
+    return ranked
+
+
+def _fresh_challenger_summary(limit=10):
+    in_pool = set(_protected_pool)
+    symbols = list(_last_fresh_challengers)[:max(1, int(limit))]
+    return {
+        "revision": HARDENING_REVISION,
+        "role": "DISCOVERY_HYDRATION_ONLY",
+        "execution_authority": False,
+        "cooldown_seconds": FRESH_CHALLENGER_COOLDOWN_S,
+        "top": [
+            {
+                "symbol": symbol,
+                "rapid_score": _rapid_score(symbol),
+                "in_micro_pool": symbol in in_pool,
+            }
+            for symbol in symbols
+        ],
+    }
+
+
 def _strict_trade_activity_ok(symbol):
     core = _core()
     try:
@@ -574,6 +670,7 @@ def stable_micro_symbols():
     """
     global _last_rebalance, _rotation_epoch, _protected_pool, _inactive_since
     global _last_rapid_diag_mono, _last_lowcap_diag_mono
+    global _last_fresh_challenger_diag_mono, _last_fresh_challengers
 
     core = _core()
     pool_size = int(core.REDIS_MICRO_POOL_SIZE)
@@ -630,6 +727,34 @@ def stable_micro_symbols():
             8,
         ),
     )
+    fresh_challenger_slots = max(
+        4,
+        min(
+            int(os.getenv("PSI_MICRO_FRESH_CHALLENGER_SLOTS", str(FRESH_CHALLENGER_SLOTS))),
+            max(4, pool_size // 3),
+        ),
+    )
+    fresh_challenger_churn = max(
+        1,
+        min(
+            int(
+                os.getenv(
+                    "PSI_MICRO_FRESH_CHALLENGER_CHURN_PER_CYCLE",
+                    str(FRESH_CHALLENGER_CHURN_PER_CYCLE),
+                )
+            ),
+            8,
+        ),
+    )
+    fresh_challenger_cooldown = max(
+        60.0,
+        float(
+            os.getenv(
+                "PSI_MICRO_FRESH_CHALLENGER_COOLDOWN_S",
+                str(FRESH_CHALLENGER_COOLDOWN_S),
+            )
+        ),
+    )
 
     desired = []
     seen = set()
@@ -655,6 +780,17 @@ def stable_micro_symbols():
 
     universe = list(getattr(core.q, "universe", []) or [])
     universe_set = set(universe)
+    current_hint = [
+        str(symbol).upper()
+        for symbol in list(_protected_pool or [])
+        if str(symbol).upper().endswith("USDT")
+    ]
+    if not current_hint:
+        current_hint = [
+            str(symbol).upper()
+            for symbol in list(core._distributed_micro_sticky_pool or [])
+            if str(symbol).upper().endswith("USDT")
+        ]
 
     activity_ranked = _activity_ranked_symbols(universe)
     rapid_ranked = _rapid_ranked_symbols(universe, rapid_min_score)
@@ -678,9 +814,24 @@ def stable_micro_symbols():
             and symbol not in lowcap_priority_set
         )
     ]
-    protected_priority_set = priority_set | lowcap_priority_set | set(rapid_priority)
+    rapid_priority_set = set(rapid_priority)
+    fresh_challenger_priority = _fresh_challenger_symbols(
+        universe,
+        activity_ranked=activity_ranked,
+        excluded=priority_set | lowcap_priority_set | rapid_priority_set,
+        current=current_hint,
+        limit=fresh_challenger_slots,
+        cooldown_s=fresh_challenger_cooldown,
+    )
+    fresh_challenger_priority_set = set(fresh_challenger_priority)
+    protected_priority_set = (
+        priority_set
+        | lowcap_priority_set
+        | rapid_priority_set
+        | fresh_challenger_priority_set
+    )
 
-    # Reserve guaranteed low-cap early-explosion and RAPID challenger tiers
+    # Reserve guaranteed low-cap, RAPID and fresh-challenger hydration tiers
     # before normal activity hunters. Both are discovery/promotion only; final
     # execution remains entirely under the unchanged V12.3.4 fail-closed gate.
     activity_hunters = []
@@ -692,7 +843,15 @@ def stable_micro_symbols():
 
     ordered = []
     ordered_seen = set()
-    for symbol in priority + lowcap_priority + rapid_priority + activity_hunters + desired + universe:
+    for symbol in (
+        priority
+        + lowcap_priority
+        + rapid_priority
+        + fresh_challenger_priority
+        + activity_hunters
+        + desired
+        + universe
+    ):
         if symbol in universe_set and symbol not in ordered_seen:
             ordered_seen.add(symbol)
             ordered.append(symbol)
@@ -715,17 +874,7 @@ def stable_micro_symbols():
         except Exception:
             pass
 
-    current = [
-        str(symbol).upper()
-        for symbol in list(_protected_pool or [])
-        if str(symbol).upper().endswith("USDT")
-    ]
-    if not current:
-        current = [
-            str(symbol).upper()
-            for symbol in list(core._distributed_micro_sticky_pool or [])
-            if str(symbol).upper().endswith("USDT")
-        ]
+    current = list(current_hint)
 
     if not universe:
         if current:
@@ -750,14 +899,17 @@ def stable_micro_symbols():
     can_rebalance = now_mono - _last_rebalance >= min_rebalance
     lowcap_missing = [symbol for symbol in lowcap_priority if symbol not in current]
     rapid_missing = [symbol for symbol in rapid_priority if symbol not in current]
+    fresh_challenger_missing = [
+        symbol for symbol in fresh_challenger_priority if symbol not in current
+    ]
     budget = max_churn if can_rebalance else 0
-    if can_rebalance and (lowcap_missing or rapid_missing):
-        # Early low-cap and RAPID challengers can accelerate faster than the
-        # normal sticky-pool churn rate. Permit only a bounded special-access
-        # burst; this changes hydration priority, never BUY authority.
+    if can_rebalance and (lowcap_missing or rapid_missing or fresh_challenger_missing):
+        # Discovery challengers can accelerate faster than normal sticky churn,
+        # but only inside a bounded hydration budget. BUY authority is unchanged.
         special_needed = (
             min(lowcap_churn, len(lowcap_missing))
             + min(rapid_churn, len(rapid_missing))
+            + min(fresh_challenger_churn, len(fresh_challenger_missing))
         )
         budget = min(12, max(budget, special_needed))
 
@@ -807,8 +959,22 @@ def stable_micro_symbols():
             if len(inject) >= rapid_target:
                 break
 
-        # Then preserve normal V12 execution-priority admission.
+        fresh_target = min(
+            max(0, budget - len(inject)),
+            fresh_challenger_churn,
+            len(fresh_challenger_missing),
+        )
+        priority_ceiling = max(len(inject), budget - fresh_target)
+
+        # Preserve normal V12 execution-priority admission.
         for symbol in priority:
+            if symbol not in current and symbol not in inject:
+                inject.append(symbol)
+            if len(inject) >= priority_ceiling:
+                break
+
+        # Guarantee bounded access for fresh discovery challengers.
+        for symbol in fresh_challenger_priority:
             if symbol not in current and symbol not in inject:
                 inject.append(symbol)
             if len(inject) >= budget:
@@ -900,6 +1066,26 @@ def stable_micro_symbols():
     core._redis_bridge_stats["micro_rapid_missing"] = sum(
         symbol not in set(next_pool) for symbol in rapid_priority
     )
+    next_pool_set = set(next_pool)
+    fresh_in_pool = [
+        symbol for symbol in fresh_challenger_priority if symbol in next_pool_set
+    ]
+    for symbol in fresh_in_pool:
+        _fresh_challenger_seen[symbol] = now_mono
+    _last_fresh_challengers[:] = list(fresh_challenger_priority)
+    for symbol, last_seen in list(_fresh_challenger_seen.items()):
+        if (
+            symbol not in universe_set
+            or now_mono - float(last_seen) > fresh_challenger_cooldown * 4.0
+        ):
+            _fresh_challenger_seen.pop(symbol, None)
+    core._redis_bridge_stats["micro_fresh_challenger_selected"] = len(
+        fresh_challenger_priority
+    )
+    core._redis_bridge_stats["micro_fresh_challenger_in_pool"] = len(fresh_in_pool)
+    core._redis_bridge_stats["micro_fresh_challenger_missing"] = sum(
+        symbol not in next_pool_set for symbol in fresh_challenger_priority
+    )
     core._redis_bridge_stats["micro_warmed_retained"] = sum(
         symbol in set(next_pool) for symbol in warmed
     )
@@ -921,6 +1107,17 @@ def stable_micro_symbols():
             f"inPool={core._redis_bridge_stats['micro_lowcap_in_pool']}/{len(lowcap_priority)} "
             f"missing={missing_lowcap} injected={','.join([s for s in inject if s in lowcap_priority]) or '-'} "
             f"top={top_lowcap}",
+            flush=True,
+        )
+
+    if now_mono - _last_fresh_challenger_diag_mono >= FRESH_CHALLENGER_DIAG_SECONDS:
+        _last_fresh_challenger_diag_mono = now_mono
+        print(
+            "Ψ-V12.3 FRESH-CHALLENGER "
+            f"selected={len(fresh_challenger_priority)} "
+            f"inPool={len(fresh_in_pool)}/{len(fresh_challenger_priority)} "
+            f"injected={','.join([s for s in inject if s in fresh_challenger_priority_set]) or '-'} "
+            f"names={','.join(fresh_challenger_priority) or '-'}",
             flush=True,
         )
 
@@ -1183,6 +1380,7 @@ def _augment_response(response):
     data["authority_ready"] = bool(lane_health.get("all_ready"))
     data["legacy_pinpoint_role"] = "INPUT_TELEMETRY_ONLY"
     data["low_cap_early_explosion"] = _lowcap_summary()
+    data["fresh_challengers"] = _fresh_challenger_summary()
     data["outcome_learning"] = outcome_learning.summary()
     distributed = data.setdefault("distributed_micro", {})
     distributed["coverage"] = micro_coverage()
