@@ -3913,6 +3913,58 @@ async def _hydrate_one(sym, lane="FAST"):
         _recovery_inflight.discard(sym)
 
 
+def _hydrate_worker_symbol_sync(sym, lane="FAST"):
+    """Synchronous fast path for prefetched distributed structure packets."""
+    global _structure_cache_dirty, _fast_recovery_active
+    sym=str(sym)
+    if sym in _recovery_inflight:
+        return None
+    _recovery_inflight.add(sym)
+    high_priority=lane in {"FAST","WATCHDOG","WATCHDOG_REST"}
+    if high_priority:
+        _fast_recovery_active+=1
+    try:
+        sd=_structure_from_worker_cache(sym)
+        if not isinstance(sd,dict):
+            raise RuntimeError("structure payload incomplete")
+        app.structure[sym]=sd
+        q.structure_ms[sym]=q.ms()
+        _recovery_retry_after.pop(sym,None)
+        _structure_cache_dirty=True
+        recovery_stats["ok"]+=1
+        if lane=="FAST":
+            recovery_stats["fast_ok"]+=1
+        elif lane in {"WATCHDOG","WATCHDOG_REST"}:
+            recovery_stats["rescue_ok"]+=1
+            if lane=="WATCHDOG_REST":
+                recovery_stats["rescue_stale_ok"]+=1
+            else:
+                recovery_stats["rescue_seed_ok"]+=1
+        else:
+            recovery_stats["seed_ok"]+=1
+        return True
+    except Exception as exc:
+        _recovery_retry_after[sym]=time.time()+(6.0 if lane in {"WATCHDOG","WATCHDOG_REST"} else RECOVERY_FAIL_COOLDOWN_S)
+        recovery_stats["fail"]+=1
+        if lane=="FAST":
+            recovery_stats["fast_fail"]+=1
+        elif lane in {"WATCHDOG","WATCHDOG_REST"}:
+            recovery_stats["rescue_fail"]+=1
+            if lane=="WATCHDOG_REST":
+                recovery_stats["rescue_stale_fail"]+=1
+            else:
+                recovery_stats["rescue_seed_fail"]+=1
+        else:
+            recovery_stats["seed_fail"]+=1
+        if recovery_stats["fail"]<=60:
+            print(f"Ψ-RECOVERY {lane}_ERROR {sym} {type(exc).__name__}: {exc}",flush=True)
+        return False
+    finally:
+        if high_priority:
+            _fast_recovery_active=max(0,_fast_recovery_active-1)
+        _recovery_inflight.discard(sym)
+
+
 async def structure_recovery_loop():
     while app.session is None or not getattr(q,"universe",None):
         await asyncio.sleep(.5)
@@ -3950,7 +4002,10 @@ async def structure_recovery_loop():
             batch=targets[:RECOVERY_BATCH]
             batch_started=time.time()
             prefetched=_prefetch_structure_worker_symbols(batch) if STRUCTURE_WORKER_MODE else 0
-            results=await asyncio.gather(*[_hydrate_one(s,"FAST") for s in batch])
+            if STRUCTURE_WORKER_MODE:
+                results=[_hydrate_worker_symbol_sync(s,"FAST") for s in batch]
+            else:
+                results=await asyncio.gather(*[_hydrate_one(s,"FAST") for s in batch])
             batch_s=time.time()-batch_started
             fresh=sum(1 for s in scope if _structure_age_recovery(s)<=RECOVERY_STALE_S)
             ever=sum(1 for s in scope if _structure_age_recovery(s)<999000)
