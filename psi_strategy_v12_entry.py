@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.14-canonical-micro-ingest"
+VERSION = "12.2.15-multishard-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -77,29 +77,35 @@ _cursor = 0
 _last_board_print = 0.0
 _stats = defaultdict(int)
 
-_ws_circuit_until = 0.0
-_ws_timeout_events = []
+_ws_circuit_until = defaultdict(float)
+_ws_timeout_events = defaultdict(list)
 
 
-def _ws_circuit_open():
-    return time.monotonic() < _ws_circuit_until
-
-
-def _record_ws_timeout():
-    global _ws_circuit_until, _ws_timeout_events
+def _ws_circuit_open(shard=None):
     now = time.monotonic()
-    _ws_timeout_events = [t for t in _ws_timeout_events if now - t <= 30.0]
-    _ws_timeout_events.append(now)
-    if len(_ws_timeout_events) >= 4:
-        _ws_circuit_until = max(_ws_circuit_until, now + 45.0)
+    if shard is None:
+        return any(float(until or 0.0) > now for until in _ws_circuit_until.values())
+    return float(_ws_circuit_until[int(shard)] or 0.0) > now
+
+
+def _record_ws_timeout(shard):
+    shard = int(shard)
+    now = time.monotonic()
+    events = [t for t in list(_ws_timeout_events[shard]) if now - t <= 30.0]
+    events.append(now)
+    _ws_timeout_events[shard] = events
+    if len(events) >= 4:
+        _ws_circuit_until[shard] = max(float(_ws_circuit_until[shard] or 0.0), now + 30.0)
         _stats["ws_circuit_opens"] += 1
-        _stats["ws_circuit_until_ms"] = int((time.time() + 45.0) * 1000)
+        _stats[f"ws_shard_{shard}_circuit_opens"] += 1
+        _stats[f"ws_shard_{shard}_circuit_until_ms"] = int((time.time() + 30.0) * 1000)
 
 
-def _record_ws_success():
-    global _ws_circuit_until, _ws_timeout_events
-    _ws_timeout_events = []
-    _ws_circuit_until = 0.0
+def _record_ws_success(shard):
+    shard = int(shard)
+    _ws_timeout_events[shard] = []
+    _ws_circuit_until[shard] = 0.0
+
 
 # Dedicated V12 Binance Spot WS-API connection for historical candles. This
 # prevents legacy recovery/structure traffic from starving the new strategy
@@ -116,14 +122,20 @@ V12_REST_HOSTS = tuple(
     if h.strip()
 )
 _v12_rest_cursor = 0
-V12_WS_SHARDS = 1
+V12_WS_SHARDS = max(2, min(int(os.getenv("PSI_V12_WS_SHARDS", "3")), 3))
 _v12_ws_conns = [None] * V12_WS_SHARDS
+_v12_ws_sessions = [None] * V12_WS_SHARDS
 _v12_ws_ready = [None] * V12_WS_SHARDS
 _v12_ws_locks = [None] * V12_WS_SHARDS
 _v12_ws_gates = [None] * V12_WS_SHARDS
 _v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
 _v12_ws_ids = [0] * V12_WS_SHARDS
 _v12_shard_pool = None
+
+
+def _v12_ws_shard_for(symbol, interval):
+    key = f"{str(symbol).upper()}:{str(interval)}"
+    return sum((i + 1) * ord(ch) for i, ch in enumerate(key)) % V12_WS_SHARDS
 
 V12_CACHE_PATH = os.getenv("PSI_V12_CACHE_PATH", "/data/v12_hydration_cache.pkl")
 V12_CACHE_SAVE_SECONDS = max(20.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "30")))
@@ -1269,9 +1281,9 @@ def _v12_ws_primitives(shard):
     if _v12_ws_locks[shard] is None:
         _v12_ws_locks[shard] = asyncio.Lock()
     if _v12_ws_gates[shard] is None:
-        # Dedicated V12 hydration lane. Six request IDs may be in flight
-        # concurrently without competing with discovery or execution sockets.
-        _v12_ws_gates[shard] = asyncio.Semaphore(6)
+        # Per-shard pressure is bounded; FETCH_CONCURRENCY remains the
+        # authoritative total request ceiling across all hydration lanes.
+        _v12_ws_gates[shard] = asyncio.Semaphore(3)
     return _v12_ws_ready[shard], _v12_ws_locks[shard], _v12_ws_gates[shard]
 
 
@@ -1289,50 +1301,93 @@ def _v12_ws_fail_pending(shard, reason):
 async def v12_ws_rpc_loop(shard):
     shard = int(shard) % V12_WS_SHARDS
     ready, _, _ = _v12_ws_primitives(shard)
-    while app.session is None:
-        await asyncio.sleep(0.25)
+    first = True
 
     while True:
         ws = None
+        session = None
         try:
-            async with app.session.ws_connect(
-                V12_WS_API_URL,
-                heartbeat=15,
-                autoping=True,
-                receive_timeout=40,
-            ) as ws:
-                _v12_ws_conns[shard] = ws
-                ready.set()
-                _stats["ws_connects"] += 1
-                print(f"Ψ-V12 WS-RPC shard={shard+1}/{V12_WS_SHARDS} connected url={V12_WS_API_URL}", flush=True)
+            session = legacy.aiohttp.ClientSession(
+                timeout=legacy.aiohttp.ClientTimeout(total=15, connect=4),
+                connector=legacy.aiohttp.TCPConnector(
+                    limit=1,
+                    limit_per_host=1,
+                    ttl_dns_cache=300,
+                    keepalive_timeout=60,
+                    family=2,
+                ),
+                headers={"User-Agent": f"psi-v12-hydration/{VERSION}/shard-{shard}"},
+            )
+            _v12_ws_sessions[shard] = session
+            ws = await asyncio.wait_for(
+                session.ws_connect(
+                    V12_WS_API_URL,
+                    heartbeat=20,
+                    autoping=True,
+                    receive_timeout=None,
+                    max_msg_size=0,
+                ),
+                timeout=6.0,
+            )
+            _v12_ws_conns[shard] = ws
+            ready.set()
+            _stats["ws_connects"] += 1
+            _stats[f"ws_shard_{shard}_connects"] += 1
+            if not first:
+                _stats[f"ws_shard_{shard}_reconnects"] += 1
+            first = False
+            print(
+                f"Ψ-V12 WS-RPC shard={shard+1}/{V12_WS_SHARDS} connected "
+                f"url={V12_WS_API_URL} reservedConnector=1",
+                flush=True,
+            )
 
-                async for msg in ws:
-                    if msg.type == legacy.aiohttp.WSMsgType.TEXT:
-                        try:
-                            payload = json.loads(msg.data)
-                        except Exception:
-                            continue
-                        rid = str(payload.get("id") or "")
-                        fut = _v12_ws_pending[shard].pop(rid, None)
-                        if fut is not None and not fut.done():
-                            fut.set_result(payload)
-                    elif msg.type in {
-                        legacy.aiohttp.WSMsgType.CLOSED,
-                        legacy.aiohttp.WSMsgType.CLOSE,
-                        legacy.aiohttp.WSMsgType.ERROR,
-                    }:
-                        raise RuntimeError(f"V12 WS RPC shard={shard} closed type={msg.type}")
+            async for msg in ws:
+                if msg.type == legacy.aiohttp.WSMsgType.TEXT:
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    rid = str(payload.get("id") or "")
+                    fut = _v12_ws_pending[shard].pop(rid, None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(payload)
+                elif msg.type in {
+                    legacy.aiohttp.WSMsgType.CLOSED,
+                    legacy.aiohttp.WSMsgType.CLOSE,
+                    legacy.aiohttp.WSMsgType.ERROR,
+                }:
+                    raise RuntimeError(f"V12 WS RPC shard={shard} closed type={msg.type}")
+            raise RuntimeError(f"V12 WS RPC shard={shard} stream ended")
+
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _stats["ws_errors"] += 1
             _stats[f"ws_shard_{shard}_error"] = f"{type(exc).__name__}: {exc}"
+            print(
+                f"Ψ-V12 WS-RPC shard={shard+1}/{V12_WS_SHARDS} ERROR "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
         finally:
             ready.clear()
             if _v12_ws_conns[shard] is ws:
                 _v12_ws_conns[shard] = None
             _v12_ws_fail_pending(shard, f"V12 WS RPC shard {shard} reset")
-        await asyncio.sleep(0.75)
+            if ws is not None and not ws.closed:
+                try:
+                    await asyncio.wait_for(ws.close(), timeout=0.75)
+                except Exception:
+                    pass
+            if session is not None and not session.closed:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+            if _v12_ws_sessions[shard] is session:
+                _v12_ws_sessions[shard] = None
+        await asyncio.sleep(0.75 + 0.25 * shard)
 
 
 async def _v12_close_ws_quick(shard):
@@ -1350,7 +1405,7 @@ async def v12_ws_klines(
     lock_timeout=0.65,
 ):
     if shard is None:
-        shard = (sum(ord(ch) for ch in str(symbol)) + sum(ord(ch) for ch in str(interval))) % V12_WS_SHARDS
+        shard = _v12_ws_shard_for(symbol, interval)
     shard = int(shard) % V12_WS_SHARDS
 
     ready, lock, gate = _v12_ws_primitives(shard)
@@ -1417,7 +1472,7 @@ async def v12_ws_klines(
         if status == 200 and isinstance(rows, list) and rows:
             _stats["ws_ok"] += 1
             _stats[f"ws_shard_{shard}_ok"] += 1
-            _record_ws_success()
+            _record_ws_success(shard)
             return rows
 
         _stats["ws_fail"] += 1
@@ -1433,7 +1488,7 @@ async def v12_ws_klines(
         _stats["ws_last_error"] = f"shard={shard} {type(exc).__name__}: {exc}"
         if isinstance(exc, asyncio.TimeoutError):
             _stats["ws_timeout_recycles"] += 1
-            _record_ws_timeout()
+            _record_ws_timeout(shard)
             asyncio.create_task(_v12_close_ws_quick(shard))
         return None
     finally:
@@ -1471,12 +1526,13 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["fetch_v11_cache_ok"] += 1
             _stats[f"v11_{tf}_ok"] += 1
 
-    # 1) Isolated V12 Binance WS is the normal FAST transport.
+    # 1) Isolated multi-shard V12 Binance WS is the normal transport.
     if not isinstance(rows, list) or not rows:
-        if not _ws_circuit_open():
+        ws_shard = _v12_ws_shard_for(sym, tf)
+        if not _ws_circuit_open(ws_shard):
             try:
                 rows = await v12_ws_klines(
-                    sym, tf, limit, shard=0,
+                    sym, tf, limit, shard=ws_shard,
                     response_timeout=5.0 if deep else 4.8,
                     ready_timeout=0.8,
                     gate_timeout=1.0,
@@ -2161,7 +2217,9 @@ async def strategy_loop():
                 f"{_stats.get('shared_ws_fallback_miss',0)} circuitFB={_stats.get('circuit_fallback_ok',0)}/{_stats.get('circuit_fallback_miss',0)} "
                 f"circuitWS={_stats.get('circuit_shared_win',0)} circuitREST={_stats.get('circuit_rest_win',0)} "
                 f"fastRest={_stats.get('fast_rest_ok',0)}/{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
-                f"circuitSkip={_stats.get('dedicated_circuit_skip',0)} circuitOpen={int(_ws_circuit_open())} "
+                f"circuitSkip={_stats.get('dedicated_circuit_skip',0)} "
+                f"circuitOpen={sum(int(_ws_circuit_open(i)) for i in range(V12_WS_SHARDS))}/{V12_WS_SHARDS} "
+                f"wsShards={sum(int(evt is not None and evt.is_set()) for evt in _v12_ws_ready)}/{V12_WS_SHARDS} "
                 f"sharedD1={_stats.get('shared_1d_ok',0)}/{_stats.get('shared_1d_miss',0)} "
                 f"sharedH1={_stats.get('shared_1h_ok',0)}/{_stats.get('shared_1h_miss',0)} "
                 f"sharedH4={_stats.get('shared_4h_ok',0)}/{_stats.get('shared_4h_miss',0)} "
@@ -2278,7 +2336,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.14] MULTI-SETUP AUTHORITY + CANONICAL MICRO INGEST active — "
+        f"[v12.2.15] MULTI-SETUP AUTHORITY + {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
@@ -2287,7 +2345,10 @@ async def main():
         "structure-derived targets with gain percentages are mandatory.",
         flush=True,
     )
-    await asyncio.gather(legacy.main(), strategy_loop(), cache_persist_loop(), v12_ws_rpc_loop(0))
+    hydration_lanes = [v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)]
+    await asyncio.gather(
+        legacy.main(), strategy_loop(), cache_persist_loop(), *hydration_lanes
+    )
 
 
 if __name__ == "__main__":
