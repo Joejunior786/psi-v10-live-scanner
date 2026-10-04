@@ -274,7 +274,6 @@ async def _rest_fetch_agg(sym):
                 aid=-1
             if aid<0 or aid<=_rest_agg_last_id[sym]:
                 continue
-            _rest_agg_last_id[sym]=aid
             event_ms=int(f(d.get('T')))
             stamp=event_ms/1000.0 if event_ms>0 else 0.0
             if stamp<=0 or stamp<now-WINDOW-5:
@@ -283,6 +282,7 @@ async def _rest_fetch_agg(sym):
             if price<=0 or qty<=0:
                 continue
             trade_events[sym].append((stamp,price,price*qty,not bool(d.get('m')),event_ms))
+            _rest_agg_last_id[sym]=aid
             payload=dict(d);payload['E']=event_ms
             if sym in set(getattr(app,'selected_micro_symbols',[]) or []):
                 try:
