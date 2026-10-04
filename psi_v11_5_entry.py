@@ -1537,10 +1537,10 @@ async def _structure_worker_rows(symbol, interval):
                 f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:1h",
                 f"{STRUCTURE_WORKER_REDIS_PREFIX}:{symbol}:4h",
             ]
-            raws=await asyncio.wait_for(
-                asyncio.to_thread(_structure_worker_sync.mget,keys),
-                timeout=2.0,
-            )
+            # Private Redis MGET is intentionally synchronous here. This mirrors
+            # the proven V12 tape snapshot fast path and avoids starvation in
+            # the default asyncio thread executor during heavy scanner cycles.
+            raws=_structure_worker_sync.mget(keys)
             bundle={"_loaded":time.time()}
             for tf,raw in zip(("15m","1h","4h"),raws or []):
                 if not raw:
