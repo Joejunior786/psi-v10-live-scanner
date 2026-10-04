@@ -4921,6 +4921,9 @@ async def ws_api_micro_log_loop():
                 f"strictConn={_strict_rest_stats.get('reserved_connectors',0)} "
                 f"warm={_strict_rest_stats.get('warm_ok',0)}/{_strict_rest_stats.get('warm_fail',0)}:{_strict_rest_stats.get('warm_diag','-')} "
                 f"rawStrict={_strict_raw_stats.get('trade_events',0)}/{_strict_raw_stats.get('depth_events',0)} "
+                f"rawFrames={_strict_raw_stats.get('trade_frames',0)}/{_strict_raw_stats.get('depth_frames',0)} "
+                f"rawDup={_strict_raw_stats.get('trade_dup',0)} "
+                f"rawAck={_strict_raw_stats.get('acks',0)}/{_strict_raw_stats.get('ack_nonnull',0)} "
                 f"rawSym={_strict_raw_stats.get('lane0_symbol','-')},{_strict_raw_stats.get('lane1_symbol','-')} "
                 f"rawErr={_strict_raw_stats.get('errors',0)} "
                 f"rawSkip={_micro_rest_stats.get('trade_raw_skip',0)}/{_micro_rest_stats.get('depth_raw_skip',0)} "
@@ -4943,10 +4946,9 @@ async def ws_api_micro_log_loop():
 async def strict_raw_ws_backbone_lane(lane_idx):
     """Persistent raw Binance micro socket opened before scanner load ramps up.
 
-    One lane follows one strict-core symbol. Because a partial depth20 payload
-    does not identify its symbol, each lane owns only one symbol at a time.
-    SUBSCRIBE/UNSUBSCRIBE happens in-frame on the already-open /ws connection,
-    so core rotation never requires a new TLS/WebSocket handshake.
+    One lane follows one strict-core symbol. A dedicated subscription manager
+    rotates the lane in-frame while the receiver consumes the websocket
+    continuously with async-for; no receive task is cancelled or polled.
     """
     global _strict_raw_sessions
     lane_idx=int(lane_idx)
@@ -4961,6 +4963,7 @@ async def strict_raw_ws_backbone_lane(lane_idx):
 
     while True:
         session=None
+        sub_task=None
         try:
             session=aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=12,connect=4),
@@ -4996,45 +4999,47 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                 flush=True,
             )
 
-            active=None
-            while True:
-                core=tuple(_micro_fallback_core_symbols())
-                target=core[lane_idx] if len(core)>lane_idx else None
+            state={"active":None}
 
-                if target!=active:
-                    if active:
-                        request_id+=1
-                        old=active.lower()
-                        try:
+            async def manage_subscription():
+                nonlocal request_id
+                while True:
+                    core=tuple(_micro_fallback_core_symbols())
+                    target=core[lane_idx] if len(core)>lane_idx else None
+                    active=state["active"]
+                    if target!=active:
+                        if active:
+                            request_id+=1
+                            old=active.lower()
+                            try:
+                                await ws.send_json({
+                                    "method":"UNSUBSCRIBE",
+                                    "params":[f"{old}@aggTrade",f"{old}@depth20@100ms"],
+                                    "id":request_id,
+                                })
+                            except Exception:
+                                pass
+
+                        state["active"]=target
+                        _strict_raw_stats[f"lane{lane_idx}_symbol"]=target or "-"
+                        if target:
+                            request_id+=1
+                            low=target.lower()
                             await ws.send_json({
-                                "method":"UNSUBSCRIBE",
-                                "params":[f"{old}@aggTrade",f"{old}@depth20@100ms"],
+                                "method":"SUBSCRIBE",
+                                "params":[f"{low}@aggTrade",f"{low}@depth20@100ms"],
                                 "id":request_id,
                             })
-                        except Exception:
-                            pass
+                            _strict_raw_stats["subscribes"]+=1
+                            print(
+                                f"Ψ-STRICT-RAW lane={lane_idx} subscribe symbol={target}",
+                                flush=True,
+                            )
+                    await asyncio.sleep(.35)
 
-                    active=target
-                    _strict_raw_stats[f"lane{lane_idx}_symbol"]=active or "-"
-                    if active:
-                        request_id+=1
-                        low=active.lower()
-                        await ws.send_json({
-                            "method":"SUBSCRIBE",
-                            "params":[f"{low}@aggTrade",f"{low}@depth20@100ms"],
-                            "id":request_id,
-                        })
-                        _strict_raw_stats["subscribes"]+=1
-                        print(
-                            f"Ψ-STRICT-RAW lane={lane_idx} subscribe symbol={active}",
-                            flush=True,
-                        )
+            sub_task=asyncio.create_task(manage_subscription())
 
-                try:
-                    msg=await asyncio.wait_for(ws.receive(),timeout=.75)
-                except asyncio.TimeoutError:
-                    continue
-
+            async for msg in ws:
                 if msg.type==aiohttp.WSMsgType.TEXT:
                     try:
                         d=json.loads(msg.data)
@@ -5042,8 +5047,14 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                         continue
                     if not isinstance(d,dict):
                         continue
+
                     if "result" in d and d.get("id") is not None:
+                        _strict_raw_stats["acks"]=_strict_raw_stats.get("acks",0)+1
+                        if d.get("result") not in (None,[]):
+                            _strict_raw_stats["ack_nonnull"]=_strict_raw_stats.get("ack_nonnull",0)+1
                         continue
+
+                    active=state.get("active")
                     if not active:
                         continue
 
@@ -5051,13 +5062,16 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                     now_ms=int(time.time()*1000)
 
                     if event=="aggTrade":
+                        _strict_raw_stats["trade_frames"]=_strict_raw_stats.get("trade_frames",0)+1
                         sym=str(d.get("s") or "").upper()
                         if sym!=active:
+                            _strict_raw_stats["trade_wrong_symbol"]=_strict_raw_stats.get("trade_wrong_symbol",0)+1
                             continue
                         event_ms=int(f(d.get("T"),f(d.get("E"),0)))
                         price=f(d.get("p"))
                         qty=f(d.get("q"))
                         if event_ms<=0 or price<=0 or qty<=0:
+                            _strict_raw_stats["trade_invalid"]=_strict_raw_stats.get("trade_invalid",0)+1
                             continue
                         st=app.ensure_micro_state(sym)
                         try:
@@ -5066,6 +5080,7 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                         except Exception:
                             aid,last_id=-1,-1
                         if aid>=0 and aid<=last_id:
+                            _strict_raw_stats["trade_dup"]=_strict_raw_stats.get("trade_dup",0)+1
                             continue
 
                         app.process_agg_trade(sym,d)
@@ -5089,9 +5104,6 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                         tape.tape_stats["wsapi_last_trade_ms"]=now_ms
                         continue
 
-                    # Partial depth20 frames contain lastUpdateId/bids/asks but
-                    # no symbol. The lane's active symbol is therefore the
-                    # authoritative routing key.
                     if (
                         int(f(d.get("lastUpdateId"),0))>0
                         and isinstance(d.get("bids"),list)
@@ -5099,6 +5111,7 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                         and d.get("bids")
                         and d.get("asks")
                     ):
+                        _strict_raw_stats["depth_frames"]=_strict_raw_stats.get("depth_frames",0)+1
                         sym=active
                         st=app.ensure_micro_state(sym)
                         before_id=int(st.get("last_book_update_id",0) or 0)
@@ -5124,6 +5137,8 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                 ):
                     raise RuntimeError(f"strict raw ws closed type={msg.type}")
 
+            raise RuntimeError("strict raw websocket stream ended")
+
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5135,6 +5150,14 @@ async def strict_raw_ws_backbone_lane(lane_idx):
             host_cursor=(host_cursor+1)%len(hosts)
             await asyncio.sleep(1.0)
         finally:
+            if sub_task is not None and not sub_task.done():
+                sub_task.cancel()
+                try:
+                    await sub_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
             if session is not None and not session.closed:
                 try:
                     await session.close()
