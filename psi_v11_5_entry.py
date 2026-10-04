@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.96-reserved-micro-connector"
+VERSION="11.0.5.97-ipv4-strict-rest-budget"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -191,6 +191,7 @@ def _strict_micro_session():
                 limit_per_host=4,
                 ttl_dns_cache=300,
                 keepalive_timeout=20,
+                family=2,
             ),
             headers={"User-Agent":getattr(app,"USER_AGENT","psi-v11-strict-micro")},
         )
@@ -4892,6 +4893,7 @@ async def ws_api_micro_log_loop():
                 f"direct={_direct_micro_stats.get('trade_accepted',0)}/{_direct_micro_stats.get('depth_accepted',0)} "
                 f"directErr={_direct_micro_stats.get('errors',0)} "
                 f"strictREST={_strict_rest_stats.get('trade_ok',0)}/{_strict_rest_stats.get('depth_ok',0)} "
+                f"strictCycles={_strict_rest_stats.get('cycles',0)} "
                 f"strictMiss={_strict_rest_stats.get('trade_miss',0)}/{_strict_rest_stats.get('depth_miss',0)} "
                 f"strictTO={_strict_rest_stats.get('timeouts',0)} "
                 f"strictDiag={_strict_rest_stats.get('trade_diag','-')}|{_strict_rest_stats.get('depth_diag','-')} "
@@ -4948,7 +4950,7 @@ async def strict_rest_micro_bridge_loop():
                 async with session.get(
                     f"{host}{path}",
                     params=dict(params or {}),
-                    timeout=aiohttp.ClientTimeout(total=2.35,connect=.85,sock_read=1.65),
+                    timeout=aiohttp.ClientTimeout(total=4.2,connect=2.0,sock_read=2.2),
                 ) as resp:
                     if resp.status!=200:
                         body=(await resp.text())[:80].replace("\n"," ")
@@ -4981,7 +4983,7 @@ async def strict_rest_micro_bridge_loop():
         pending=set(tasks)
         winner=None
         winner_host=None
-        deadline=asyncio.get_running_loop().time()+2.65
+        deadline=asyncio.get_running_loop().time()+4.35
         try:
             while pending and winner is None:
                 remaining=deadline-asyncio.get_running_loop().time()
@@ -5138,7 +5140,7 @@ async def strict_rest_micro_bridge_loop():
             for sym in core:
                 jobs.append(asyncio.create_task(hydrate_trade(sym)))
                 jobs.append(asyncio.create_task(hydrate_depth(sym)))
-            done,pending=await asyncio.wait(jobs,timeout=3.2)
+            done,pending=await asyncio.wait(jobs,timeout=4.6)
             if pending:
                 _strict_rest_stats["timeouts"]+=len(pending)
                 for task in pending:
@@ -5584,6 +5586,6 @@ async def main():
         try: mod.VERSION=VERSION
         except Exception: pass
     print("[v11.0.5.90] Ψ PARALLEL TRADE FAILOVER RACE active — native micro readiness now drives formal integrity, event tape is only mandatory for event-dependent Monster states, pullback uses the corrected live gate, Pinpoint/formal aliases are synchronised, and BUY accepts a valid Pinpoint trigger/stop risk plan with RiskMap as fallback. RiskMap remains reliable and fully diagnosed. Qualified aggTrade reuses the stable full-universe Monster Binance feed, while the four execution shards carry depth20 only. An assigned shard is now immutable until its current websocket generation has processed a real valid depth20 frame; the 12-second rebalance dwell begins from that first verified depth frame. Watchdog separates execution structure health from rotating discovery coverage. Missing execution raw seeds are bootstrapped one symbol at a time in a background task, while FAST recovery exclusively owns already-seeded stale structure, keeping the Watchdog cadence non-blocking. Watchdog now adds an independent bounded direct-REST rescue lane for stale execution structure while normal FAST recovery remains WS-first. Health thresholds, signal thresholds and Pinpoint BUY authority are unchanged.",flush=True)
-    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), direct_strict_micro_stream_loop(), strict_rest_micro_bridge_loop())
+    await asyncio.gather(rescue.main(), binance_ws_api_loop(), market_ws_api_loop(), micro_ws_api_loop(), trade_ws_api_loop(), depth_ws_api_loop(), structure_kline_ws_loop(), structure_recovery_loop(), cold_seed_loop(), structure_cache_loop(), watchdog_loop(), ws_api_market_feed_fallback_loop(), strict_rest_micro_bridge_loop())
 
 if __name__=="__main__":asyncio.run(main())
