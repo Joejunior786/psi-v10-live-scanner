@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.18-fair-hydration-backoff"
+VERSION = "12.2.19-balanced-hydration-shards"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -160,12 +160,37 @@ _v12_ws_locks = [None] * V12_WS_SHARDS
 _v12_ws_gates = [None] * V12_WS_SHARDS
 _v12_ws_pending = [dict() for _ in range(V12_WS_SHARDS)]
 _v12_ws_ids = [0] * V12_WS_SHARDS
+_v12_ws_claims = [0] * V12_WS_SHARDS
 _v12_shard_pool = None
 
 
 def _v12_ws_shard_for(symbol, interval):
     key = f"{str(symbol).upper()}:{str(interval)}"
     return sum((i + 1) * ord(ch) for i, ch in enumerate(key)) % V12_WS_SHARDS
+
+
+def _v12_ws_claim(symbol, interval):
+    """Reserve the least-loaded healthy hydration shard without raising load."""
+    preferred = _v12_ws_shard_for(symbol, interval)
+    scored = []
+    for shard in range(V12_WS_SHARDS):
+        ready_evt = _v12_ws_ready[shard]
+        conn = _v12_ws_conns[shard]
+        ready = bool(ready_evt is not None and ready_evt.is_set() and conn is not None and not conn.closed)
+        circuit = _ws_circuit_open(shard)
+        load = int(_v12_ws_claims[shard]) + len(_v12_ws_pending[shard])
+        distance = (shard - preferred) % V12_WS_SHARDS
+        scored.append((0 if ready else 1, 1 if circuit else 0, load, distance, shard))
+    shard = min(scored)[-1]
+    _v12_ws_claims[shard] += 1
+    _stats[f"ws_shard_{shard}_claims"] += 1
+    _stats["ws_claim_max"] = max(int(_stats.get("ws_claim_max", 0)), int(_v12_ws_claims[shard]))
+    return shard
+
+
+def _v12_ws_release(shard):
+    shard = int(shard) % V12_WS_SHARDS
+    _v12_ws_claims[shard] = max(0, int(_v12_ws_claims[shard]) - 1)
 
 V12_CACHE_PATH = os.getenv("PSI_V12_CACHE_PATH", "/data/v12_hydration_cache.pkl")
 V12_CACHE_SAVE_SECONDS = max(20.0, float(os.getenv("PSI_V12_CACHE_SAVE_SECONDS", "30")))
@@ -1566,31 +1591,36 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats[f"v11_{tf}_ok"] += 1
 
     # 1) Isolated multi-shard V12 Binance WS is the normal transport.
+    # Claim the least-loaded healthy lane first so one deterministic hash bucket
+    # cannot queue while another reserved websocket is idle.
     if not isinstance(rows, list) or not rows:
-        ws_shard = _v12_ws_shard_for(sym, tf)
-        if not _ws_circuit_open(ws_shard):
-            try:
-                rows = await v12_ws_klines(
-                    sym, tf, limit, shard=ws_shard,
-                    response_timeout=5.0 if deep else 4.8,
-                    ready_timeout=0.8,
-                    gate_timeout=1.0,
-                    send_timeout=0.9,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                rows = None
+        ws_shard = _v12_ws_claim(sym, tf)
+        try:
+            if not _ws_circuit_open(ws_shard):
+                try:
+                    rows = await v12_ws_klines(
+                        sym, tf, limit, shard=ws_shard,
+                        response_timeout=5.0 if deep else 4.8,
+                        ready_timeout=0.8,
+                        gate_timeout=1.6,
+                        send_timeout=0.9,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    rows = None
 
-            if isinstance(rows, list) and rows:
-                _stats["dedicated_ws_ok"] += 1
-                _stats[f"dedicated_{tf}_ok"] += 1
+                if isinstance(rows, list) and rows:
+                    _stats["dedicated_ws_ok"] += 1
+                    _stats[f"dedicated_{tf}_ok"] += 1
+                else:
+                    _stats["dedicated_ws_miss"] += 1
+                    _stats[f"dedicated_{tf}_miss"] += 1
+                    rows = None
             else:
-                _stats["dedicated_ws_miss"] += 1
-                _stats[f"dedicated_{tf}_miss"] += 1
-                rows = None
-        else:
-            _stats["dedicated_circuit_skip"] += 1
+                _stats["dedicated_circuit_skip"] += 1
+        finally:
+            _v12_ws_release(ws_shard)
 
     # 2) FAST fallback after ANY dedicated miss: race the proven shared WS
     # against bounded Binance REST. The race is hard-bounded, so a temporarily
@@ -2274,6 +2304,7 @@ async def strategy_loop():
                 f"circuitSkip={_stats.get('dedicated_circuit_skip',0)} "
                 f"circuitOpen={sum(int(_ws_circuit_open(i)) for i in range(V12_WS_SHARDS))}/{V12_WS_SHARDS} "
                 f"wsShards={sum(int(evt is not None and evt.is_set()) for evt in _v12_ws_ready)}/{V12_WS_SHARDS} "
+                f"wsLoad={','.join(str(int(_v12_ws_claims[i]) + len(_v12_ws_pending[i])) for i in range(V12_WS_SHARDS))} "
                 f"sharedD1={_stats.get('shared_1d_ok',0)}/{_stats.get('shared_1d_miss',0)} "
                 f"sharedH1={_stats.get('shared_1h_ok',0)}/{_stats.get('shared_1h_miss',0)} "
                 f"sharedH4={_stats.get('shared_4h_ok',0)}/{_stats.get('shared_4h_miss',0)} "
@@ -2393,7 +2424,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.18] MULTI-SETUP AUTHORITY + FAIR {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.19] MULTI-SETUP AUTHORITY + BALANCED {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
