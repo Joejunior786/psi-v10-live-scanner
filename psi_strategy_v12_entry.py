@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.16-resilient-multishard-hydration"
+VERSION = "12.2.17-persistent-multishard-hydration"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -1489,9 +1489,13 @@ async def v12_ws_klines(
         _stats[f"ws_shard_{shard}_fail"] += 1
         _stats["ws_last_error"] = f"shard={shard} {type(exc).__name__}: {exc}"
         if isinstance(exc, asyncio.TimeoutError):
-            _stats["ws_timeout_recycles"] += 1
+            # A response timeout invalidates only this request. Do NOT tear
+            # down the healthy preconnected shard: late responses are safely
+            # ignored after the pending future is removed, and repeated
+            # timeouts are already contained by the per-shard circuit breaker.
+            _stats["ws_response_timeouts"] += 1
+            _stats[f"ws_shard_{shard}_response_timeouts"] += 1
             _record_ws_timeout(shard)
-            asyncio.create_task(_v12_close_ws_quick(shard))
         return None
     finally:
         if lock_acquired:
@@ -2215,7 +2219,7 @@ async def strategy_loop():
                 f"{_stats.get('dedicated_4h_miss',0)} rawWS={_stats.get('ws_ok',0)}/"
                 f"{_stats.get('ws_fail',0)} stageTO={_stats.get('dedicated_stage_timeout',0)} "
                 f"gateTO={_stats.get('ws_gate_timeout',0)} lockTO={_stats.get('ws_lock_timeout',0)} "
-                f"sendTO={_stats.get('ws_send_timeout',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
+                f"sendTO={_stats.get('ws_send_timeout',0)} respTO={_stats.get('ws_response_timeouts',0)} sharedFB={_stats.get('shared_ws_fallback_ok',0)}/"
                 f"{_stats.get('shared_ws_fallback_miss',0)} circuitFB={_stats.get('circuit_fallback_ok',0)}/{_stats.get('circuit_fallback_miss',0)} "
                 f"circuitWS={_stats.get('circuit_shared_win',0)} circuitREST={_stats.get('circuit_rest_win',0)} "
                 f"fastRest={_stats.get('fast_rest_ok',0)}/{_stats.get('fast_rest_fail',0)} restDefer={_stats.get('fast_rest_defer',0)} "
@@ -2338,7 +2342,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.16] MULTI-SETUP AUTHORITY + RESILIENT {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.17] MULTI-SETUP AUTHORITY + PERSISTENT {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
