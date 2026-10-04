@@ -3353,8 +3353,16 @@ async def redis_control_loop():
                                 break
                 except Exception:
                     risk_symbols=[]
-                if not risk_symbols:
-                    risk_symbols=list(symbols[:REDIS_RISK_CONTROL_SIZE])
+                # Formal/Monster risk priorities claim first slots, then
+                # fill the remaining local RiskMap capacity from the current
+                # execution micro pool. This changes scheduling only; RiskMap
+                # entry/stop/target validity rules remain unchanged.
+                for sym in symbols:
+                    sym=str(sym or "").upper()
+                    if sym.endswith("USDT") and sym not in risk_symbols:
+                        risk_symbols.append(sym)
+                    if len(risk_symbols)>=REDIS_RISK_CONTROL_SIZE:
+                        break
                 await client.set(
                     REDIS_RISK_CONTROL_KEY,
                     json.dumps(
