@@ -2357,7 +2357,86 @@ _risk_tf_cache = {}
 RISK_TF_CACHE_S = 120.0
 RISK_WS_ATTEMPTS = 2
 RISK_WS_RETRY_DELAY_S = 0.18
-_risk_tf_stats = {"cache_hit":0,"ws_ok":0,"ws_retry_ok":0,"rest_ok":0,"fail":0}
+RISK_WORKER_REDIS_URL = os.environ.get("REDIS_URL","").strip()
+RISK_WORKER_MODE = (
+    bool(RISK_WORKER_REDIS_URL)
+    and str(os.environ.get("PSI_RISK_WORKER_MODE","0")).strip().lower() in {"1","true","yes","on"}
+)
+RISK_WORKER_PREFIX = os.environ.get("PSI_RISK_REDIS_PREFIX","psi:v12:risk-candle").strip()
+RISK_WORKER_MAX_AGE_S = max(10.0,float(os.environ.get("PSI_RISK_WORKER_MAX_AGE_S","45")))
+_risk_worker_sync = None
+_risk_worker_symbol_cache = {}
+_risk_tf_stats = {
+    "cache_hit":0,"ws_ok":0,"ws_retry_ok":0,"rest_ok":0,"fail":0,
+    "worker_hit":0,"worker_miss":0,"worker_stale":0,"worker_error":0,
+    "worker_required_miss":0,"worker_last_error":"",
+}
+
+def _risk_worker_rows(symbol,interval,limit):
+    global _risk_worker_sync
+    if not RISK_WORKER_MODE:
+        return None
+    symbol=str(symbol);interval=str(interval);limit=int(limit)
+    now=time.time()
+    cached=_risk_worker_symbol_cache.get(symbol)
+    if not isinstance(cached,dict) or now-float(cached.get("_loaded",0.0))>1.0:
+        try:
+            if _risk_worker_sync is None:
+                _risk_worker_sync=redis_sync.from_url(
+                    RISK_WORKER_REDIS_URL,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    socket_connect_timeout=0.8,
+                    socket_timeout=0.8,
+                    health_check_interval=15,
+                    max_connections=16,
+                )
+            keys=[
+                f"{RISK_WORKER_PREFIX}:{symbol}:1m",
+                f"{RISK_WORKER_PREFIX}:{symbol}:5m",
+                f"{RISK_WORKER_PREFIX}:{symbol}:15m",
+            ]
+            raws=_risk_worker_sync.mget(keys)
+            bundle={"_loaded":time.time()}
+            for tf,raw in zip(("1m","5m","15m"),raws or []):
+                if not raw:
+                    bundle[tf]=None
+                    continue
+                try:
+                    bundle[tf]=json.loads(raw)
+                except Exception:
+                    bundle[tf]=None
+            _risk_worker_symbol_cache[symbol]=bundle
+            cached=bundle
+        except Exception as exc:
+            _risk_tf_stats["worker_error"]+=1
+            _risk_tf_stats["worker_last_error"]=f"{type(exc).__name__}: {exc}"
+            try:
+                if _risk_worker_sync is not None:
+                    _risk_worker_sync.close()
+            except Exception:
+                pass
+            _risk_worker_sync=None
+            return None
+
+    payload=cached.get(interval) if isinstance(cached,dict) else None
+    if not isinstance(payload,dict):
+        _risk_tf_stats["worker_miss"]+=1
+        return None
+    fetched_ms=f(payload.get("fetched_ms"))
+    age_s=(time.time()*1000.0-fetched_ms)/1000.0 if fetched_ms>0 else 999999.0
+    if age_s<0:
+        age_s=0.0
+    if age_s>RISK_WORKER_MAX_AGE_S:
+        _risk_tf_stats["worker_stale"]+=1
+        return None
+    rows=payload.get("rows")
+    if not isinstance(rows,list) or not rows:
+        _risk_tf_stats["worker_miss"]+=1
+        return None
+    _risk_tf_stats["worker_hit"]+=1
+    return rows[-limit:] if limit>0 else rows
+
 
 async def _risk_fetch_race(client, symbol, interval, limit):
     """Secondary REST fallback for RiskMap with a hard wall-clock budget.
@@ -2488,6 +2567,16 @@ async def _risk_load_klines(client, symbol, interval, limit):
     if cached and time.time()-float(cached[0])<=RISK_TF_CACHE_S:
         _risk_tf_stats["cache_hit"]+=1
         return cached[1]
+
+    if RISK_WORKER_MODE:
+        rows=_risk_worker_rows(symbol,interval,limit)
+        if isinstance(rows,list) and rows:
+            _risk_tf_cache[key]=(time.time(),rows)
+            _risk_last_ok=time.time()
+            return rows
+        _risk_tf_stats["worker_required_miss"]+=1
+        _risk_tf_stats["fail"]+=1
+        return []
 
     if _ws_api_ready is not None and _ws_api_ready.is_set():
         rows=await binance_ws_api_klines(
@@ -4625,7 +4714,7 @@ async def watchdog_loop():
                 f"structureFreshScope={fresh_cov}/{total} structureEverScope={ever_cov}/{total} "
                 f"pinpoint={pin} pool={pool}/{getattr(base,'POOL_SIZE',80)} liveMicro={live_micro}/{pool} "
                 f"legacyMonsterShards={shards}/{tape.SHARDS} distTape={distributed_shards_up}/{distributed_shards_required} distTapeState={'LIVE' if distributed_tape_live else 'STALE'} distBookAge={dist_book_age:.1f}s distTradeAge={dist_trade_age:.1f}s restTape={'LIVE' if rest_tape_live else 'STALE'} restBookAge={rest_book_age:.1f}s restTradeAge={rest_trade_age:.1f}s wsApiTape={'LIVE' if wsapi_tape_live else 'STALE'} wsApiBookAge={wsapi_book_age:.1f}s wsApiTradeAge={wsapi_trade_age:.1f}s extAge={ext_age:.1f}s "
-                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wdRescueOK={recovery_stats['rescue_ok']} wdRescueFail={recovery_stats['rescue_fail']} wdStaleOK={recovery_stats['rescue_stale_ok']} wdStaleFail={recovery_stats['rescue_stale_fail']} wdRouteReset={recovery_stats['route_resets']} wdRestOK={_structure_tf_stats['watchdog_rest_ok']} wdRestFail={_structure_tf_stats['watchdog_rest_fail']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
+                f"restOK={_rest_stats['ok']} restFail={_rest_stats['fail']} restRetry={_rest_stats['attempt_fail']} wsApi={'UP' if (_ws_api_ready is not None and _ws_api_ready.is_set()) else 'DOWN'} wsApiKlineOK={_ws_api_stats['ok']} wsApiKlineFail={_ws_api_stats['fail']} wsStruct={_ws_api_stats['structure_ok']} wdRescueOK={recovery_stats['rescue_ok']} wdRescueFail={recovery_stats['rescue_fail']} wdStaleOK={recovery_stats['rescue_stale_ok']} wdStaleFail={recovery_stats['rescue_stale_fail']} wdRouteReset={recovery_stats['route_resets']} wdRestOK={_structure_tf_stats['watchdog_rest_ok']} wdRestFail={_structure_tf_stats['watchdog_rest_fail']} wsRisk={_ws_api_stats['risk_ok']} riskTfCacheSize={len(_risk_tf_cache)} riskTfCacheHits={_risk_tf_stats['cache_hit']} riskWorker={_risk_tf_stats['worker_hit']}/{_risk_tf_stats['worker_miss']}/{_risk_tf_stats['worker_stale']}/{_risk_tf_stats['worker_error']} riskWorkerReqMiss={_risk_tf_stats['worker_required_miss']} riskMapTracked={_risk_map_tracked} riskPlans={_risk_map_plans} riskWsOK={_risk_tf_stats['ws_ok']} riskWsRetry={_risk_tf_stats['ws_retry_ok']} riskRestOK={_risk_tf_stats['rest_ok']} riskTfFail={_risk_tf_stats['fail']} riskRestRouteOK={_rest_stats['risk_ok']} riskFail={_rest_stats['risk_fail']} riskDefer={_rest_stats['risk_defer']} bgOK={_rest_stats['bg_ok']} bgFail={_rest_stats['bg_fail']} bgDefer={_rest_stats['bg_defer']} "
                 f"actions={actions or ['NONE']} totals={watchdog_stats}",
                 flush=True,
             )
