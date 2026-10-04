@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.91-direct-strict-micro-stream"
+VERSION="11.0.5.92-bounded-direct-micro-stream"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -4881,15 +4881,15 @@ async def ws_api_micro_log_loop():
 async def direct_strict_micro_stream_loop():
     """Direct Binance stream bridge for the tiny strict execution core.
 
-    This is transport-only resilience. It feeds Binance aggTrade and partial
-    depth20 snapshots through the existing canonical validators; no execution,
-    freshness, sequence, setup, or BUY threshold is relaxed.
+    Transport-only resilience: verified Binance aggTrade + partial depth20 feed
+    the existing canonical validators. No signal/freshness/sequence threshold
+    is relaxed.
     """
     global _direct_micro_last_core
     hosts=(
         "wss://data-stream.binance.vision/stream",
-        "wss://stream.binance.com:9443/stream",
         "wss://stream.binance.com:443/stream",
+        "wss://stream.binance.com:9443/stream",
     )
     host_cursor=0
     first=True
@@ -4901,7 +4901,7 @@ async def direct_strict_micro_stream_loop():
 
             core=tuple(_micro_fallback_core_symbols())
             if not core:
-                await asyncio.sleep(.5)
+                await asyncio.sleep(.35)
                 continue
 
             streams=[]
@@ -4909,116 +4909,122 @@ async def direct_strict_micro_stream_loop():
                 base_sym=str(sym).lower()
                 streams.append(f"{base_sym}@aggTrade")
                 streams.append(f"{base_sym}@depth20@100ms")
-            url=f"{hosts[host_cursor % len(hosts)]}?streams={'/'.join(streams)}"
+            host=hosts[host_cursor % len(hosts)]
+            url=f"{host}?streams={'/'.join(streams)}"
             _direct_micro_last_core=core
             _direct_micro_stats["last_core"]=",".join(core)
 
+            ws=None
             try:
-                async with app.session.ws_connect(
-                    url,
-                    heartbeat=20,
-                    receive_timeout=35,
-                    max_msg_size=0,
-                ) as ws:
-                    _direct_micro_stats["connects"]+=1
-                    if not first:
-                        _direct_micro_stats["reconnects"]+=1
-                    first=False
-                    print(
-                        f"Ψ-DIRECT-MICRO connected host={hosts[host_cursor % len(hosts)]} "
-                        f"core={list(core)} streams={len(streams)}",
-                        flush=True,
-                    )
+                # Bound the handshake itself. The previous async-with connect
+                # could hang before either a success or error log was emitted.
+                ws=await asyncio.wait_for(
+                    app.session.ws_connect(
+                        url,
+                        heartbeat=20,
+                        receive_timeout=None,
+                        max_msg_size=0,
+                    ),
+                    timeout=4.0,
+                )
 
-                    while True:
-                        # Reconnect immediately when continuity rotates the core.
-                        current=tuple(_micro_fallback_core_symbols())
-                        if current!=core:
-                            print(
-                                f"Ψ-DIRECT-MICRO rotate old={list(core)} new={list(current)}",
-                                flush=True,
-                            )
-                            break
+                _direct_micro_stats["connects"]+=1
+                if not first:
+                    _direct_micro_stats["reconnects"]+=1
+                first=False
+                print(
+                    f"Ψ-DIRECT-MICRO connected host={host} "
+                    f"core={list(core)} streams={len(streams)}",
+                    flush=True,
+                )
 
+                while True:
+                    current=tuple(_micro_fallback_core_symbols())
+                    if current!=core:
+                        print(
+                            f"Ψ-DIRECT-MICRO rotate old={list(core)} new={list(current)}",
+                            flush=True,
+                        )
+                        break
+
+                    try:
+                        msg=await asyncio.wait_for(ws.receive(),timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    if msg.type==aiohttp.WSMsgType.TEXT:
                         try:
-                            msg=await asyncio.wait_for(ws.receive(),timeout=2.0)
-                        except asyncio.TimeoutError:
+                            payload=json.loads(msg.data)
+                        except Exception:
                             continue
+                        data=payload.get("data") if isinstance(payload,dict) else None
+                        stream=str(payload.get("stream") or "") if isinstance(payload,dict) else ""
+                        if not isinstance(data,dict):
+                            continue
+                        _direct_micro_stats["events"]+=1
 
-                        if msg.type==aiohttp.WSMsgType.TEXT:
+                        if stream.endswith("@aggTrade") or str(data.get("e") or "")=="aggTrade":
+                            sym=str(data.get("s") or "").upper()
+                            if sym not in core:
+                                continue
                             try:
-                                payload=json.loads(msg.data)
+                                aid=int(data.get("a",-1))
                             except Exception:
                                 continue
-                            data=payload.get("data") if isinstance(payload,dict) else None
-                            stream=str(payload.get("stream") or "") if isinstance(payload,dict) else ""
-                            if not isinstance(data,dict):
+                            st=app.ensure_micro_state(sym)
+                            last_app=st.get("last_agg_id")
+                            if last_app is not None and aid<=int(last_app):
                                 continue
-                            _direct_micro_stats["events"]+=1
+                            event_ms=int(f(data.get("T"),f(data.get("E"),0)))
+                            price=f(data.get("p"))
+                            qty=f(data.get("q"))
+                            if aid<0 or event_ms<=0 or price<=0 or qty<=0:
+                                continue
 
-                            if stream.endswith("@aggTrade") or str(data.get("e") or "")=="aggTrade":
-                                sym=str(data.get("s") or "").upper()
-                                if sym not in core:
-                                    continue
-                                try:
-                                    aid=int(data.get("a",-1))
-                                except Exception:
-                                    continue
-                                st=app.ensure_micro_state(sym)
-                                last_app=st.get("last_agg_id")
-                                if last_app is not None and aid<=int(last_app):
-                                    continue
-                                event_ms=int(f(data.get("T"),f(data.get("E"),0)))
-                                price=f(data.get("p"))
-                                qty=f(data.get("q"))
-                                if aid<0 or event_ms<=0 or price<=0 or qty<=0:
-                                    continue
-                                app.process_agg_trade(sym,data)
-                                # Mirror into event tape only when this aggregate
-                                # id is newer than any fallback/native bridge id.
-                                last_tape=int(tape._rest_agg_last_id.get(sym,-1))
-                                if aid>last_tape:
-                                    tape.trade_events[sym].append(
-                                        (event_ms/1000.0,price,price*qty,not bool(data.get("m")),event_ms)
-                                    )
-                                    tape._rest_agg_last_id[sym]=aid
+                            app.process_agg_trade(sym,data)
+
+                            last_tape=int(tape._rest_agg_last_id.get(sym,-1))
+                            if aid>last_tape:
+                                tape.trade_events[sym].append(
+                                    (event_ms/1000.0,price,price*qty,not bool(data.get("m")),event_ms)
+                                )
+                                tape._rest_agg_last_id[sym]=aid
+
+                            ms=int(time.time()*1000)
+                            _direct_micro_stats["trade_events"]+=1
+                            _direct_micro_stats["trade_accepted"]+=1
+                            _direct_micro_stats["last_trade_ms"]=ms
+                            _ws_market_stats["last_trade_ms"]=ms
+                            _ws_market_stats["trade_rows"]+=1
+                            tape.tape_stats["wsapi_last_trade_ms"]=ms
+                            continue
+
+                        if "@depth20" in stream or ("lastUpdateId" in data and data.get("bids") and data.get("asks")):
+                            stream_sym=stream.split("@",1)[0].upper() if "@" in stream else ""
+                            sym=str(data.get("s") or stream_sym).upper()
+                            if sym not in core:
+                                continue
+                            st=app.ensure_micro_state(sym)
+                            before_id=int(st.get("last_book_update_id",0) or 0)
+                            app.process_partial_depth_snapshot(sym,data)
+                            after=app.ensure_micro_state(sym)
+                            after_id=int(after.get("last_book_update_id",0) or 0)
+                            if after_id>before_id:
                                 ms=int(time.time()*1000)
-                                _direct_micro_stats["trade_events"]+=1
-                                _direct_micro_stats["trade_accepted"]+=1
-                                _direct_micro_stats["last_trade_ms"]=ms
-                                _ws_market_stats["last_trade_ms"]=ms
-                                _ws_market_stats["trade_rows"]+=1
-                                tape.tape_stats["wsapi_last_trade_ms"]=ms
-                                continue
+                                _direct_micro_stats["depth_events"]+=1
+                                _direct_micro_stats["depth_accepted"]+=1
+                                _direct_micro_stats["last_depth_ms"]=ms
+                                _ws_market_stats["last_depth_ms"]=ms
+                                _ws_market_stats["depth_ok"]+=1
+                                tape.tape_stats["wsapi_last_depth_ms"]=ms
+                            continue
 
-                            if "@depth20" in stream or ("lastUpdateId" in data and data.get("bids") and data.get("asks")):
-                                # Combined stream name is authoritative even if
-                                # the partial-depth payload omits a symbol field.
-                                stream_sym=stream.split("@",1)[0].upper() if "@" in stream else ""
-                                sym=str(data.get("s") or stream_sym).upper()
-                                if sym not in core:
-                                    continue
-                                st=app.ensure_micro_state(sym)
-                                before_id=int(st.get("last_book_update_id",0) or 0)
-                                app.process_partial_depth_snapshot(sym,data)
-                                after=app.ensure_micro_state(sym)
-                                after_id=int(after.get("last_book_update_id",0) or 0)
-                                if after_id>before_id:
-                                    ms=int(time.time()*1000)
-                                    _direct_micro_stats["depth_events"]+=1
-                                    _direct_micro_stats["depth_accepted"]+=1
-                                    _direct_micro_stats["last_depth_ms"]=ms
-                                    _ws_market_stats["last_depth_ms"]=ms
-                                    _ws_market_stats["depth_ok"]+=1
-                                    tape.tape_stats["wsapi_last_depth_ms"]=ms
-                                continue
-
-                        elif msg.type in (
-                            aiohttp.WSMsgType.CLOSED,
-                            aiohttp.WSMsgType.CLOSE,
-                            aiohttp.WSMsgType.ERROR,
-                        ):
-                            raise RuntimeError(f"direct micro stream closed type={msg.type}")
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.ERROR,
+                    ):
+                        raise RuntimeError(f"direct micro stream closed type={msg.type}")
 
             except asyncio.CancelledError:
                 raise
@@ -5031,14 +5037,20 @@ async def direct_strict_micro_stream_loop():
                     f"nextHost={hosts[host_cursor]}",
                     flush=True,
                 )
-                await asyncio.sleep(.5)
+                await asyncio.sleep(.35)
+            finally:
+                if ws is not None and not ws.closed:
+                    try:
+                        await asyncio.wait_for(ws.close(),timeout=1.0)
+                    except Exception:
+                        pass
 
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             _direct_micro_stats["errors"]+=1
             _direct_micro_stats["last_error"]=f"outer {type(exc).__name__}: {exc}"
-            await asyncio.sleep(.5)
+            await asyncio.sleep(.35)
 
 
 async def ws_api_micro_fallback_loop():
