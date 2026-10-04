@@ -13,7 +13,7 @@ app = legacy.app
 q = legacy.q
 base = legacy.base
 
-VERSION = "12.2.17-persistent-multishard-hydration"
+VERSION = "12.2.18-fair-hydration-backoff"
 
 # ---------------------------------------------------------------------------
 # V12 mandate
@@ -76,6 +76,36 @@ _cycle = 0
 _cursor = 0
 _last_board_print = 0.0
 _stats = defaultdict(int)
+_tf_fail_streak = defaultdict(int)
+_tf_retry_after = defaultdict(float)
+
+
+def _tf_retry_key(sym, tf, deep=False):
+    return (str(sym).upper(), str(tf), "DEEP" if deep else "FAST")
+
+
+def _tf_backoff_active(sym, tf, deep=False):
+    return time.monotonic() < float(_tf_retry_after[_tf_retry_key(sym, tf, deep)] or 0.0)
+
+
+def _tf_mark_success(sym, tf, deep=False):
+    key = _tf_retry_key(sym, tf, deep)
+    _tf_fail_streak[key] = 0
+    _tf_retry_after[key] = 0.0
+
+
+def _tf_mark_failure(sym, tf, deep=False):
+    key = _tf_retry_key(sym, tf, deep)
+    n = int(_tf_fail_streak[key]) + 1
+    _tf_fail_streak[key] = n
+    # Let one complete market-rotation cycle pass after the first failure,
+    # then increase gently. Data remains fail-closed; only retry scheduling
+    # changes.
+    delay = min(180.0, 30.0 * (2 ** min(n - 1, 3)))
+    _tf_retry_after[key] = time.monotonic() + delay
+    _stats["tf_backoff_marks"] += 1
+    _stats["tf_backoff_last_seconds"] = int(delay)
+    _stats["tf_backoff_last"] = f"{key[0]}:{key[1]}:{key[2]}:n={n}"
 
 _ws_circuit_until = defaultdict(float)
 _ws_timeout_events = defaultdict(list)
@@ -1514,6 +1544,9 @@ async def v12_ws_klines(
 async def _fetch_tf(sym, tf, deep=False):
     if app.session is None:
         return False
+    if _tf_backoff_active(sym, tf, deep):
+        _stats["tf_backoff_skip"] += 1
+        return False
 
     limit = DEEP_TF_LIMIT if deep else FAST_TF_LIMIT
     need = DEEP_MIN_ROWS if deep else FAST_MIN_ROWS
@@ -1699,9 +1732,11 @@ async def _fetch_tf(sym, tf, deep=False):
             _stats["history_short_resolved"] += 1
         else:
             _stats["fetch_fast_ok"] += 1
+        _tf_mark_success(sym, tf, deep)
         return True
 
     _stats["fetch_fail"] += 1
+    _tf_mark_failure(sym, tf, deep)
     return False
 
 
@@ -1820,6 +1855,19 @@ def _bootstrap_symbols(universe, refresh_tasks):
                 ready += 1
         return ready
 
+    def core_actionable(sym):
+        c = _cache.get(sym) or {}
+        for tf in ("1h", "4h", "1d"):
+            item = c.get(tf) or {}
+            fresh = now - f(item.get("updated")) <= TF_TTL[tf]
+            resolved = fresh and (
+                bool(item.get("snap"))
+                or (bool(item.get("history_capped")) and bool(item.get("rows")))
+            )
+            if not resolved and not _tf_backoff_active(sym, tf, False):
+                return True
+        return False
+
     # Highest priority: symbols already carrying 1/3 or 2/3 valid core
     # timeframes. Completing them turns fragmented fetch success into usable
     # V12 qualification immediately.
@@ -1828,7 +1876,7 @@ def _bootstrap_symbols(universe, refresh_tasks):
         if sym in refresh_tasks:
             continue
         ready = core_state(sym)
-        if 0 < ready < 3:
+        if 0 < ready < 3 and core_actionable(sym):
             partial.append((ready, sym))
     partial.sort(reverse=True)
 
@@ -1847,7 +1895,7 @@ def _bootstrap_symbols(universe, refresh_tasks):
         attempts += 1
         if sym in refresh_tasks or sym in chosen:
             continue
-        if core_state(sym) < 3:
+        if core_state(sym) < 3 and core_actionable(sym):
             out.append(sym)
             chosen.add(sym)
 
@@ -2229,7 +2277,10 @@ async def strategy_loop():
                 f"sharedD1={_stats.get('shared_1d_ok',0)}/{_stats.get('shared_1d_miss',0)} "
                 f"sharedH1={_stats.get('shared_1h_ok',0)}/{_stats.get('shared_1h_miss',0)} "
                 f"sharedH4={_stats.get('shared_4h_ok',0)}/{_stats.get('shared_4h_miss',0)} "
-                f"fetchRestOK={_stats.get('fetch_rest_ok',0)} lastWS={_stats.get('ws_last_error','-')}",
+                f"fetchRestOK={_stats.get('fetch_rest_ok',0)} "
+                f"tfBackoff={sum(int(float(v or 0)>time.monotonic()) for v in _tf_retry_after.values())} "
+                f"tfSkip={_stats.get('tf_backoff_skip',0)} tfLast={_stats.get('tf_backoff_last','-')} "
+                f"lastWS={_stats.get('ws_last_error','-')}",
                 flush=True,
             )
 
@@ -2342,7 +2393,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        f"[v12.2.17] MULTI-SETUP AUTHORITY + PERSISTENT {V12_WS_SHARDS}-SHARD HYDRATION active — "
+        f"[v12.2.18] MULTI-SETUP AUTHORITY + FAIR {V12_WS_SHARDS}-SHARD HYDRATION active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
