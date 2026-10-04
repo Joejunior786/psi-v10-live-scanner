@@ -118,6 +118,8 @@ def _refresh_tape_snapshots_sync(force=False):
         tape.tape_stats["distributed_books"]=snapshot_books
         tape.tape_stats["distributed_snapshot_symbols"]=snapshot_symbols
         tape.tape_stats["distributed_snapshot_sync_valid"]=valid_snapshots
+        if valid_snapshots>0:
+            tape.tape_stats["distributed_shards_up"]=valid_snapshots
         _redis_bridge_stats["tape_snapshot_sync_ok"]+=1
         _redis_bridge_stats["tape_snapshot_sync_symbols"]=snapshot_symbols
         _redis_bridge_stats["tape_snapshot_sync_last_ms"]=now_ms
