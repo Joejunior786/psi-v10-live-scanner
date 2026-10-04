@@ -24,6 +24,14 @@ BUILD_COMMIT = (
     or "unknown"
 ).strip()
 
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
+REDIS_MICRO_POOL_SIZE = max(10, min(int(os.getenv("PSI_REDIS_MICRO_POOL_SIZE", "40")), 80))
+REDIS_TRADE_CHANNEL = "psi:v12:trade"
+REDIS_DEPTH_CHANNEL = "psi:v12:depth"
+_redis_bridge_stats = defaultdict(int)
+_redis_worker_health = {}
+
 
 def _version_lock_snapshot():
     mismatches = []
@@ -2758,6 +2766,142 @@ async def strategy_loop():
         await asyncio.sleep(0.75 if phase != "STEADY" else 5.0)
 
 
+
+def _distributed_micro_symbols():
+    out = []
+    seen = set()
+
+    def add(sym):
+        sym = str(sym or "").upper()
+        if sym.endswith("USDT") and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+
+    for sym in list(getattr(app, "selected_micro_symbols", []) or []):
+        add(sym)
+
+    try:
+        for row in _board():
+            add(row.get("symbol"))
+            if len(out) >= REDIS_MICRO_POOL_SIZE:
+                break
+    except Exception:
+        pass
+
+    return out[:REDIS_MICRO_POOL_SIZE]
+
+
+async def redis_control_loop():
+    if not REDIS_URL:
+        _redis_bridge_stats["control_disabled"] = 1
+        return
+
+    while True:
+        client = None
+        try:
+            client = redis_async.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            await client.ping()
+            _redis_bridge_stats["control_connects"] += 1
+            while True:
+                symbols = _distributed_micro_symbols()
+                payload = json.dumps(
+                    {
+                        "version": VERSION,
+                        "authority": "V12_ONLY",
+                        "symbols": symbols,
+                        "generated_ms": int(time.time() * 1000),
+                    },
+                    separators=(",", ":"),
+                )
+                await client.set(REDIS_CONTROL_KEY, payload, ex=10)
+                _redis_bridge_stats["control_symbols"] = len(symbols)
+                _redis_bridge_stats["control_last_ms"] = int(time.time() * 1000)
+
+                for role in ("trade", "book"):
+                    raw = await client.get(f"psi:v12:worker:{role}")
+                    if raw:
+                        try:
+                            _redis_worker_health[role] = json.loads(raw)
+                        except Exception:
+                            _redis_worker_health[role] = {"raw": raw}
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _redis_bridge_stats["control_errors"] += 1
+            _redis_bridge_stats["control_last_error"] = f"{type(exc).__name__}: {exc}"
+            await asyncio.sleep(1.5)
+        finally:
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+
+async def redis_micro_ingest_loop():
+    if not REDIS_URL:
+        _redis_bridge_stats["ingest_disabled"] = 1
+        return
+
+    while True:
+        client = None
+        pubsub = None
+        try:
+            client = redis_async.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            await client.ping()
+            pubsub = client.pubsub(ignore_subscribe_messages=True)
+            await pubsub.subscribe(REDIS_TRADE_CHANNEL, REDIS_DEPTH_CHANNEL)
+            _redis_bridge_stats["ingest_connects"] += 1
+            print(
+                f"Ψ-V12 REDIS_MICRO connected pool={REDIS_MICRO_POOL_SIZE} "
+                f"channels={REDIS_TRADE_CHANNEL},{REDIS_DEPTH_CHANNEL}",
+                flush=True,
+            )
+
+            while True:
+                message = await pubsub.get_message(timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    payload = json.loads(message.get("data") or "{}")
+                    symbol = str(payload.get("symbol") or "").upper()
+                    data = payload.get("data") or {}
+                    channel = str(message.get("channel") or "")
+                    if not symbol or not isinstance(data, dict):
+                        continue
+
+                    if channel == REDIS_TRADE_CHANNEL:
+                        app.process_agg_trade(symbol, data)
+                        _redis_bridge_stats["trade_events"] += 1
+                        _redis_bridge_stats["trade_last_ms"] = int(time.time() * 1000)
+                    elif channel == REDIS_DEPTH_CHANNEL:
+                        app.process_partial_depth_snapshot(symbol, data)
+                        _redis_bridge_stats["depth_events"] += 1
+                        _redis_bridge_stats["depth_last_ms"] = int(time.time() * 1000)
+                except Exception as exc:
+                    _redis_bridge_stats["event_errors"] += 1
+                    _redis_bridge_stats["event_last_error"] = f"{type(exc).__name__}: {exc}"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _redis_bridge_stats["ingest_errors"] += 1
+            _redis_bridge_stats["ingest_last_error"] = f"{type(exc).__name__}: {exc}"
+            await asyncio.sleep(1.5)
+        finally:
+            if pubsub is not None:
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    pass
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+
 async def v12_scan(req):
     version_lock = _version_lock_snapshot()
     if not version_lock["pass"]:
@@ -2819,6 +2963,12 @@ async def v12_scan(req):
         "buy_now": [r for r in all_rows if r.get("execution_state") == "BUY NOW"][:limit],
         "results": rows[:limit],
         "stats": dict(_stats),
+        "distributed_micro": {
+            "enabled": bool(REDIS_URL),
+            "pool_target": REDIS_MICRO_POOL_SIZE,
+            "bridge": dict(_redis_bridge_stats),
+            "workers": dict(_redis_worker_health),
+        },
         "generated_ms": int(time.time() * 1000),
     })
 
@@ -2863,6 +3013,12 @@ async def v12_health(req):
         "deep_ma_ready": deep_ready,
         "weekly_deep_ready": weekly_deep_ready,
         "stats": dict(_stats),
+        "distributed_micro": {
+            "enabled": bool(REDIS_URL),
+            "pool_target": REDIS_MICRO_POOL_SIZE,
+            "bridge": dict(_redis_bridge_stats),
+            "workers": dict(_redis_worker_health),
+        },
     })
 
 
@@ -2900,8 +3056,16 @@ async def main():
         flush=True,
     )
     hydration_lanes = [v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)]
+    distributed_lanes = []
+    if REDIS_URL:
+        distributed_lanes = [redis_control_loop(), redis_micro_ingest_loop()]
+        print(
+            f"Ψ-V12 DISTRIBUTED_MICRO enabled poolTarget={REDIS_MICRO_POOL_SIZE}",
+            flush=True,
+        )
     await asyncio.gather(
-        legacy.main(), strategy_loop(), cache_persist_loop(), *hydration_lanes
+        legacy.main(), strategy_loop(), cache_persist_loop(),
+        *hydration_lanes, *distributed_lanes
     )
 
 
