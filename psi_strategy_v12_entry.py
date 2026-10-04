@@ -2278,7 +2278,7 @@ async def main():
     # Keep the legacy WS-API loader's production-tested 3-request gate.
     # Flooding this socket reduced, rather than improved, hydration throughput.
     print(
-        "[v12.2.5] MULTI-SETUP AUTHORITY + PARALLEL MICRO RECOVERY active
+        "[v12.2.5] MULTI-SETUP AUTHORITY + PARALLEL MICRO RECOVERY active — "
         "independent Golden Cross, EMA rejection/reclaim, Weekly MA interaction, "
         "Weekly/Daily cross, MTF confluence, deep pullback exhaustion, coiled accumulation, "
         "Daily range-bottom, failed breakdown, liquidity sweep, compression breakout, "
