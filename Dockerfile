@@ -57,6 +57,8 @@ COPY psi_v11_3_7_entry.py .
 COPY psi_v11_4_entry.py .
 COPY psi_v11_5_entry.py .
 COPY psi_strategy_v12_entry.py .
+COPY test_v12_execution_gate.py .
+RUN python -m py_compile psi_strategy_v12_entry.py && python -m unittest -v test_v12_execution_gate.py
 
 ENV PORT=8080
 ENV PSI_SCANNER_VERSION=12.0.0
