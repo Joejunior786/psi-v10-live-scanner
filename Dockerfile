@@ -61,7 +61,9 @@ COPY test_v12_execution_gate.py .
 RUN python -m py_compile psi_strategy_v12_entry.py && python -m unittest -v test_v12_execution_gate.py
 
 ENV PORT=8080
-ENV PSI_SCANNER_VERSION=12.0.0
+ENV PSI_SCANNER_VERSION=12.3.0-strict-buy-now-gate
+ENV PSI_APPROVED_SCANNER_VERSION=12.3.0-strict-buy-now-gate
+ENV PSI_STRATEGY_AUTHORITY=V12_ONLY
 ENV PSI_V11_SHADOW_ONLY=1
 ENV PSI_BYBIT_ENABLED=0
 
