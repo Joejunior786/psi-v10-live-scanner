@@ -12,7 +12,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.101-persistent-raw-receive"
+VERSION="11.0.5.102-stable-preconnected-raw"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -4997,7 +4997,6 @@ async def strict_raw_ws_backbone_lane(lane_idx):
             )
 
             active=None
-            recv_task=asyncio.create_task(ws.receive())
             while True:
                 core=tuple(_micro_fallback_core_symbols())
                 target=core[lane_idx] if len(core)>lane_idx else None
@@ -5031,13 +5030,10 @@ async def strict_raw_ws_backbone_lane(lane_idx):
                             flush=True,
                         )
 
-                done,_=await asyncio.wait({recv_task},timeout=.50)
-                if not done:
-                    continue
                 try:
-                    msg=recv_task.result()
-                finally:
-                    recv_task=asyncio.create_task(ws.receive())
+                    msg=await asyncio.wait_for(ws.receive(),timeout=.75)
+                except asyncio.TimeoutError:
+                    continue
 
                 if msg.type==aiohttp.WSMsgType.TEXT:
                     try:
@@ -5139,12 +5135,6 @@ async def strict_raw_ws_backbone_lane(lane_idx):
             host_cursor=(host_cursor+1)%len(hosts)
             await asyncio.sleep(1.0)
         finally:
-            try:
-                if 'recv_task' in locals() and recv_task is not None and not recv_task.done():
-                    recv_task.cancel()
-                    recv_task.add_done_callback(lambda t: None)
-            except Exception:
-                pass
             if session is not None and not session.closed:
                 try:
                     await session.close()
