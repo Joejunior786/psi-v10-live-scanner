@@ -8,7 +8,7 @@ from typing import List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.0-distributed-micro-3"
+WORKER_VERSION = "12.3.2-distributed-micro-4"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -29,6 +29,18 @@ WS_HOSTS = tuple(
 )
 CONTROL_POLL_SECONDS = max(1.0, float(os.getenv("PSI_WORKER_CONTROL_POLL_SECONDS", "2")))
 MAX_SYMBOLS = max(1, min(int(os.getenv("PSI_WORKER_MAX_SYMBOLS", "80")), 120))
+CONTROL_MAX_REPLACEMENTS = max(
+    1, min(int(os.getenv("PSI_WORKER_MAX_REPLACEMENTS", "2")), 12)
+)
+CONTROL_REBALANCE_SECONDS = max(
+    5.0, float(os.getenv("PSI_WORKER_CONTROL_REBALANCE_SECONDS", "30"))
+)
+CONTROL_MIN_HOLD_SECONDS = max(
+    30.0, float(os.getenv("PSI_WORKER_MIN_HOLD_SECONDS", "120"))
+)
+STATE_RETENTION_SECONDS = max(
+    120.0, float(os.getenv("PSI_WORKER_STATE_RETENTION_SECONDS", "300"))
+)
 RECONNECT_BACKOFF = max(0.5, float(os.getenv("PSI_WORKER_RECONNECT_BACKOFF", "1.5")))
 
 if ROLE not in {"TRADE", "BOOK"}:
@@ -412,6 +424,63 @@ def stream_name(symbol: str) -> str:
     return f"{s}@aggTrade" if ROLE == "TRADE" else f"{s}@depth20@100ms"
 
 
+def _bounded_control_plan(
+    active,
+    wanted_list,
+    activated_at,
+    now_mono,
+    max_replacements=CONTROL_MAX_REPLACEMENTS,
+    min_hold_seconds=CONTROL_MIN_HOLD_SECONDS,
+    max_symbols=MAX_SYMBOLS,
+):
+    """Return a bounded subscription change plan.
+
+    A volatile ranking refresh is not allowed to evict most of the warm pool.
+    New names enter in control-list priority order. Existing symbols can only be
+    removed after their minimum dwell has elapsed, and no more than the bounded
+    replacement budget is applied at once.
+    """
+    active = {str(s).upper() for s in active if str(s).upper().endswith("USDT")}
+    wanted = []
+    seen = set()
+    for item in wanted_list or []:
+        sym = str(item or "").upper()
+        if sym.endswith("USDT") and sym not in seen:
+            seen.add(sym)
+            wanted.append(sym)
+        if len(wanted) >= max_symbols:
+            break
+
+    wanted_set = set(wanted)
+    additions = [sym for sym in wanted if sym not in active]
+
+    # Fill spare capacity gradually without evicting any warm symbol.
+    spare = max(0, max_symbols - len(active))
+    if spare:
+        add = additions[: min(spare, max_replacements)]
+        return active | set(add), set(add), set(), {
+            "raw_add": len(additions),
+            "raw_remove": len(active - wanted_set),
+            "held_for_dwell": 0,
+        }
+
+    removable = [
+        sym for sym in active
+        if sym not in wanted_set
+        and now_mono - float(activated_at.get(sym, now_mono)) >= min_hold_seconds
+    ]
+    removable.sort(key=lambda sym: float(activated_at.get(sym, 0.0)))
+    count = min(max_replacements, len(additions), len(removable))
+    add = set(additions[:count])
+    remove = set(removable[:count])
+    next_active = (active - remove) | add
+    return next_active, add, remove, {
+        "raw_add": len(additions),
+        "raw_remove": len(active - wanted_set),
+        "held_for_dwell": max(0, len(active - wanted_set) - len(removable)),
+    }
+
+
 def combined_url(host: str, symbols: List[str]) -> str:
     streams = "/".join(stream_name(s) for s in symbols)
     return f"{host}/stream?streams={streams}"
@@ -448,8 +517,11 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     last_hb = 0.0
     last_snapshot = 0.0
     last_control = 0.0
+    last_rebalance = 0.0
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
     active = {str(s).upper() for s in symbols if str(s).upper().endswith("USDT")}
+    activated_at = {sym: time.monotonic() for sym in active}
+    inactive_since = {}
     request_id = 1
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=12, sock_read=30)
 
@@ -474,38 +546,67 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
         request_id=await _subscription_change(ws,"SUBSCRIBE",active,request_id)
         print(
             f"PSI-DISTRIBUTED-MICRO connected role={ROLE} symbols={len(active)} "
-            f"host={host} mode=INCREMENTAL combined=YES",
+            f"host={host} mode=INCREMENTAL_GUARDED combined=YES "
+            f"maxReplace={CONTROL_MAX_REPLACEMENTS} rebalance={CONTROL_REBALANCE_SECONDS:.0f}s "
+            f"minHold={CONTROL_MIN_HOLD_SECONDS:.0f}s",
             flush=True,
         )
         await publish_heartbeat(r, sorted(active), events, host)
         last_control=time.monotonic()
+        last_rebalance=last_control
 
         async for msg in ws:
             now = time.monotonic()
 
-            # Apply pool membership changes on the existing socket. A ranking
-            # reorder alone does nothing; only true additions/removals alter
-            # subscriptions. Host rotation is reserved for real socket failure.
+            # A control-list refresh is only a request. The worker applies it
+            # through a bounded churn circuit breaker so warm sequence/history
+            # cannot be destroyed by a volatile upstream ranking cycle.
             if now-last_control>=CONTROL_POLL_SECONDS:
                 wanted_list=await selected_symbols(r)
                 if wanted_list:
-                    wanted=set(wanted_list)
-                    added=wanted-active
-                    removed=active-wanted
-                    if removed:
-                        request_id=await _subscription_change(ws,"UNSUBSCRIBE",removed,request_id)
-                    if added:
-                        request_id=await _subscription_change(ws,"SUBSCRIBE",added,request_id)
-                    if added or removed:
-                        for sym in removed:
-                            states.pop(sym,None)
-                        active=wanted
-                        print(
-                            f"PSI-DISTRIBUTED-MICRO incremental_update role={ROLE} "
-                            f"symbols={len(active)} add={len(added)} remove={len(removed)} "
-                            f"preview={','.join(sorted(active)[:8])}",
-                            flush=True,
+                    if now-last_rebalance>=CONTROL_REBALANCE_SECONDS:
+                        next_active, added, removed, diag = _bounded_control_plan(
+                            active,
+                            wanted_list,
+                            activated_at,
+                            now,
                         )
+                        if removed:
+                            request_id=await _subscription_change(
+                                ws,"UNSUBSCRIBE",removed,request_id
+                            )
+                        if added:
+                            request_id=await _subscription_change(
+                                ws,"SUBSCRIBE",added,request_id
+                            )
+                        if added or removed:
+                            for sym in removed:
+                                inactive_since[sym]=now
+                            for sym in added:
+                                activated_at[sym]=now
+                                inactive_since.pop(sym,None)
+                            active=next_active
+                            last_rebalance=now
+                            print(
+                                f"PSI-DISTRIBUTED-MICRO guarded_update role={ROLE} "
+                                f"symbols={len(active)} appliedAdd={len(added)} "
+                                f"appliedRemove={len(removed)} rawAdd={diag['raw_add']} "
+                                f"rawRemove={diag['raw_remove']} held={diag['held_for_dwell']} "
+                                f"preview={','.join(sorted(active)[:8])}",
+                                flush=True,
+                            )
+
+                    # Preserve recently removed state in case the candidate
+                    # returns; prune only after the explicit retention window.
+                    expired = [
+                        sym for sym, stamp in list(inactive_since.items())
+                        if now-stamp>=STATE_RETENTION_SECONDS
+                    ]
+                    for sym in expired:
+                        if sym not in active:
+                            states.pop(sym,None)
+                            activated_at.pop(sym,None)
+                            inactive_since.pop(sym,None)
                 else:
                     # A transient control-key gap must never tear down a healthy
                     # Binance stream or erase strict sequence history.
