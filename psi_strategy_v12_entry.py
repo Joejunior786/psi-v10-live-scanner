@@ -39,6 +39,8 @@ REDIS_TAPE_TRADE_CHANNEL = "psi:v12:tape-trade"
 REDIS_TAPE_BOOK_CHANNEL = "psi:v12:tape-book"
 REDIS_TAPE_WORKERS = max(1, min(int(os.getenv("PSI_TAPE_WORKERS", "2")), 8))
 REDIS_TAPE_SNAPSHOT_PREFIX = os.getenv("PSI_TAPE_SNAPSHOT_PREFIX", "psi:v12:tape-snapshot").strip()
+REDIS_RISK_CONTROL_KEY = os.getenv("PSI_RISK_CONTROL_KEY", "psi:v12:risk-priority").strip()
+REDIS_RISK_CONTROL_SIZE = max(8, min(int(os.getenv("PSI_RISK_CONTROL_SIZE", "32")), 80))
 _redis_bridge_stats = defaultdict(int)
 _redis_worker_health = {}
 _distributed_tape_metrics = {}
@@ -3338,6 +3340,43 @@ async def redis_control_loop():
                     ex=120,
                 )
                 _redis_bridge_stats["universe_symbols"] = len(universe)
+
+                risk_symbols=[]
+                try:
+                    provider=getattr(legacy,"_monster_risk_priority",None)
+                    if callable(provider):
+                        for sym in provider() or []:
+                            sym=str(sym or "").upper()
+                            if sym.endswith("USDT") and sym not in risk_symbols:
+                                risk_symbols.append(sym)
+                            if len(risk_symbols)>=REDIS_RISK_CONTROL_SIZE:
+                                break
+                except Exception:
+                    risk_symbols=[]
+                if not risk_symbols:
+                    risk_symbols=list(symbols[:REDIS_RISK_CONTROL_SIZE])
+                await client.set(
+                    REDIS_RISK_CONTROL_KEY,
+                    json.dumps(
+                        {
+                            "version": VERSION,
+                            "authority": "V12_ONLY",
+                            "symbols": risk_symbols,
+                            "generated_ms": int(time.time()*1000),
+                        },
+                        separators=(",",":"),
+                    ),
+                    ex=120,
+                )
+                _redis_bridge_stats["risk_control_symbols"]=len(risk_symbols)
+
+                risk_hb=await client.get("psi:v12:risk-worker")
+                if risk_hb:
+                    try:
+                        _redis_worker_health["risk"]=json.loads(risk_hb)
+                    except Exception:
+                        _redis_worker_health["risk"]={"raw":risk_hb}
+
                 if len(symbols) != last_logged_symbols:
                     print(
                         f"Ψ-V12 REDIS_CONTROL symbols={len(symbols)} preview={','.join(symbols[:8])}",
