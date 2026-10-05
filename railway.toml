@@ -1,9 +1,9 @@
-[build]
-builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+# Build and healthcheck paths are service-specific in Railway:
+# - main scanner: Dockerfile.fast + /live
+# - sensor shards: Dockerfile.sensor, no HTTP healthcheck
+# Keep only shared restart behavior here so repo-level config cannot override
+# the per-service build/liveness configuration.
 
 [deploy]
-healthcheckPath = "/"
-healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
