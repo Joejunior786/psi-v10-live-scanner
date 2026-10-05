@@ -4,13 +4,15 @@ import os
 import threading
 import time
 
-REVISION = "12.6.2-freshness-gate+consumer-isolation+stale-invalidation+training-quality"
+REVISION = "12.6.3-freshness+consumer-isolation+training-quality+pinpoint-hotlane"
 SENSOR_MAX_SNAPSHOT_AGE_MS = max(500, int(os.getenv("PSI_V126_SENSOR_MAX_SNAPSHOT_AGE_MS", "1500")))
+HOT_LANE_SLOTS = max(2, min(int(os.getenv("PSI_V126_PINPOINT_HOT_LANE_SLOTS", "8")), 16))
 
 V125 = None
 _original_persist_training = None
 _original_supervisor_loop = None
 _original_bootstrap = None
+_original_promotion_symbols = None
 
 _supervisor_thread = None
 _supervisor_thread_lock = threading.Lock()
@@ -134,6 +136,67 @@ def _persist_training_guarded():
     _original_persist_training()
 
 
+def _hot_lane_symbols():
+    """Return the freshest hard-safe early candidates for deep/Pinpoint promotion.
+
+    This is ordering/promotion only. It never creates BUY authority and never
+    relaxes any V12.3/V12.4 execution, integrity, persistence, anti-chase or
+    risk gate.
+    """
+    if V125 is None or not _fresh_cache_quality_ok():
+        if V125 is not None:
+            V125._stats["pinpoint_hot_lane"] = 0
+            V125._stats["pinpoint_hot_lane_symbols"] = []
+        return []
+
+    now = int(time.time() * 1000)
+    rank = {"EARLY_PINPOINT": 3, "EARLY_ARMED": 2, "EARLY_WATCH": 1}
+    rows = []
+    for row in list(getattr(V125, "_latest_candidates", []) or []):
+        state = str(row.get("state") or "")
+        generated = int(_f(row.get("generated_ms"), 0))
+        if state not in rank or not bool(row.get("hard_sensor_safety")):
+            continue
+        if generated <= 0 or now - generated > SENSOR_MAX_SNAPSHOT_AGE_MS:
+            continue
+        rows.append(row)
+
+    rows.sort(
+        key=lambda r: (
+            rank.get(str(r.get("state") or ""), 0),
+            _f(r.get("hazard_score")),
+            _f(r.get("change_point_delta")),
+            _f(r.get("buy_ratio")),
+            -_f(r.get("spread_bps"), 999999.0),
+            -_f(r.get("slippage_bps"), 999999.0),
+            -_f(r.get("book_age_ms"), 999999999.0),
+            -_f(r.get("trade_age_ms"), 999999999.0),
+        ),
+        reverse=True,
+    )
+    out = [str(r.get("symbol") or "").upper() for r in rows[:HOT_LANE_SLOTS] if str(r.get("symbol") or "")]
+    V125._stats["pinpoint_hot_lane"] = len(out)
+    V125._stats["pinpoint_hot_lane_symbols"] = list(out)
+    return out
+
+
+def _hot_first_promotion_symbols():
+    hot = _hot_lane_symbols()
+    try:
+        base = list(_original_promotion_symbols() or []) if _original_promotion_symbols else []
+    except Exception:
+        base = []
+    limit = max(HOT_LANE_SLOTS, int(getattr(V125, "EARLY_PROMOTION_SLOTS", 16)))
+    out = []
+    for sym in hot + base:
+        sym = str(sym or "").upper()
+        if sym and sym not in out:
+            out.append(sym)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _run_original_supervisor_once():
     asyncio.run(_original_supervisor_loop())
 
@@ -200,20 +263,22 @@ async def _threaded_supervisor_loop():
 
 
 def install(v125):
-    global V125, _original_persist_training, _original_supervisor_loop, _original_bootstrap
+    global V125, _original_persist_training, _original_supervisor_loop, _original_bootstrap, _original_promotion_symbols
     if V125 is not None:
         return
     V125 = v125
     _original_persist_training = v125._persist_training
     _original_supervisor_loop = v125.supervisor_loop
     _original_bootstrap = v125.bootstrap
+    _original_promotion_symbols = v125._promotion_symbols
     v125._merge_sensor_payloads = _merge_sensor_payloads
     v125._refresh_from_redis = _refresh_from_redis
     v125._persist_training = _persist_training_guarded
+    v125._promotion_symbols = _hot_first_promotion_symbols
     v125.bootstrap = _bootstrap_and_start_consumer
     v125.supervisor_loop = _threaded_supervisor_loop
     print(
         f"PSI-V12.6 installed revision={REVISION} maxSnapshotAgeMs={SENSOR_MAX_SNAPSHOT_AGE_MS} "
-        "consumerLoop=DEDICATED_THREAD staleState=INVALIDATE staleTraining=BLOCK",
+        f"consumerLoop=DEDICATED_THREAD staleState=INVALIDATE staleTraining=BLOCK hotLane={HOT_LANE_SLOTS} authority=PROMOTION_ONLY",
         flush=True,
     )
