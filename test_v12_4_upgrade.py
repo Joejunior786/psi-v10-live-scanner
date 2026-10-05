@@ -61,6 +61,17 @@ class UpgradeTests(unittest.TestCase):
         u.CORE = None
         u.HARDENING = None
         u.LEARNER = None
+    def test_scan_report_contract_requires_all_critical_sections(self):
+        required = set(u.SCAN_REQUIRED_SECTIONS)
+        for name in (
+            "EXECUTION_AUTHORITY", "MA_PRIORITY_50_200", "ML_OVERRIDE", "PINPOINT",
+            "RISKMAP_CONDITIONAL", "PRE_IGNITION", "PULLBACK_EXHAUSTION",
+            "LOWCAP_ROTATION", "RAPID_ROTATION", "MONSTER", "STRUCTURAL_SETUPS",
+            "DATA_HEALTH", "MISSED_MOVER_LEARNING",
+        ):
+            self.assertIn(name, required)
+        self.assertIn("MA_PRIORITY_50_200", set(u.SCAN_NEVER_OMIT_WHEN_NONEMPTY))
+
     def test_ma_touch_is_promotion_only(self):
         sym = "ABCUSDT"
         u.CORE.q.universe = [sym]
