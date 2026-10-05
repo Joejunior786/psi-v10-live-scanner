@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements-sensor.txt .
+RUN pip install --no-cache-dir -r requirements-sensor.txt
+
+COPY psi_sensor_worker.py .
+COPY psi_sensor_worker_v126.py .
+
+RUN python -m py_compile psi_sensor_worker.py psi_sensor_worker_v126.py
+
+CMD ["python", "psi_sensor_worker_v126.py"]
