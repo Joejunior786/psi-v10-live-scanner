@@ -42,7 +42,7 @@ def _merge_sensor_payloads(payloads):
 
 
 async def _refresh_from_redis(client):
-    keys = [f"psi:v12.5:sensor:{i}" for i in range(V125.SENSOR_SHARDS)]
+    keys = [f"psi:v12.6:sensor:{i}" for i in range(V125.SENSOR_SHARDS)]
     raws = await client.mget(keys)
     payloads = []
     now = int(time.time() * 1000)
