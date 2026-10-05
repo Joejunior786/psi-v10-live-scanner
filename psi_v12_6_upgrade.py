@@ -1,12 +1,23 @@
+import asyncio
 import json
 import os
+import threading
 import time
 
-REVISION = "12.6.0-freshness-gate+stale-invalidation+training-quality"
+REVISION = "12.6.2-freshness-gate+consumer-isolation+stale-invalidation+training-quality"
 SENSOR_MAX_SNAPSHOT_AGE_MS = max(500, int(os.getenv("PSI_V126_SENSOR_MAX_SNAPSHOT_AGE_MS", "1500")))
 
 V125 = None
 _original_persist_training = None
+_original_supervisor_loop = None
+_original_bootstrap = None
+
+_supervisor_thread = None
+_supervisor_thread_lock = threading.Lock()
+_supervisor_started = threading.Event()
+_supervisor_stop = threading.Event()
+_supervisor_thread_ident = None
+_supervisor_thread_error = ""
 
 
 def _f(v, default=0.0):
@@ -79,12 +90,14 @@ async def _refresh_from_redis(client):
     V125._stats["sensor_shards_expected"] = V125.SENSOR_SHARDS
     V125._stats["sensor_snapshot_max_age_ms"] = SENSOR_MAX_SNAPSHOT_AGE_MS
 
-    V125._sensor_cache.clear()
+    # Replace complete snapshots atomically. The dedicated consumer thread is
+    # the only writer; scanner threads only observe whole dict/list objects.
     if merged:
-        V125._sensor_cache.update(merged)
+        V125._sensor_cache = merged
         V125._rebuild_candidates()
     else:
-        V125._latest_candidates[:] = []
+        V125._sensor_cache = {}
+        V125._latest_candidates = []
         V125._score_history.clear()
         for key in (
             "sensor_symbols",
@@ -103,10 +116,11 @@ async def _refresh_from_redis(client):
 def _fresh_cache_quality_ok():
     if int(V125._stats.get("sensor_shards_live", 0)) != int(V125.SENSOR_SHARDS):
         return False
-    if not V125._sensor_cache:
+    cache = V125._sensor_cache
+    if not cache:
         return False
     now = int(time.time() * 1000)
-    for row in V125._sensor_cache.values():
+    for row in cache.values():
         generated = int(_f(row.get("_sensor_generated_ms"), 0))
         if generated <= 0 or now - generated > SENSOR_MAX_SNAPSHOT_AGE_MS:
             return False
@@ -120,17 +134,86 @@ def _persist_training_guarded():
     _original_persist_training()
 
 
+def _run_original_supervisor_once():
+    asyncio.run(_original_supervisor_loop())
+
+
+def _supervisor_thread_main():
+    global _supervisor_thread_ident, _supervisor_thread_error
+    _supervisor_thread_ident = threading.get_ident()
+    V125._stats["consumer_thread_ident"] = _supervisor_thread_ident
+    V125._stats["consumer_thread_started"] = 1
+    _supervisor_started.set()
+    print(
+        f"PSI-V12.6 CONSUMER_THREAD started ident={_supervisor_thread_ident} "
+        f"poll={getattr(V125, 'POLL_SECONDS', '?')}s",
+        flush=True,
+    )
+    while not _supervisor_stop.is_set():
+        try:
+            _run_original_supervisor_once()
+            _supervisor_thread_error = "supervisor_returned"
+        except Exception as exc:
+            _supervisor_thread_error = f"{type(exc).__name__}:{exc}"
+        V125._stats["consumer_thread_restarts"] = int(V125._stats.get("consumer_thread_restarts", 0)) + 1
+        V125._stats["consumer_thread_last_error"] = _supervisor_thread_error
+        if not _supervisor_stop.is_set():
+            print(
+                f"PSI-V12.6 CONSUMER_THREAD restart error={_supervisor_thread_error}",
+                flush=True,
+            )
+        _supervisor_stop.wait(1.0)
+
+
+def _ensure_supervisor_thread():
+    global _supervisor_thread
+    with _supervisor_thread_lock:
+        if _supervisor_thread is not None and _supervisor_thread.is_alive():
+            return _supervisor_thread
+        _supervisor_stop.clear()
+        _supervisor_started.clear()
+        _supervisor_thread = threading.Thread(
+            target=_supervisor_thread_main,
+            name="psi-v126-sensor-consumer",
+            daemon=True,
+        )
+        _supervisor_thread.start()
+        return _supervisor_thread
+
+
+async def _bootstrap_and_start_consumer():
+    await _original_bootstrap()
+    thread = _ensure_supervisor_thread()
+    started = await asyncio.to_thread(_supervisor_started.wait, 5.0)
+    if not started or not thread.is_alive():
+        raise RuntimeError("V12.6 sensor consumer thread failed to start")
+
+
+async def _threaded_supervisor_loop():
+    # Runner compatibility: the actual Redis polling loop lives in a dedicated
+    # event-loop thread so heavy scanner work cannot delay MGET response handling.
+    _ensure_supervisor_thread()
+    while True:
+        if _supervisor_thread is None or not _supervisor_thread.is_alive():
+            _ensure_supervisor_thread()
+        await asyncio.sleep(60.0)
+
+
 def install(v125):
-    global V125, _original_persist_training
+    global V125, _original_persist_training, _original_supervisor_loop, _original_bootstrap
     if V125 is not None:
         return
     V125 = v125
     _original_persist_training = v125._persist_training
+    _original_supervisor_loop = v125.supervisor_loop
+    _original_bootstrap = v125.bootstrap
     v125._merge_sensor_payloads = _merge_sensor_payloads
     v125._refresh_from_redis = _refresh_from_redis
     v125._persist_training = _persist_training_guarded
+    v125.bootstrap = _bootstrap_and_start_consumer
+    v125.supervisor_loop = _threaded_supervisor_loop
     print(
         f"PSI-V12.6 installed revision={REVISION} maxSnapshotAgeMs={SENSOR_MAX_SNAPSHOT_AGE_MS} "
-        "staleState=INVALIDATE staleTraining=BLOCK",
+        "consumerLoop=DEDICATED_THREAD staleState=INVALIDATE staleTraining=BLOCK",
         flush=True,
     )
