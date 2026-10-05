@@ -6,22 +6,24 @@ import psi_outcome_learning as outcome_learning
 import psi_v12_4_upgrade as upgrade
 import psi_v12_5_upgrade as upgrade_v125
 import psi_v12_6_upgrade as upgrade_v126
+import psi_v12_7_upgrade as upgrade_v127
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v12.6.3-pinpoint-hotlane+consumer-isolation+runtime-fairness"
+UPGRADE_RUNTIME = "v12.7.0-sequential-counterfactual-intelligence+v12.6.3-runtime-fairness"
 
 
 async def main():
     # Preserve V12.3.4 as the conventional fail-closed authority, then layer
-    # V12.4 promotion/learning on top. V12.4 may only bypass conventional
-    # technical confirmation through its separately-labelled calibrated ML
-    # route; hard execution/data safety remains fail-closed.
+    # adaptive discovery/learning above it. V12.7 improves sequencing and may
+    # contextualize extension only through V12.4's calibrated ML route; stale
+    # or invalid data, spread/slippage, regime and risk safety stay fail-closed.
     hardening.install(core)
     outcome_learning.install(core, hardening)
     upgrade.install(core, hardening, outcome_learning)
     upgrade_v125.install(core, hardening, outcome_learning, upgrade)
     upgrade_v126.install(upgrade_v125)
+    upgrade_v127.install(core, hardening, outcome_learning, upgrade, upgrade_v125, upgrade_v126)
 
     # Bind the existing aiohttp server immediately so Railway's /live probe
     # reflects process liveness, while the inherited scanner bootstraps in
@@ -29,7 +31,7 @@ async def main():
     # return the same runner instead of rebinding the port.
     start_http_once = install_start_once(core.app)
     await start_http_once()
-    print("PSI-V12.6 EARLY_LIVENESS bound /live before scanner bootstrap", flush=True)
+    print("PSI-V12.7 EARLY_LIVENESS bound /live before scanner bootstrap", flush=True)
 
     await hardening.bootstrap()
     await outcome_learning.bootstrap()
@@ -42,6 +44,7 @@ async def main():
         outcome_learning.supervisor_loop(),
         upgrade.supervisor_loop(),
         upgrade_v125.supervisor_loop(),
+        upgrade_v127.supervisor_loop(),
     )
 
 
