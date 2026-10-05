@@ -90,10 +90,24 @@ class UpgradeTests(unittest.TestCase):
         structural = {"symbol": sym, "current": 1.0, "entry": 1.0, "stop": 0.97, "max_chase": 1.02, "anti_chase": False}
         legacy = {"symbol": sym}
         micro = {"micro_ready": False, "sequence_verified": True, "book_sequence_verified": True, "spread_bps": 2.0, "slippage_bps": 3.0}
-        integrity = {"ages": {"micro_trade_ms": 100, "micro_book_ms": 100, "structure_s": 10}}
+        integrity = {"ages": {"micro_trade_ms": 100, "micro_book_ms": 100, "tape_ms": 100, "bbo_ms": 100, "structure_s": 10}}
         safety = u._hard_execution_safety(structural, legacy, micro, integrity)
         self.assertFalse(safety["pass"])
         self.assertIn("LIVE_MICRO_DATA", safety["blockers"])
+    def test_hard_safety_rejects_stale_tape_and_anti_chase(self):
+        sym = "ABCUSDT"
+        u.CORE.q.universe = [sym]
+        u.CORE.app.prices[sym] = 1.0
+        structural = {"symbol": sym, "current": 1.0, "entry": 1.0, "stop": 0.97, "max_chase": 1.02, "anti_chase": False}
+        legacy = {"symbol": sym, "pinpoint_anti_chase_ok": False}
+        micro = {"micro_ready": True, "sequence_verified": True, "book_sequence_verified": True, "spread_bps": 2.0, "slippage_bps": 3.0}
+        integrity = {"ages": {"micro_trade_ms": 100, "micro_book_ms": 100, "tape_ms": 6000, "bbo_ms": 6000, "structure_s": 10}}
+        safety = u._hard_execution_safety(structural, legacy, micro, integrity)
+        self.assertFalse(safety["pass"])
+        self.assertIn("STALE_EVENT_TAPE", safety["blockers"])
+        self.assertIn("STALE_EVENT_BBO", safety["blockers"])
+        self.assertIn("CUMULATIVE_EXTENSION_GUARD", safety["blockers"])
+
     def test_hard_safety_passes_with_live_data_and_risk(self):
         sym = "ABCUSDT"
         u.CORE.q.universe = [sym]
@@ -101,7 +115,7 @@ class UpgradeTests(unittest.TestCase):
         structural = {"symbol": sym, "current": 1.0, "entry": 1.0, "stop": 0.97, "max_chase": 1.02, "anti_chase": False}
         legacy = {"symbol": sym}
         micro = {"micro_ready": True, "sequence_verified": True, "book_sequence_verified": True, "spread_bps": 2.0, "slippage_bps": 3.0}
-        integrity = {"ages": {"micro_trade_ms": 100, "micro_book_ms": 100, "structure_s": 10}}
+        integrity = {"ages": {"micro_trade_ms": 100, "micro_book_ms": 100, "tape_ms": 100, "bbo_ms": 100, "structure_s": 10}}
         safety = u._hard_execution_safety(structural, legacy, micro, integrity)
         self.assertTrue(safety["pass"])
         self.assertEqual(safety["blockers"], [])
