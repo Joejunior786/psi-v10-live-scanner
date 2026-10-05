@@ -6,7 +6,7 @@ import psi_outcome_learning as outcome_learning
 import psi_v12_4_upgrade as upgrade
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v12.4-ma-priority-dynamic-micro-structure-rescue-missed-mover-ml70"
+UPGRADE_RUNTIME = "v12.4.1-ma-priority-dynamic-micro-structure-rescue-missed-training-ml70-safety"
 
 
 async def main():
