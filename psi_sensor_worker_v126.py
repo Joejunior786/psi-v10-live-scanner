@@ -131,7 +131,7 @@ async def stream_once(r, session, symbols, host):
         print(
             f"PSI-SENSOR-V126 CONNECTED shard={base.SHARD_INDEX}/{base.SHARD_COUNT} "
             f"symbols={len(symbols)} streams={len(symbols)*2} cadence={PUBLISH_SECONDS:.2f}s "
-            f"yieldEvery={EVENT_YIELD_EVERY} host={host}",
+            f"yieldEvery={EVENT_YIELD_EVERY} universeCheck={UNIVERSE_CHECK_SECONDS:.0f}s host={host}",
             flush=True,
         )
 
@@ -141,8 +141,22 @@ async def stream_once(r, session, symbols, host):
         )
         try:
             async for msg in ws:
-                if time.monotonic() - started >= base.UNIVERSE_REFRESH_SECONDS:
-                    raise RuntimeError("scheduled_universe_refresh")
+                if time.monotonic() - started >= UNIVERSE_CHECK_SECONDS:
+                    refreshed = await base.fetch_universe(session)
+                    if list(refreshed) == list(symbols):
+                        started = time.monotonic()
+                        print(
+                            f"PSI-SENSOR-V126 UNIVERSE_STABLE shard={base.SHARD_INDEX}/{base.SHARD_COUNT} "
+                            f"symbols={len(symbols)} action=KEEP_STREAM",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"PSI-SENSOR-V126 UNIVERSE_CHANGED shard={base.SHARD_INDEX}/{base.SHARD_COUNT} "
+                            f"old={len(symbols)} new={len(refreshed)} action=RECONNECT",
+                            flush=True,
+                        )
+                        raise RuntimeError("universe_membership_changed")
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         envelope = json.loads(msg.data)
