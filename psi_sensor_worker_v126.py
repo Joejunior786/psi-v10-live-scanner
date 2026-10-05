@@ -15,6 +15,7 @@ DIAG_SECONDS = max(5.0, float(os.getenv("PSI_SENSOR_DIAG_SECONDS", "10.0")))
 RV10_MIN_BASELINE_QUOTE = max(1.0, float(os.getenv("PSI_SENSOR_RV10_MIN_BASELINE_QUOTE", "25")))
 RV30_MIN_BASELINE_QUOTE = max(1.0, float(os.getenv("PSI_SENSOR_RV30_MIN_BASELINE_QUOTE", "75")))
 RV_RATIO_CAP = max(2.0, float(os.getenv("PSI_SENSOR_RV_RATIO_CAP", "25")))
+EVENT_YIELD_EVERY = max(8, min(256, int(os.getenv("PSI_SENSOR_EVENT_YIELD_EVERY", "32"))))
 
 _original_trade_metrics = base.trade_metrics
 
@@ -37,6 +38,10 @@ base.trade_metrics = safe_trade_metrics
 base.VERSION = VERSION
 base.SNAPSHOT_KEY = f"psi:v12.6:sensor:{base.SHARD_INDEX}"
 base.HEARTBEAT_KEY = f"psi:v12.6:sensor-heartbeat:{base.SHARD_INDEX}"
+
+
+def _should_yield(events):
+    return int(events or 0) > 0 and int(events) % EVENT_YIELD_EVERY == 0
 
 
 async def _publisher_loop(r, symbols, states, counters, host, stop_event):
@@ -125,7 +130,8 @@ async def stream_once(r, session, symbols, host):
         req = await base.subscribe(ws, symbols, req)
         print(
             f"PSI-SENSOR-V126 CONNECTED shard={base.SHARD_INDEX}/{base.SHARD_COUNT} "
-            f"symbols={len(symbols)} streams={len(symbols)*2} cadence={PUBLISH_SECONDS:.2f}s host={host}",
+            f"symbols={len(symbols)} streams={len(symbols)*2} cadence={PUBLISH_SECONDS:.2f}s "
+            f"yieldEvery={EVENT_YIELD_EVERY} host={host}",
             flush=True,
         )
 
@@ -156,6 +162,8 @@ async def stream_once(r, session, symbols, host):
                             accepted = base.record_book(states[symbol]["book"], data)
                         if accepted:
                             counters["events"] += 1
+                            if _should_yield(counters["events"]):
+                                await asyncio.sleep(0)
                     except Exception as exc:
                         print(
                             f"PSI-SENSOR-V126 EVENT_ERROR shard={base.SHARD_INDEX} {type(exc).__name__}:{exc}",
