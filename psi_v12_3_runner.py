@@ -9,7 +9,7 @@ import psi_v12_6_upgrade as upgrade_v126
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v12.6.0-freshness-guard-decoupled-publisher"
+UPGRADE_RUNTIME = "v12.6.1-freshness-guard+runtime-fairness"
 
 
 async def main():
