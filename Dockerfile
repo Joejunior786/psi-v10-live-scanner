@@ -61,6 +61,8 @@ COPY psi_v12_3_hardening.py .
 COPY psi_v12_3_runner.py .
 COPY psi_outcome_learning.py .
 COPY psi_v12_4_upgrade.py .
+COPY psi_v12_5_upgrade.py .
+COPY psi_sensor_worker.py .
 COPY psi_micro_worker.py .
 COPY psi_tape_worker.py .
 COPY psi_structure_worker.py .
@@ -70,7 +72,8 @@ COPY test_v12_execution_gate.py .
 COPY test_micro_stability.py .
 COPY test_outcome_learning.py .
 COPY test_v12_4_upgrade.py .
-RUN python -m py_compile psi_strategy_v12_entry.py psi_v12_3_hardening.py psi_v12_3_runner.py psi_outcome_learning.py psi_v12_4_upgrade.py psi_micro_worker.py psi_tape_worker.py psi_structure_worker.py psi_extension_worker.py psi_risk_worker.py test_micro_stability.py test_outcome_learning.py test_v12_4_upgrade.py && python -m unittest -v test_v12_execution_gate.py test_micro_stability.py test_outcome_learning.py test_v12_4_upgrade.py
+COPY test_v12_5_upgrade.py .
+RUN python -m py_compile psi_strategy_v12_entry.py psi_v12_3_hardening.py psi_v12_3_runner.py psi_outcome_learning.py psi_v12_4_upgrade.py psi_v12_5_upgrade.py psi_micro_worker.py psi_sensor_worker.py psi_tape_worker.py psi_structure_worker.py psi_extension_worker.py psi_risk_worker.py test_micro_stability.py test_outcome_learning.py test_v12_4_upgrade.py test_v12_5_upgrade.py && python -m unittest -v test_v12_execution_gate.py test_micro_stability.py test_outcome_learning.py test_v12_4_upgrade.py test_v12_5_upgrade.py
 
 ENV PORT=8080
 ENV PSI_SCANNER_VERSION=12.3.4-strict-buy-now-gate
