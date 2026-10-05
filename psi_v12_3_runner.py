@@ -5,9 +5,10 @@ import psi_v12_3_hardening as hardening
 import psi_outcome_learning as outcome_learning
 import psi_v12_4_upgrade as upgrade
 import psi_v12_5_upgrade as upgrade_v125
+import psi_v12_6_upgrade as upgrade_v126
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v12.5.0-full-universe-sensor-early-hazard-pinpoint-promotion"
+UPGRADE_RUNTIME = "v12.6.0-freshness-guard-decoupled-publisher"
 
 
 async def main():
@@ -19,6 +20,7 @@ async def main():
     outcome_learning.install(core, hardening)
     upgrade.install(core, hardening, outcome_learning)
     upgrade_v125.install(core, hardening, outcome_learning, upgrade)
+    upgrade_v126.install(upgrade_v125)
 
     await hardening.bootstrap()
     await outcome_learning.bootstrap()
