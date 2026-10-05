@@ -258,19 +258,39 @@ async def _refresh_from_redis(client):
     keys = [f"psi:v12.5:sensor:{i}" for i in range(SENSOR_SHARDS)]
     raws = await client.mget(keys)
     payloads = []
-    for raw in raws:
+    now = int(time.time() * 1000)
+    shard_diag = []
+    for idx, raw in enumerate(raws):
         if not raw:
+            shard_diag.append({"i": idx, "present": False, "age_ms": None, "decode": False})
             continue
         try:
-            payloads.append(json.loads(raw))
+            payload = json.loads(raw)
+            generated = int(_f(payload.get("generated_ms"), 0))
+            age = (now - generated) if generated > 0 else None
+            shard_diag.append({
+                "i": idx,
+                "present": True,
+                "age_ms": age,
+                "decode": True,
+                "payload_shard": int(_f(payload.get("shard_index"), -1)),
+                "symbols": int(_f(payload.get("metric_symbols"), 0)),
+            })
+            payloads.append(payload)
         except Exception:
-            continue
+            shard_diag.append({"i": idx, "present": True, "age_ms": None, "decode": False})
+    _stats["sensor_shard_diag"] = shard_diag
+    _stats["sensor_keys_present"] = sum(1 for r in shard_diag if r.get("present"))
+    _stats["sensor_keys_decoded"] = sum(1 for r in shard_diag if r.get("decode"))
     merged, shards_live = _merge_sensor_payloads(payloads)
     if merged:
         _sensor_cache = merged
         _stats["sensor_shards_live"] = shards_live
         _stats["sensor_shards_expected"] = SENSOR_SHARDS
         _rebuild_candidates()
+    else:
+        _stats["sensor_shards_live"] = 0
+        _stats["sensor_shards_expected"] = SENSOR_SHARDS
     return len(merged)
 
 
@@ -521,7 +541,9 @@ async def supervisor_loop():
                         f"shards={_stats.get('sensor_shards_live',0)}/{SENSOR_SHARDS} "
                         f"pinpoint={_stats.get('early_pinpoint',0)} armed={_stats.get('early_armed',0)} "
                         f"watch={_stats.get('early_watch',0)} deepPromoted={_stats.get('deep_promoted',0)} "
-                        f"training={_stats.get('training_snapshots',0)}",
+                        f"training={_stats.get('training_snapshots',0)} "
+                        f"keys={_stats.get('sensor_keys_present',0)}/{SENSOR_SHARDS} "
+                        f"diag={_stats.get('sensor_shard_diag',[])}",
                         flush=True,
                     )
                     for i, r in enumerate(top, 1):
