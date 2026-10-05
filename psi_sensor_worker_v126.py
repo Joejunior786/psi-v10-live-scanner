@@ -8,7 +8,7 @@ from contextlib import suppress
 import aiohttp
 import psi_sensor_worker as base
 
-VERSION = "12.6.0-decoupled-snapshot-publisher"
+VERSION = "12.6.1-decoupled-publisher+event-loop-fairness"
 PUBLISH_SECONDS = max(0.5, float(os.getenv("PSI_SENSOR_SNAPSHOT_SECONDS", "1.0")))
 HEARTBEAT_SECONDS = max(1.0, float(os.getenv("PSI_SENSOR_HEARTBEAT_SECONDS", "3.0")))
 DIAG_SECONDS = max(5.0, float(os.getenv("PSI_SENSOR_DIAG_SECONDS", "10.0")))
