@@ -47,6 +47,8 @@ class UpgradeTests(unittest.TestCase):
             _cache={},
             q=SimpleNamespace(universe=[], latest={}),
             app=FakeApp({}),
+            REDIS_MICRO_POOL_SIZE=64,
+            _distributed_micro_sticky_pool=[],
             legacy=SimpleNamespace(
                 INTEGRITY_MICRO_TRADE_MAX_AGE_MS=15000,
                 INTEGRITY_MICRO_BOOK_MAX_AGE_MS=5000,
@@ -107,6 +109,15 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn("STALE_EVENT_TAPE", safety["blockers"])
         self.assertIn("STALE_EVENT_BBO", safety["blockers"])
         self.assertIn("CUMULATIVE_EXTENSION_GUARD", safety["blockers"])
+
+    def test_cold_start_never_wipes_restored_micro_pool(self):
+        restored = [f"COIN{i}USDT" for i in range(12)]
+        u.CORE._distributed_micro_sticky_pool = list(restored)
+        u.CORE.q.universe = []
+        u._original_micro = lambda: list(restored)
+        out = u.promoted_micro_symbols()
+        self.assertEqual(out, restored)
+        self.assertEqual(u.CORE._distributed_micro_sticky_pool, restored)
 
     def test_hard_safety_passes_with_live_data_and_risk(self):
         sym = "ABCUSDT"
