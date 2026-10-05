@@ -64,10 +64,11 @@ class UpgradeTests(unittest.TestCase):
     def test_scan_report_contract_requires_all_critical_sections(self):
         required = set(u.SCAN_REQUIRED_SECTIONS)
         for name in (
-            "EXECUTION_AUTHORITY", "MA_PRIORITY_50_200", "ML_OVERRIDE", "PINPOINT",
+            "EXECUTION_AUTHORITY", "MA_PRIORITY_50_200", "WEEKLY_MA_EMA",
+            "HYDRATION_200_COVERAGE", "ML_OVERRIDE", "PINPOINT",
             "RISKMAP_CONDITIONAL", "PRE_IGNITION", "PULLBACK_EXHAUSTION",
-            "LOWCAP_ROTATION", "RAPID_ROTATION", "MONSTER", "STRUCTURAL_SETUPS",
-            "DATA_HEALTH", "MISSED_MOVER_LEARNING",
+            "LOWCAP_ROTATION", "LOWCAP_CAP_SOURCE", "RAPID_ROTATION", "MONSTER",
+            "STRUCTURAL_SETUPS", "DATA_HEALTH", "MISSED_MOVER_LEARNING",
         ):
             self.assertIn(name, required)
         self.assertIn("MA_PRIORITY_50_200", set(u.SCAN_NEVER_OMIT_WHEN_NONEMPTY))
@@ -85,6 +86,37 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(sig["label"], "1H_SMA200")
         self.assertEqual(sig["proximity"], "TOUCH")
         self.assertFalse(sig["automatic_buy"])
+    def test_ema_and_weekly_ma_are_priority_visible(self):
+        sym = "ABCUSDT"
+        u.CORE.q.universe = [sym]
+        u.CORE.app.prices[sym] = 100.2
+        u.CORE._cache[sym] = {
+            "1h": {"snap": {"current": 100.2, "ema200": 100.0, "ema50": 99.9, "atr": 2.0}},
+            "4h": {"snap": {"current": 100.2, "ema200": 100.4, "ema50": 100.5, "atr": 3.0}},
+            "1d": {"snap": {"current": 100.2, "ema200": 100.6, "ema50": 100.7, "atr": 4.0}},
+            "1w": {"snap": {"current": 100.2, "ema200": 100.3, "ema50": 100.4, "sma200": 100.1, "sma50": 100.5, "atr": 5.0}},
+        }
+        labels = {row["label"] for row in u._ma_matches_from_cache(sym)}
+        self.assertIn("1H_EMA200", labels)
+        self.assertIn("4H_EMA50", labels)
+        self.assertIn("WEEKLY_EMA200", labels)
+        self.assertIn("WEEKLY_SMA50", labels)
+
+    def test_hydration_summary_counts_deep_200_and_weekly(self):
+        sym = "ABCUSDT"
+        u.CORE.q.universe = [sym]
+        rows = [[0]] * 220
+        u.CORE._cache[sym] = {
+            "1h": {"snap": {"ema200": 1.0}, "rows": rows},
+            "4h": {"snap": {"ema200": 1.0}, "rows": rows},
+            "1d": {"snap": {"ema200": 1.0}, "rows": rows},
+            "1w": {"snap": {"ema200": 1.0}, "rows": rows},
+        }
+        summary = u._hydration_summary()
+        self.assertEqual(summary["deep_200_ready"], 1)
+        self.assertEqual(summary["weekly_ready"], 1)
+        self.assertEqual(summary["weekly_deep_ready"], 1)
+
     def test_validated_ml_probability_can_qualify(self):
         sym = "ABCUSDT"
         u.CORE.q.universe = [sym]
