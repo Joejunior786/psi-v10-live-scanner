@@ -14,6 +14,7 @@ if "redis" not in sys.modules:
 
 import psi_v12_5_upgrade as v125
 import psi_v12_6_upgrade as v126
+import psi_sensor_worker_v126 as sensor_v126
 
 
 class FakeClient:
@@ -68,6 +69,12 @@ class V126Tests(unittest.TestCase):
         v126._persist_training_guarded()
         self.assertEqual(calls, [])
         self.assertEqual(v125._stats.get("training_skipped_stale"), 1)
+
+    def test_sensor_ingest_cooperatively_yields(self):
+        every = sensor_v126.EVENT_YIELD_EVERY
+        self.assertFalse(sensor_v126._should_yield(1))
+        self.assertTrue(sensor_v126._should_yield(every))
+        self.assertTrue(sensor_v126._should_yield(every * 2))
 
     def test_refresh_reads_only_isolated_v126_namespace(self):
         client = FakeClient([None, None])
