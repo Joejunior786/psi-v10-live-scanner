@@ -11,10 +11,38 @@ import redis.asyncio as redis_async
 # V12.3.4; this layer adds discovery/promotion, worker-cache rescue and a
 # separately-labelled calibrated ML override that can bypass technical BUY
 # confirmation but never bypass hard execution/data-safety checks.
-REVISION = "12.4.1-ma-priority+dynamic-micro+structure-rescue+missed-mover-training+ml70-safety"
+REVISION = "12.4.2-scan-completeness+ma-priority+dynamic-micro+structure-rescue+missed-mover-training+ml70-safety"
 AUTHORITY_CHAIN = "V12.3.4_CONVENTIONAL_OR_V12.4_ML70_HARD_SAFETY->BUY_NOW"
 ML_AUTHORITY_CHAIN = "V12.4_ML70->HARD_EXECUTION_SAFETY->BUY_NOW"
 ROLE = "PROMOTION_AND_CALIBRATED_OVERRIDE"
+
+SCAN_REPORT_VERSION = "1.0"
+SCAN_REQUIRED_SECTIONS = (
+    "EXECUTION_AUTHORITY",
+    "MA_PRIORITY_50_200",
+    "ML_OVERRIDE",
+    "PINPOINT",
+    "RISKMAP_CONDITIONAL",
+    "PRE_IGNITION",
+    "PULLBACK_EXHAUSTION",
+    "LOWCAP_ROTATION",
+    "RAPID_ROTATION",
+    "MONSTER",
+    "STRUCTURAL_SETUPS",
+    "DATA_HEALTH",
+    "MISSED_MOVER_LEARNING",
+)
+SCAN_NEVER_OMIT_WHEN_NONEMPTY = (
+    "MA_PRIORITY_50_200",
+    "ML_OVERRIDE",
+    "PINPOINT",
+    "RISKMAP_CONDITIONAL",
+    "PRE_IGNITION",
+    "PULLBACK_EXHAUSTION",
+    "LOWCAP_ROTATION",
+    "RAPID_ROTATION",
+    "STRUCTURAL_SETUPS",
+)
 
 CORE = None
 HARDENING = None
@@ -200,6 +228,61 @@ def ma_priority_candidates(limit=None):
     rows.sort(key=lambda r: (r.get("score", 0.0), -r.get("distance_pct", 999.0)), reverse=True)
     _ma_cache = rows
     return rows[:limit] if limit else rows
+
+
+def scan_report_contract():
+    """Machine-readable contract for every user-facing Scan result.
+
+    The contract makes omission detectable: consumers should surface every section,
+    explicitly showing NONE/UNAVAILABLE rather than silently dropping a lane.
+    """
+    ma_rows = ma_priority_candidates(20)
+    ml_rows = ml_watch_candidates(15)
+    qualified_ml = [r for r in ml_rows if r.get("qualified")]
+    by_level = defaultdict(int)
+    by_proximity = defaultdict(int)
+    for row in _ma_cache:
+        by_level[str(row.get("label") or "UNKNOWN")] += 1
+        by_proximity[str(row.get("proximity") or "UNKNOWN")] += 1
+    return {
+        "version": SCAN_REPORT_VERSION,
+        "required_sections": list(SCAN_REQUIRED_SECTIONS),
+        "never_omit_when_nonempty": list(SCAN_NEVER_OMIT_WHEN_NONEMPTY),
+        "section_sources": {
+            "EXECUTION_AUTHORITY": ["Ψ-V12 SIGNAL BOARD", "Ψ-PINPOINT BOARD"],
+            "MA_PRIORITY_50_200": ["Ψ-V12.4 UPGRADE", "ma_priority_rule"],
+            "ML_OVERRIDE": ["Ψ-V12.4 UPGRADE", "ml_override"],
+            "PINPOINT": ["Ψ-PINPOINT BOARD"],
+            "RISKMAP_CONDITIONAL": ["Ψ-V10.19.9 RISKMAP"],
+            "PRE_IGNITION": ["PRE", "EARLY STATES"],
+            "PULLBACK_EXHAUSTION": ["PULLBACK BOARD", "PX"],
+            "LOWCAP_ROTATION": ["LOWCAP PROMOTION"],
+            "RAPID_ROTATION": ["RAPID PROMOTION", "RAPID promoted="],
+            "MONSTER": ["MONSTER-CANDIDATES", "MR"],
+            "STRUCTURAL_SETUPS": ["structural=BUY", "EX"],
+            "DATA_HEALTH": ["WATCHDOG", "MICRO-READINESS", "V12 SIGNAL BOARD"],
+            "MISSED_MOVER_LEARNING": ["MISSED-MOVER-TRAINING", "MISSED-EXPERIENCE"],
+        },
+        "ma_priority_summary": {
+            "count": len(_ma_cache),
+            "by_level": dict(by_level),
+            "by_proximity": dict(by_proximity),
+            "top": ma_rows,
+            "automatic_buy": False,
+        },
+        "ml_summary": {
+            "watch_count": len(_ml_watch_cache),
+            "qualified_70_count": len(qualified_ml),
+            "threshold": ML_OVERRIDE_THRESHOLD,
+        },
+        "runtime_summary": {
+            "dynamic_micro_pool": _stats.get("dynamic_micro_pool", 0),
+            "structure_rescue_imported": _stats.get("structure_rescue_imported", 0),
+            "structure_rescue_attempted": _stats.get("structure_rescue_attempted", 0),
+            "missed_labelled": _stats.get("missed_labelled", 0),
+        },
+        "reporting_rule": "Every Scan must show every required section or explicitly mark it NONE/UNAVAILABLE; MA proximity is never silently omitted.",
+    }
 
 
 def _rapid_score(symbol):
@@ -816,12 +899,31 @@ def _augment_response(response):
         "redis_key": MISSED_KEY,
         "feeds_learning_features": True,
     }
+    data["scan_report_contract"] = scan_report_contract()
     data["upgrade_last_error"] = _last_error or None
     return core.app.web.json_response(data, status=response.status)
 
 
 async def _scan_wrapper(request):
-    return _augment_response(await _original_scan(request))
+    response = _augment_response(await _original_scan(request))
+    try:
+        payload = json.loads(response.body.decode("utf-8"))
+        contract = payload.get("scan_report_contract") or {}
+        ma_summary = contract.get("ma_priority_summary") or {}
+        top_ma = (ma_summary.get("top") or [])[:5]
+        print(
+            "Ψ-V12.4 SCAN-COMPLETENESS "
+            f"v={SCAN_REPORT_VERSION} required={len(SCAN_REQUIRED_SECTIONS)} "
+            f"maPriority={ma_summary.get('count',0)} "
+            f"topMA={','.join(str(r.get('symbol'))+':'+str(r.get('label'))+'/'+str(r.get('proximity')) for r in top_ma) or '-'} "
+            f"ml70={(contract.get('ml_summary') or {}).get('qualified_70_count',0)} "
+            f"micro={(contract.get('runtime_summary') or {}).get('dynamic_micro_pool',0)} "
+            "rule=SHOW_ALL_SECTIONS_OR_EXPLICIT_NONE",
+            flush=True,
+        )
+    except Exception:
+        pass
+    return response
 
 
 async def _health_wrapper(request):
@@ -1082,13 +1184,22 @@ async def supervisor_loop():
                     ma = ma_priority_candidates(10)
                     ml = ml_watch_candidates(10)
                     qualified = [r for r in ml if r.get("qualified")]
+                    ma200 = sum(1 for r in _ma_cache if "SMA200" in str(r.get("label") or ""))
+                    ma50 = sum(1 for r in _ma_cache if "SMA50" in str(r.get("label") or ""))
                     print(
                         "Ψ-V12.4 UPGRADE "
-                        f"maPriority={len(_ma_cache)} topMA={','.join(r['symbol']+':'+r['label']+'/'+r['proximity'] for r in ma[:5]) or '-'} "
+                        f"maPriority={len(_ma_cache)} ma200={ma200} ma50={ma50} "
+                        f"topMA={','.join(r['symbol']+':'+r['label']+'/'+r['proximity'] for r in ma[:5]) or '-'} "
                         f"mlWatch={len(_ml_watch_cache)} ml70={len(qualified)} "
                         f"micro={_stats.get('dynamic_micro_pool',0)} "
                         f"rescue={_stats.get('structure_rescue_imported',0)}/{_stats.get('structure_rescue_attempted',0)} "
                         f"missedLabelled={_stats.get('missed_labelled',0)} authority={AUTHORITY_CHAIN}",
+                        flush=True,
+                    )
+                    print(
+                        "Ψ-V12.4 REPORT-CONTRACT "
+                        f"v={SCAN_REPORT_VERSION} required={','.join(SCAN_REQUIRED_SECTIONS)} "
+                        "rule=SHOW_ALL_SECTIONS_OR_EXPLICIT_NONE",
                         flush=True,
                     )
                 await asyncio.sleep(RESCUE_POLL_S)
