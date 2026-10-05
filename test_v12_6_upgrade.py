@@ -19,8 +19,10 @@ import psi_v12_6_upgrade as v126
 class FakeClient:
     def __init__(self, raws):
         self.raws = raws
+        self.keys = None
 
     async def mget(self, keys):
+        self.keys = list(keys)
         return self.raws
 
 
@@ -66,6 +68,14 @@ class V126Tests(unittest.TestCase):
         v126._persist_training_guarded()
         self.assertEqual(calls, [])
         self.assertEqual(v125._stats.get("training_skipped_stale"), 1)
+
+    def test_refresh_reads_only_isolated_v126_namespace(self):
+        client = FakeClient([None, None])
+        asyncio.run(v126._refresh_from_redis(client))
+        self.assertEqual(
+            client.keys,
+            ["psi:v12.6:sensor:0", "psi:v12.6:sensor:1"],
+        )
 
 
 if __name__ == "__main__":

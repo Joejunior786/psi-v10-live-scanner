@@ -35,6 +35,8 @@ def safe_trade_metrics(state, now):
 
 base.trade_metrics = safe_trade_metrics
 base.VERSION = VERSION
+base.SNAPSHOT_KEY = f"psi:v12.6:sensor:{base.SHARD_INDEX}"
+base.HEARTBEAT_KEY = f"psi:v12.6:sensor-heartbeat:{base.SHARD_INDEX}"
 
 
 async def _publisher_loop(r, symbols, states, counters, host, stop_event):
