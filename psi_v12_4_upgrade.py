@@ -11,7 +11,7 @@ import redis.asyncio as redis_async
 # V12.3.4; this layer adds discovery/promotion, worker-cache rescue and a
 # separately-labelled calibrated ML override that can bypass technical BUY
 # confirmation but never bypass hard execution/data-safety checks.
-REVISION = "12.4.0-ma-priority+dynamic-micro+structure-rescue+missed-mover+ml70"
+REVISION = "12.4.1-ma-priority+dynamic-micro+structure-rescue+missed-mover-training+ml70-safety"
 AUTHORITY_CHAIN = "V12.3.4_CONVENTIONAL_OR_V12.4_ML70_HARD_SAFETY->BUY_NOW"
 ML_AUTHORITY_CHAIN = "V12.4_ML70->HARD_EXECUTION_SAFETY->BUY_NOW"
 ROLE = "PROMOTION_AND_CALIBRATED_OVERRIDE"
@@ -44,6 +44,7 @@ MISSED_MOVE_MIN_PCT = max(3.0, float(os.getenv("PSI_MISSED_MOVE_MIN_PCT", "5")))
 MISSED_COOLDOWN_S = max(900.0, float(os.getenv("PSI_MISSED_MOVE_COOLDOWN_S", "21600")))
 MISSED_KEY = os.getenv("PSI_MISSED_TRAINING_KEY", "psi:v12:ml:missed:v2").strip()
 MISSED_MAX = max(500, min(int(os.getenv("PSI_MISSED_TRAINING_MAX", "5000")), 20000))
+MISSED_LEGACY_SEEN_KEY = f"{MISSED_KEY}:legacy-seen"
 STRUCTURE_PREFIX = os.getenv("PSI_STRUCTURE_REDIS_PREFIX", "psi:v12:structure").strip()
 
 _original_gate = None
@@ -67,6 +68,7 @@ _ml_watch_cache = []
 _ma_cache = []
 _stats = defaultdict(int)
 _last_error = ""
+_historical_missed_counts = defaultdict(int)
 
 
 def _f(value, default=0.0):
@@ -296,7 +298,9 @@ def ml_probability(symbol, structural=None, legacy=None):
         return {"symbol": symbol, "qualified": False, "reason": f"FEATURE_ERROR:{type(exc).__name__}"}
 
     setup = str(features.get("setup") or "UNKNOWN")
-    keys = [f"COHORT::{cohort}", f"SETUP::{setup}", f"CLASS::{signal_class}"]
+    keys = [f"COHORT::{cohort}", f"CLASS::{signal_class}"]
+    if setup and setup != "UNKNOWN":
+        keys.append(f"SETUP::{setup}")
     candidates = []
     for key in keys:
         metric = _metric_for_key(key, ML_OVERRIDE_TARGET_PCT)
@@ -305,23 +309,29 @@ def ml_probability(symbol, structural=None, legacy=None):
     if not candidates:
         return {"symbol": symbol, "qualified": False, "reason": "NO_CALIBRATION"}
 
+    def metric_status(m):
+        p = min(m["overall_probability"], m["test_probability"])
+        sample_ok = m["overall_samples"] >= ML_OVERRIDE_MIN_TOTAL and m["test_samples"] >= ML_OVERRIDE_MIN_TEST
+        prob_ok = p > ML_OVERRIDE_THRESHOLD
+        ci_ok = (
+            m["overall_ci_low"] >= ML_OVERRIDE_THRESHOLD
+            and m["test_ci_low"] >= ML_OVERRIDE_THRESHOLD
+        ) if ML_OVERRIDE_REQUIRE_CI70 else True
+        return bool(sample_ok and prob_ok and ci_ok), p, sample_ok, prob_ok, ci_ok
+
+    # Prefer a properly validated cohort/class/setup over a superficially higher
+    # probability bucket with too few observations.
     candidates.sort(
         key=lambda m: (
-            min(m["overall_probability"], m["test_probability"]),
+            metric_status(m)[0],
+            metric_status(m)[1],
             min(m["overall_ci_low"], m["test_ci_low"]),
             m["overall_samples"] + m["test_samples"],
         ),
         reverse=True,
     )
     best = candidates[0]
-    probability = min(best["overall_probability"], best["test_probability"])
-    sample_ok = best["overall_samples"] >= ML_OVERRIDE_MIN_TOTAL and best["test_samples"] >= ML_OVERRIDE_MIN_TEST
-    prob_ok = probability > ML_OVERRIDE_THRESHOLD
-    ci_ok = (
-        best["overall_ci_low"] >= ML_OVERRIDE_THRESHOLD
-        and best["test_ci_low"] >= ML_OVERRIDE_THRESHOLD
-    ) if ML_OVERRIDE_REQUIRE_CI70 else True
-    qualified = bool(sample_ok and prob_ok and ci_ok)
+    qualified, probability, sample_ok, prob_ok, ci_ok = metric_status(best)
     return {
         "symbol": symbol,
         "qualified": qualified,
@@ -400,9 +410,12 @@ def _hard_execution_safety(structural, legacy, micro, integrity):
     integrity = integrity or {}
     blockers = []
 
-    current = _f(structural.get("current"), _current_price(structural.get("symbol") or legacy.get("symbol")))
+    symbol = str(structural.get("symbol") or legacy.get("symbol") or "").upper()
+    current = _f(structural.get("current"), _current_price(symbol))
     if current <= 0:
         blockers.append("LIVE_PRICE")
+    if symbol not in set(_universe()):
+        blockers.append("BINANCE_SPOT_UNIVERSE")
     if not bool(micro.get("micro_ready")):
         blockers.append("LIVE_MICRO_DATA")
     if not bool(micro.get("sequence_verified")):
@@ -417,7 +430,18 @@ def _hard_execution_safety(structural, legacy, micro, integrity):
     if slip > MAX_SLIPPAGE_BPS:
         blockers.append("SLIPPAGE_FILTER")
 
-    if bool(structural.get("anti_chase")):
+    legacy_blockers = set(str(x) for x in (
+        list(legacy.get("combined_blockers") or [])
+        + list(legacy.get("pinpoint_blockers") or [])
+        + list(legacy.get("integrity_blockers") or [])
+    ))
+    if (
+        bool(structural.get("anti_chase"))
+        or legacy.get("pinpoint_anti_chase_ok") is False
+        or "ANTI_CHASE" in legacy_blockers
+        or "ANTI_CHASE_CLEAR" in legacy_blockers
+        or "CUMULATIVE_EXTENSION_GUARD" in legacy_blockers
+    ):
         blockers.append("CUMULATIVE_EXTENSION_GUARD")
     max_chase = _f(structural.get("max_chase"))
     if current > 0 and max_chase > 0 and current > max_chase:
@@ -432,12 +456,18 @@ def _hard_execution_safety(structural, legacy, micro, integrity):
     ages = integrity.get("ages") if isinstance(integrity.get("ages"), dict) else {}
     trade_age = _f(ages.get("micro_trade_ms"), 999999999.0)
     book_age = _f(ages.get("micro_book_ms"), 999999999.0)
+    tape_age = _f(ages.get("tape_ms"), 999999999.0)
+    bbo_age = _f(ages.get("bbo_ms"), 999999999.0)
     structure_age = _f(ages.get("structure_s"), 999999999.0)
     legacy_mod = getattr(core, "legacy", None)
     if trade_age > _f(getattr(legacy_mod, "INTEGRITY_MICRO_TRADE_MAX_AGE_MS", 15000), 15000):
         blockers.append("STALE_DEPTH_TRADE")
     if book_age > _f(getattr(legacy_mod, "INTEGRITY_MICRO_BOOK_MAX_AGE_MS", 5000), 5000):
         blockers.append("STALE_DEPTH_BOOK")
+    if tape_age > _f(getattr(legacy_mod, "INTEGRITY_TAPE_MAX_AGE_MS", 5000), 5000):
+        blockers.append("STALE_EVENT_TAPE")
+    if bbo_age > _f(getattr(legacy_mod, "INTEGRITY_BBO_MAX_AGE_MS", 5000), 5000):
+        blockers.append("STALE_EVENT_BBO")
     if structure_age > _f(getattr(legacy_mod, "INTEGRITY_STRUCTURE_MAX_AGE_S", 1200), 1200):
         blockers.append("STALE_STRUCTURE")
 
@@ -586,6 +616,7 @@ def _wrap_learning():
         out["ma_priority_proximity"] = str(ma.get("proximity") or "")
         out["ma_priority_distance_pct"] = _f(ma.get("distance_pct"), 999.0)
         out["early_explosion_score"] = _early_explosion_score(symbol)
+        out["historical_missed_count"] = int(_historical_missed_counts.get(str(symbol).upper(), 0))
         return out
 
     def signal_class(structural, legacy, features_row):
@@ -603,7 +634,8 @@ def _wrap_learning():
         ma = "MA1" if features_row.get("ma_priority") else "MA0"
         ex = _f(features_row.get("early_explosion_score"))
         band = "EX3" if ex >= 100 else "EX2" if ex >= 85 else "EX1" if ex >= EARLY_EXPLOSION_MIN else "EX0"
-        return f"{base}|{ma}|{band}"
+        missed = "MISS1" if int(features_row.get("historical_missed_count") or 0) > 0 else "MISS0"
+        return f"{base}|{ma}|{band}|{missed}"
 
     def candidate_rows():
         rows = list(_original_candidates() or [])
@@ -745,8 +777,11 @@ def _augment_response(response):
     }
     data["missed_mover_training"] = {
         "labelled": _stats.get("missed_labelled", 0),
+        "legacy_imported": _stats.get("legacy_missed_imported", 0),
+        "historical_symbols": len(_historical_missed_counts),
         "history_symbols": len(_price_feature_history),
         "redis_key": MISSED_KEY,
+        "feeds_learning_features": True,
     }
     data["upgrade_last_error"] = _last_error or None
     return core.app.web.json_response(data, status=response.status)
@@ -917,8 +952,81 @@ async def _rescue_worker_structure(client):
             _stats["structure_rescue_imported"] += 1
 
 
+def _legacy_modules():
+    core = _core()
+    root = getattr(core, "legacy", None)
+    if root is None:
+        return []
+    out, seen, queue = [], set(), [root]
+    while queue and len(out) < 40:
+        mod = queue.pop(0)
+        ident = id(mod)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(mod)
+        for name in ("base", "v11", "rescue", "tape", "scanner", "core"):
+            child = getattr(mod, name, None)
+            if child is not None and hasattr(child, "__dict__") and id(child) not in seen:
+                queue.append(child)
+    return out
+
+
+async def _import_legacy_missed(client):
+    imported = 0
+    for mod in _legacy_modules():
+        rows = getattr(mod, "missed_moves", None)
+        if rows is None:
+            continue
+        try:
+            rows = list(rows)
+        except Exception:
+            continue
+        for row in rows[-500:]:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol.endswith("USDT"):
+                continue
+            detected = int(_f(row.get("detected")) * 1000.0) if _f(row.get("detected")) < 10_000_000_000 else int(_f(row.get("detected")))
+            raw_id = f"{symbol}|{detected}|{row.get('return_15m_pct')}|{row.get('best_prior_score')}"
+            import hashlib
+            event_id = hashlib.sha1(raw_id.encode()).hexdigest()[:20]
+            if await client.sismember(MISSED_LEGACY_SEEN_KEY, event_id):
+                _historical_missed_counts[symbol] += 1
+                continue
+            event = {
+                "id": event_id,
+                "symbol": symbol,
+                "labelled_ms": detected or _now_ms(),
+                "move_pct": _f(row.get("return_15m_pct")),
+                "returns_pct": {"15": _f(row.get("return_15m_pct"))},
+                "targets_hit": [t for t in (5, 10, 15, 20, 30, 40) if _f(row.get("return_15m_pct")) >= t],
+                "root_cause": "PROMOTED_TOO_LATE" if row.get("had_v11_prediction") else "NOT_DISCOVERED",
+                "legacy_missed_experience": True,
+                "best_prior_score": _f(row.get("best_prior_score")),
+                "revision": REVISION,
+            }
+            await client.lpush(MISSED_KEY, json.dumps(event, separators=(",", ":"), sort_keys=True))
+            await client.ltrim(MISSED_KEY, 0, MISSED_MAX - 1)
+            await client.sadd(MISSED_LEGACY_SEEN_KEY, event_id)
+            _historical_missed_counts[symbol] += 1
+            imported += 1
+    if imported:
+        _stats["legacy_missed_imported"] += imported
+        print(f"Ψ-V12.4 MISSED-EXPERIENCE imported={imported} symbols={len(_historical_missed_counts)}", flush=True)
+
+
 async def bootstrap():
-    return
+    core = _core()
+    if not core.REDIS_URL:
+        return
+    client = redis_async.from_url(core.REDIS_URL, encoding="utf-8", decode_responses=True)
+    try:
+        await client.ping()
+        await _import_legacy_missed(client)
+    finally:
+        await client.aclose()
 
 
 async def supervisor_loop():
