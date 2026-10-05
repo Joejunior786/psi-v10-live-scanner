@@ -973,6 +973,20 @@ async def print_loop():
             print(f"[PRINT ERROR] {type(exc).__name__}: {exc}",flush=True)
 
 
+async def liveness(request):
+    """Lightweight process-liveness endpoint for platform deployment probes.
+
+    This deliberately does not evaluate scanner readiness or trading gates.
+    /health remains the full fail-closed scanner diagnostic endpoint.
+    """
+    return web.json_response({
+        "ok": True,
+        "service": "psi-v10-live-scanner",
+        "liveness": "UP",
+        "uptime_seconds": int(time.time() - scanner_started_at),
+    })
+
+
 async def health(request):
     return web.json_response({
         "ok":True,"service":"psi-v10-live-scanner","version":"10.1","scanner_ready":scanner_ready,
@@ -1014,7 +1028,7 @@ async def diagnostics_endpoint(request):
 
 
 async def start_http_server():
-    app=web.Application(); app.router.add_get("/",health); app.router.add_get("/health",health); app.router.add_get("/scan",scan_endpoint); app.router.add_get("/diagnostics",diagnostics_endpoint)
+    app=web.Application(); app.router.add_get("/",health); app.router.add_get("/live",liveness); app.router.add_get("/health",health); app.router.add_get("/scan",scan_endpoint); app.router.add_get("/diagnostics",diagnostics_endpoint)
     runner=web.AppRunner(app); await runner.setup(); site=web.TCPSite(runner,"0.0.0.0",PORT); await site.start()
     print(f"Î¨-V10.1 HTTP listening on port {PORT}",flush=True); return runner
 

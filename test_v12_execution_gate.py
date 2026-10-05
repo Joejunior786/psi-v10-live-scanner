@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 import psi_strategy_v12_entry as v12
@@ -66,6 +67,11 @@ def good_integrity():
 
 
 class StrictExecutionGateTests(unittest.TestCase):
+    def test_platform_liveness_probe_is_independent_of_scanner_readiness(self):
+        response = asyncio.run(v12.app.liveness(None))
+        self.assertEqual(response.status, 200)
+        self.assertIn(b'"liveness": "UP"', response.body)
+
     def test_structural_buy_missing_micro_fails_closed(self):
         micro = good_micro()
         micro["micro_ready"] = False
