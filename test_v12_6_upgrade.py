@@ -124,6 +124,71 @@ class V126Tests(unittest.TestCase):
             ["psi:v12.6:sensor:0", "psi:v12.6:sensor:1"],
         )
 
+    def test_hot_lane_prefers_pinpoint_then_armed_and_requires_hard_safety(self):
+        now = int(time.time() * 1000)
+        v125._stats["sensor_shards_live"] = 2
+        v125._sensor_cache = {
+            "PINUSDT": {"_sensor_generated_ms": now},
+            "ARMUSDT": {"_sensor_generated_ms": now},
+            "BADUSDT": {"_sensor_generated_ms": now},
+        }
+        v125._latest_candidates = [
+            {
+                "symbol": "ARMUSDT", "state": "EARLY_ARMED", "hard_sensor_safety": True,
+                "generated_ms": now, "hazard_score": 99, "change_point_delta": 20,
+                "buy_ratio": 0.9, "spread_bps": 1, "slippage_bps": 2,
+                "book_age_ms": 100, "trade_age_ms": 100,
+            },
+            {
+                "symbol": "PINUSDT", "state": "EARLY_PINPOINT", "hard_sensor_safety": True,
+                "generated_ms": now, "hazard_score": 88, "change_point_delta": 8,
+                "buy_ratio": 0.7, "spread_bps": 2, "slippage_bps": 3,
+                "book_age_ms": 120, "trade_age_ms": 120,
+            },
+            {
+                "symbol": "BADUSDT", "state": "EARLY_PINPOINT", "hard_sensor_safety": False,
+                "generated_ms": now, "hazard_score": 100, "change_point_delta": 30,
+                "buy_ratio": 1.0, "spread_bps": 1, "slippage_bps": 1,
+                "book_age_ms": 50, "trade_age_ms": 50,
+            },
+        ]
+        self.assertEqual(v126._hot_lane_symbols()[:2], ["PINUSDT", "ARMUSDT"])
+        self.assertNotIn("BADUSDT", v126._hot_lane_symbols())
+
+    def test_hot_lane_fails_closed_on_stale_snapshot(self):
+        now = int(time.time() * 1000)
+        v125._stats["sensor_shards_live"] = 2
+        stale = now - v126.SENSOR_MAX_SNAPSHOT_AGE_MS - 1
+        v125._sensor_cache = {"OLDUSDT": {"_sensor_generated_ms": stale}}
+        v125._latest_candidates = [{
+            "symbol": "OLDUSDT", "state": "EARLY_PINPOINT", "hard_sensor_safety": True,
+            "generated_ms": stale, "hazard_score": 100, "change_point_delta": 20,
+            "buy_ratio": 1.0, "spread_bps": 1, "slippage_bps": 1,
+            "book_age_ms": 10, "trade_age_ms": 10,
+        }]
+        self.assertEqual(v126._hot_lane_symbols(), [])
+
+    def test_hot_first_promotion_preserves_base_and_has_no_buy_authority(self):
+        now = int(time.time() * 1000)
+        v125._stats["sensor_shards_live"] = 2
+        v125._sensor_cache = {"HOTUSDT": {"_sensor_generated_ms": now}}
+        v125._latest_candidates = [{
+            "symbol": "HOTUSDT", "state": "EARLY_PINPOINT", "hard_sensor_safety": True,
+            "generated_ms": now, "hazard_score": 90, "change_point_delta": 10,
+            "buy_ratio": 0.8, "spread_bps": 1, "slippage_bps": 1,
+            "book_age_ms": 100, "trade_age_ms": 100,
+            "entry_authority": False, "strict_buy_unchanged": True,
+        }]
+        old = v126._original_promotion_symbols
+        try:
+            v126._original_promotion_symbols = lambda: ["BASEUSDT", "HOTUSDT"]
+            promoted = v126._hot_first_promotion_symbols()
+            self.assertEqual(promoted[:2], ["HOTUSDT", "BASEUSDT"])
+            self.assertFalse(v125._latest_candidates[0]["entry_authority"])
+            self.assertTrue(v125._latest_candidates[0]["strict_buy_unchanged"])
+        finally:
+            v126._original_promotion_symbols = old
+
 
 if __name__ == "__main__":
     unittest.main()
