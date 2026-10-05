@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.0-structure-worker-1"
+WORKER_VERSION = "12.4.0-structure-worker-ma-daily"
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 UNIVERSE_KEY = os.getenv("PSI_TAPE_UNIVERSE_KEY", "psi:v12:universe").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -28,7 +28,7 @@ HOSTS = tuple(
     ).split(",")
     if x.strip()
 )
-TF_LIMITS = (("15m", 80), ("1h", 220), ("4h", 220))
+TF_LIMITS = (("15m", 80), ("1h", 220), ("4h", 220), ("1d", 220))
 HEARTBEAT_KEY = f"psi:v12:structure-worker:{SHARD_INDEX}"
 
 if not REDIS_URL:
@@ -141,9 +141,11 @@ async def heartbeat(r, assigned: int, priority: int, stats: dict, error: str = "
         "ok_15m": stats.get("ok_15m", 0),
         "ok_1h": stats.get("ok_1h", 0),
         "ok_4h": stats.get("ok_4h", 0),
+        "ok_1d": stats.get("ok_1d", 0),
         "fail_15m": stats.get("fail_15m", 0),
         "fail_1h": stats.get("fail_1h", 0),
         "fail_4h": stats.get("fail_4h", 0),
+        "fail_1d": stats.get("fail_1d", 0),
         "symbols": stats.get("symbols", 0),
         "last_symbol": stats.get("last_symbol"),
         "last_fetch_ms": stats.get("last_fetch_ms", 0),
@@ -255,8 +257,8 @@ async def main():
                 print(
                     f"PSI-STRUCTURE-WORKER progress shard={SHARD_INDEX+1}/{SHARD_COUNT} "
                     f"assigned={len(assigned)} priority={len(priority)} symbols={stats.get('symbols',0)} "
-                    f"ok15={stats.get('ok_15m',0)} ok1h={stats.get('ok_1h',0)} ok4h={stats.get('ok_4h',0)} "
-                    f"fail15={stats.get('fail_15m',0)} fail1h={stats.get('fail_1h',0)} fail4h={stats.get('fail_4h',0)}",
+                    f"ok15={stats.get('ok_15m',0)} ok1h={stats.get('ok_1h',0)} ok4h={stats.get('ok_4h',0)} ok1d={stats.get('ok_1d',0)} "
+                    f"fail15={stats.get('fail_15m',0)} fail1h={stats.get('fail_1h',0)} fail4h={stats.get('fail_4h',0)} fail1d={stats.get('fail_1d',0)}",
                     flush=True,
                 )
             await asyncio.sleep(0.05)
