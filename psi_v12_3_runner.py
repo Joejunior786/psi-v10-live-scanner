@@ -6,6 +6,7 @@ import psi_outcome_learning as outcome_learning
 import psi_v12_4_upgrade as upgrade
 import psi_v12_5_upgrade as upgrade_v125
 import psi_v12_6_upgrade as upgrade_v126
+from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
 UPGRADE_RUNTIME = "v12.6.0-freshness-guard-decoupled-publisher"
@@ -21,6 +22,14 @@ async def main():
     upgrade.install(core, hardening, outcome_learning)
     upgrade_v125.install(core, hardening, outcome_learning, upgrade)
     upgrade_v126.install(upgrade_v125)
+
+    # Bind the existing aiohttp server immediately so Railway's /live probe
+    # reflects process liveness, while the inherited scanner bootstraps in
+    # parallel. The wrapper makes the later legacy start_http_server() call
+    # return the same runner instead of rebinding the port.
+    start_http_once = install_start_once(core.app)
+    await start_http_once()
+    print("PSI-V12.6 EARLY_LIVENESS bound /live before scanner bootstrap", flush=True)
 
     await hardening.bootstrap()
     await outcome_learning.bootstrap()
