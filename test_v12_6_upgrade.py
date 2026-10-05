@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import time
+import threading
 import types
 import unittest
 
@@ -75,6 +76,45 @@ class V126Tests(unittest.TestCase):
         self.assertFalse(sensor_v126._should_yield(1))
         self.assertTrue(sensor_v126._should_yield(every))
         self.assertTrue(sensor_v126._should_yield(every * 2))
+
+    def test_refresh_replaces_cache_object_atomically(self):
+        now = int(time.time() * 1000)
+        old_cache = v125._sensor_cache
+        old_cache["OLDUSDT"] = {"last_price": 0.5}
+        fresh = json.dumps({
+            "generated_ms": now,
+            "metric_symbols": 1,
+            "metrics": {"ABCUSDT": {"last_price": 1.0}},
+        })
+        asyncio.run(v126._refresh_from_redis(FakeClient([fresh, None])))
+        self.assertIsNot(v125._sensor_cache, old_cache)
+        self.assertIn("ABCUSDT", v125._sensor_cache)
+        self.assertNotIn("OLDUSDT", v125._sensor_cache)
+
+    def test_consumer_supervisor_runs_on_dedicated_thread(self):
+        main_ident = threading.get_ident()
+        calls = []
+        original = v126._original_supervisor_loop
+        old_thread = v126._supervisor_thread
+        try:
+            async def fake_supervisor():
+                calls.append(threading.get_ident())
+                v126._supervisor_stop.set()
+
+            v126._original_supervisor_loop = fake_supervisor
+            v126._supervisor_thread = None
+            v126._supervisor_stop.clear()
+            v126._supervisor_started.clear()
+            thread = v126._ensure_supervisor_thread()
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(calls), 1)
+            self.assertNotEqual(calls[0], main_ident)
+        finally:
+            v126._supervisor_stop.set()
+            v126._original_supervisor_loop = original
+            v126._supervisor_thread = old_thread
+            v126._supervisor_started.clear()
 
     def test_refresh_reads_only_isolated_v126_namespace(self):
         client = FakeClient([None, None])
