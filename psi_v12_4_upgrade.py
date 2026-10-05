@@ -549,7 +549,40 @@ def promoted_micro_symbols():
     core = _core()
     base = list(_original_micro() or [])
     pool_size = int(core.REDIS_MICRO_POOL_SIZE)
-    universe_set = set(_universe())
+    universe = _universe()
+    universe_set = set(universe)
+
+    # Cold-start invariant: never erase the restored/sticky execution pool
+    # while the Binance universe is still being populated. The legacy
+    # hardening layer can restore a valid pool before q.universe reaches 403;
+    # filtering that pool through a partial universe would shrink coverage to
+    # zero/few symbols and delay all subsequent high-resolution promotion.
+    warm_floor = min(40, pool_size)
+    if len(universe) < warm_floor:
+        fallback = []
+        seen = set()
+        for sym in (
+            base
+            + list(getattr(core, "_distributed_micro_sticky_pool", []) or [])
+            + list(getattr(HARDENING, "_protected_pool", []) or [])
+        ):
+            sym = str(sym or "").upper()
+            if sym.endswith("USDT") and sym not in seen:
+                seen.add(sym)
+                fallback.append(sym)
+            if len(fallback) >= pool_size:
+                break
+        if fallback:
+            core._distributed_micro_sticky_pool = list(fallback)
+            if HARDENING is not None:
+                try:
+                    HARDENING._protected_pool[:] = list(fallback)
+                except Exception:
+                    pass
+            _stats["dynamic_micro_coldstart_hold"] += 1
+            _stats["dynamic_micro_pool"] = len(fallback)
+            return fallback
+
     promoted = _combined_promotions()
 
     out = []
@@ -566,7 +599,7 @@ def promoted_micro_symbols():
         add(sym)
     for sym in base:
         add(sym)
-    for sym in _universe():
+    for sym in universe:
         add(sym)
 
     if HARDENING is not None:
