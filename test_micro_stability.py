@@ -5,10 +5,22 @@ import unittest
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 import psi_micro_worker as worker
+import psi_structure_worker as structure_worker
 import psi_v12_3_hardening as hardening
 
 
 class MicroStabilityTests(unittest.TestCase):
+    def test_structure_worker_hydrates_deep_core_and_weekly(self):
+        core = dict(structure_worker.CORE_TF_LIMITS)
+        self.assertEqual(core["1h"], 220)
+        self.assertEqual(core["4h"], 220)
+        self.assertEqual(core["1d"], 220)
+        self.assertEqual(structure_worker.WEEKLY_TF_LIMIT, ("1w", 220))
+        self.assertGreaterEqual(
+            structure_worker.WEEKLY_BACKGROUND_REFRESH_S,
+            structure_worker.BACKGROUND_REFRESH_S,
+        )
+
     def test_full_pool_flip_is_bounded(self):
         active={f"OLD{i}USDT" for i in range(80)}
         wanted=[f"NEW{i}USDT" for i in range(80)]
