@@ -11,7 +11,7 @@ VERSION = "12.5.0-full-universe-combined-sensor"
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 SHARD_INDEX = int(os.getenv("PSI_SENSOR_SHARD_INDEX", "0"))
 SHARD_COUNT = max(1, int(os.getenv("PSI_SENSOR_SHARD_COUNT", "4")))
-MAX_SYMBOLS = max(25, min(int(os.getenv("PSI_SENSOR_MAX_SYMBOLS", "110")), 140))
+MAX_SYMBOLS = max(25, min(int(os.getenv("PSI_SENSOR_MAX_SYMBOLS", "140")), 140))
 SNAPSHOT_INTERVAL = max(0.25, float(os.getenv("PSI_SENSOR_SNAPSHOT_SECONDS", "0.5")))
 SNAPSHOT_TTL = max(5, int(os.getenv("PSI_SENSOR_SNAPSHOT_TTL_SECONDS", "15")))
 UNIVERSE_REFRESH_SECONDS = max(300, int(os.getenv("PSI_SENSOR_UNIVERSE_REFRESH_SECONDS", "1800")))
@@ -430,6 +430,7 @@ async def stream_once(r, session, symbols, host):
     last_snapshot = 0.0
     last_hb = 0.0
     started = time.monotonic()
+    last_diag = 0.0
     async with session.ws_connect(
         url,
         heartbeat=15,
@@ -478,6 +479,27 @@ async def stream_once(r, session, symbols, host):
                     if mono - last_hb >= 3.0:
                         await publish_heartbeat(r, symbols, events, host)
                         last_hb = mono
+                    if mono - last_diag >= 10.0:
+                        fresh_trade = 0
+                        fresh_book = 0
+                        metric_symbols = 0
+                        now = now_ms()
+                        for sym in symbols:
+                            st = states.get(sym)
+                            if not st:
+                                continue
+                            metric_symbols += 1
+                            tm = trade_metrics(st["trade"], now)
+                            bm = book_metrics(st["book"], now)
+                            fresh_trade += int(bool(tm.get("trade_fresh")))
+                            fresh_book += int(bool(bm.get("book_fresh")))
+                        print(
+                            f"PSI-SENSOR LIVE shard={SHARD_INDEX}/{SHARD_COUNT} "
+                            f"symbols={len(symbols)} metrics={metric_symbols} events={events} "
+                            f"tradeFresh={fresh_trade} bookFresh={fresh_book} host={host}",
+                            flush=True,
+                        )
+                        last_diag = mono
                 except Exception as exc:
                     print(
                         f"PSI-SENSOR EVENT_ERROR shard={SHARD_INDEX} {type(exc).__name__}:{exc}",
