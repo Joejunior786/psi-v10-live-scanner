@@ -9,7 +9,7 @@ import psi_outcome_learning as outcome_learning
 
 CORE = None
 AUTHORITY_CHAIN = "V12.3.4_LANES->V12.3.4_FAIL_CLOSED_AUTHORITY->BUY_NOW"
-HARDENING_REVISION = "12.3.4-fresh-challenger-rotation+lowcap+outcome-learning+rapid-guaranteed-promotion"
+HARDENING_REVISION = "12.3.5-cap-source-truth+fresh-challenger-rotation+lowcap+outcome-learning+rapid-guaranteed-promotion"
 STICKY_KEY = os.getenv("PSI_MICRO_STICKY_KEY", "psi:v12:sticky-micro-pool").strip()
 STRUCTURE_WORKERS = max(1, min(int(os.getenv("PSI_STRUCTURE_WORKERS", "2")), 8))
 RISK_WORKERS = max(1, min(int(os.getenv("PSI_RISK_WORKERS", "2")), 8))
@@ -455,12 +455,19 @@ def _lowcap_summary(limit=12):
     core = _core()
     universe = list(getattr(core.q, "universe", []) or [])
     rows = _lowcap_ranked_details(universe)[:max(1, int(limit))]
+    verified = sum(1 for row in rows if row.get("cap_source") == "MARKET_CAP")
+    proxy = sum(1 for row in rows if row.get("cap_source") == "QUOTE_VOLUME_PROXY")
     return {
         "revision": HARDENING_REVISION,
         "role": "DISCOVERY_PROMOTION_ONLY",
         "execution_authority": False,
         "true_market_cap_when_available": True,
         "fallback_cap_source": "QUOTE_VOLUME_PROXY",
+        "cap_source_counts": {
+            "MARKET_CAP": verified,
+            "QUOTE_VOLUME_PROXY": proxy,
+        },
+        "cap_reporting_rule": "QUOTE_VOLUME_PROXY is discovery-only and must never be presented as verified market cap.",
         "promotion_threshold": _f(
             os.getenv("PSI_LOW_CAP_MIN_SCORE", LOWCAP_MIN_SCORE),
             LOWCAP_MIN_SCORE,
@@ -1096,6 +1103,7 @@ def stable_micro_symbols():
             f"{row.get('symbol')}:{_f(row.get('score')):.1f}/{row.get('state')}"
             f"/VBP{_f((row.get('components') or {}).get('volume_before_price')):.0f}"
             f"/FLOW{_f((row.get('components') or {}).get('flow_flip')):.0f}"
+            f"/CAP={row.get('cap_band') or 'UNKNOWN'}:{row.get('cap_source') or 'UNKNOWN'}"
             for row in lowcap_details[:min(8, len(lowcap_details))]
         ) or "-"
         missing_lowcap = ",".join(
