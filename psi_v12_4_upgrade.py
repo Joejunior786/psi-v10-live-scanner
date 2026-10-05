@@ -1,0 +1,998 @@
+import asyncio
+import json
+import math
+import os
+import time
+from collections import defaultdict, deque
+
+import redis.asyncio as redis_async
+
+# V12.4 is an additive runtime layer. The conventional execution path remains
+# V12.3.4; this layer adds discovery/promotion, worker-cache rescue and a
+# separately-labelled calibrated ML override that can bypass technical BUY
+# confirmation but never bypass hard execution/data-safety checks.
+REVISION = "12.4.0-ma-priority+dynamic-micro+structure-rescue+missed-mover+ml70"
+AUTHORITY_CHAIN = "V12.3.4_CONVENTIONAL_OR_V12.4_ML70_HARD_SAFETY->BUY_NOW"
+ML_AUTHORITY_CHAIN = "V12.4_ML70->HARD_EXECUTION_SAFETY->BUY_NOW"
+ROLE = "PROMOTION_AND_CALIBRATED_OVERRIDE"
+
+CORE = None
+HARDENING = None
+LEARNER = None
+
+MA_TOUCH_PCT = max(0.05, float(os.getenv("PSI_MA_PROMOTE_TOUCH_PCT", "0.50")))
+MA_NEAR_PCT = max(MA_TOUCH_PCT, float(os.getenv("PSI_MA_PROMOTE_NEAR_PCT", "1.00")))
+MA_APPROACH_ATR = max(0.25, float(os.getenv("PSI_MA_PROMOTE_APPROACH_ATR", "0.90")))
+MA_APPROACH_MAX_PCT = max(MA_NEAR_PCT, float(os.getenv("PSI_MA_PROMOTE_MAX_PCT", "3.00")))
+MA_PROMOTION_SLOTS = max(4, min(int(os.getenv("PSI_MA_PROMOTION_SLOTS", "12")), 24))
+ML_PROMOTION_SLOTS = max(2, min(int(os.getenv("PSI_ML_PROMOTION_SLOTS", "8")), 20))
+EARLY_PROMOTION_SLOTS = max(4, min(int(os.getenv("PSI_EARLY_EXPLOSION_PROMOTION_SLOTS", "12")), 24))
+CORE_RETAIN_SLOTS = max(4, min(int(os.getenv("PSI_DYNAMIC_MICRO_CORE_RETAIN", "10")), 24))
+EARLY_EXPLOSION_MIN = max(45.0, float(os.getenv("PSI_EARLY_EXPLOSION_MIN", "70")))
+ML_OVERRIDE_THRESHOLD = min(0.99, max(0.51, float(os.getenv("PSI_ML_OVERRIDE_THRESHOLD", "0.70"))))
+ML_OVERRIDE_TARGET_PCT = float(os.getenv("PSI_ML_OVERRIDE_TARGET_PCT", "10"))
+ML_OVERRIDE_REQUIRE_CI70 = os.getenv("PSI_ML_OVERRIDE_REQUIRE_CI70", "1").strip() not in {"0", "false", "False"}
+ML_OVERRIDE_MIN_TOTAL = max(30, int(os.getenv("PSI_ML_OVERRIDE_MIN_TOTAL", "300")))
+ML_OVERRIDE_MIN_TEST = max(10, int(os.getenv("PSI_ML_OVERRIDE_MIN_TEST", "75")))
+MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_ML_OVERRIDE_MAX_SPREAD_BPS", "20")))
+MAX_SLIPPAGE_BPS = max(1.0, float(os.getenv("PSI_ML_OVERRIDE_MAX_SLIPPAGE_BPS", "35")))
+RESCUE_MAX_AGE_S = max(30.0, float(os.getenv("PSI_STRUCTURE_WORKER_RESCUE_MAX_AGE_S", "600")))
+RESCUE_POLL_S = max(3.0, float(os.getenv("PSI_STRUCTURE_WORKER_RESCUE_POLL_S", "10")))
+DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V12_4_DIAG_SECONDS", "30")))
+HISTORY_SAMPLE_S = max(30.0, float(os.getenv("PSI_MISSED_HISTORY_SAMPLE_S", "60")))
+MISSED_MOVE_MIN_PCT = max(3.0, float(os.getenv("PSI_MISSED_MOVE_MIN_PCT", "5")))
+MISSED_COOLDOWN_S = max(900.0, float(os.getenv("PSI_MISSED_MOVE_COOLDOWN_S", "21600")))
+MISSED_KEY = os.getenv("PSI_MISSED_TRAINING_KEY", "psi:v12:ml:missed:v2").strip()
+MISSED_MAX = max(500, min(int(os.getenv("PSI_MISSED_TRAINING_MAX", "5000")), 20000))
+STRUCTURE_PREFIX = os.getenv("PSI_STRUCTURE_REDIS_PREFIX", "psi:v12:structure").strip()
+
+_original_gate = None
+_original_micro = None
+_original_priority = None
+_original_scan = None
+_original_health = None
+_original_features = None
+_original_cohort = None
+_original_candidates = None
+_original_signal_class = None
+_original_evaluate = None
+
+_last_worker_fetch_ms = {}
+_price_feature_history = defaultdict(lambda: deque(maxlen=70))
+_last_missed_label_mono = defaultdict(float)
+_last_sample_mono = 0.0
+_last_diag_mono = 0.0
+_active_ml_overrides = {}
+_ml_watch_cache = []
+_ma_cache = []
+_stats = defaultdict(int)
+_last_error = ""
+
+
+def _f(value, default=0.0):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+def _core():
+    if CORE is None:
+        raise RuntimeError("V12.4 upgrade is not installed")
+    return CORE
+
+
+def _universe():
+    core = _core()
+    return [
+        str(s).upper()
+        for s in list(getattr(core.q, "universe", []) or [])
+        if str(s).upper().endswith("USDT")
+    ]
+
+
+def _current_price(symbol):
+    core = _core()
+    symbol = str(symbol or "").upper()
+    try:
+        p = _f(core.app.current_symbol_price(symbol))
+        if p > 0:
+            return p
+    except Exception:
+        pass
+    for tf in ("1h", "4h", "1d"):
+        snap = ((core._cache.get(symbol) or {}).get(tf) or {}).get("snap") or {}
+        p = _f(snap.get("current"), _f(snap.get("close")))
+        if p > 0:
+            return p
+    row = (getattr(core.q, "latest", {}) or {}).get(symbol) or {}
+    for key in ("price", "last_price", "current", "mark_price"):
+        p = _f(row.get(key))
+        if p > 0:
+            return p
+    return 0.0
+
+
+def _ma_matches_from_cache(symbol, cache=None):
+    """Return user-requested SIMPLE moving-average proximity matches.
+
+    MA proximity is discovery/promotion only. It never creates a BUY by itself.
+    EMA remains available to the conventional V12 confirmation path.
+    """
+    core = _core()
+    symbol = str(symbol or "").upper()
+    cache = cache if isinstance(cache, dict) else (core._cache.get(symbol) or {})
+    current = _current_price(symbol)
+    if current <= 0:
+        return []
+
+    levels = (
+        ("DAILY_SMA200", "1d", "sma200", 100.0),
+        ("4H_SMA200", "4h", "sma200", 92.0),
+        ("1H_SMA200", "1h", "sma200", 84.0),
+        ("DAILY_SMA50", "1d", "sma50", 76.0),
+        ("4H_SMA50", "4h", "sma50", 70.0),
+    )
+    out = []
+    for label, tf, key, base_score in levels:
+        snap = (cache.get(tf) or {}).get("snap") or {}
+        level = _f(snap.get(key))
+        atr = _f(snap.get("atr"))
+        if level <= 0:
+            continue
+        dist_pct = abs(current - level) / level * 100.0
+        atr_pct = (atr / current * 100.0) if atr > 0 and current > 0 else MA_NEAR_PCT
+        approach_pct = min(MA_APPROACH_MAX_PCT, max(MA_NEAR_PCT, MA_APPROACH_ATR * atr_pct))
+        if dist_pct <= MA_TOUCH_PCT:
+            proximity = "TOUCH"
+            bonus = 20.0
+        elif dist_pct <= MA_NEAR_PCT:
+            proximity = "NEAR"
+            bonus = 12.0
+        elif dist_pct <= approach_pct:
+            proximity = "APPROACHING"
+            bonus = 5.0
+        else:
+            continue
+        side = "ABOVE" if current >= level else "BELOW"
+        out.append({
+            "symbol": symbol,
+            "label": label,
+            "timeframe": tf,
+            "ma": key.upper(),
+            "level": level,
+            "price": current,
+            "distance_pct": round(dist_pct, 4),
+            "approach_pct": round(approach_pct, 4),
+            "proximity": proximity,
+            "side": side,
+            "score": round(base_score + bonus - min(dist_pct * 2.0, 8.0), 3),
+            "role": "PRIORITY_PROMOTION_ONLY",
+            "automatic_buy": False,
+        })
+    out.sort(key=lambda r: (r["score"], -r["distance_pct"]), reverse=True)
+    return out
+
+
+def _ma_signal(symbol):
+    matches = _ma_matches_from_cache(symbol)
+    if not matches:
+        return {}
+    best = dict(matches[0])
+    best["matches"] = matches
+    return best
+
+
+def ma_priority_candidates(limit=None):
+    global _ma_cache
+    rows = []
+    for symbol in _universe():
+        sig = _ma_signal(symbol)
+        if sig:
+            rows.append(sig)
+    rows.sort(key=lambda r: (r.get("score", 0.0), -r.get("distance_pct", 999.0)), reverse=True)
+    _ma_cache = rows
+    return rows[:limit] if limit else rows
+
+
+def _rapid_score(symbol):
+    core = _core()
+    row = (getattr(core.q, "latest", {}) or {}).get(symbol) or {}
+    rapid = row.get("rapid_ignition") or {}
+    return max(_f(rapid.get("score")), _f(row.get("rapid_score")))
+
+
+def _lowcap_score(symbol):
+    if HARDENING is None:
+        return 0.0
+    try:
+        return _f((HARDENING._lowcap_signal(symbol) or {}).get("score"))
+    except Exception:
+        return 0.0
+
+
+def _early_explosion_score(symbol):
+    core = _core()
+    row = (getattr(core.q, "latest", {}) or {}).get(symbol) or {}
+    rapid = _rapid_score(symbol)
+    lowcap = _lowcap_score(symbol)
+    v = max(
+        _f(row.get("v1014_score")),
+        _f(row.get("ignition15_score")),
+        _f(row.get("score")),
+    )
+    velocity = max(0.0, _f(row.get("ignition_velocity_per_min")))
+    accel = max(0.0, _f(row.get("ignition_acceleration_per_min2")))
+    return max(rapid, lowcap, v) + min(12.0, velocity * 0.04) + min(8.0, accel * 0.015)
+
+
+def early_explosion_candidates(limit=None):
+    rows = []
+    for symbol in _universe():
+        score = _early_explosion_score(symbol)
+        if score >= EARLY_EXPLOSION_MIN:
+            rows.append({"symbol": symbol, "score": round(score, 3)})
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows[:limit] if limit else rows
+
+
+def _structural_map():
+    core = _core()
+    try:
+        board = list(core._board() or [])
+    except Exception:
+        board = []
+    return {str(r.get("symbol") or "").upper(): r for r in board if r.get("symbol")}
+
+
+def _metric_for_key(key, target):
+    learner = LEARNER
+    if learner is None:
+        return None
+    name = f"plus_{int(target)}_before_stop"
+    overall = learner._calibration(key)
+    test = learner._calibration(f"SPLIT::TEST::{key}")
+    om = ((overall.get("targets") or {}).get(name) or {}).get("clean_entry") or {}
+    tm = ((test.get("targets") or {}).get(name) or {}).get("clean_entry") or {}
+    return {
+        "key": key,
+        "overall": om,
+        "test": tm,
+        "overall_samples": int(om.get("samples") or 0),
+        "test_samples": int(tm.get("samples") or 0),
+        "overall_probability": _f(om.get("probability")),
+        "test_probability": _f(tm.get("probability")),
+        "overall_ci_low": _f((om.get("ci95") or [0.0])[0]),
+        "test_ci_low": _f((tm.get("ci95") or [0.0])[0]),
+    }
+
+
+def ml_probability(symbol, structural=None, legacy=None):
+    """Conservative calibrated experience probability for the current pattern."""
+    if LEARNER is None:
+        return {"symbol": str(symbol or "").upper(), "qualified": False, "reason": "LEARNER_UNAVAILABLE"}
+    core = _core()
+    symbol = str(symbol or "").upper()
+    smap = _structural_map() if structural is None else None
+    structural = (smap or {}).get(symbol, {}) if structural is None else (structural or {})
+    legacy = ((getattr(core.q, "latest", {}) or {}).get(symbol) or {}) if legacy is None else (legacy or {})
+    try:
+        features = LEARNER._features(symbol, structural, legacy)
+        signal_class = LEARNER._signal_class(structural, legacy, features)
+        if not signal_class:
+            if _ma_signal(symbol):
+                signal_class = "MA_PRIORITY"
+            elif _early_explosion_score(symbol) >= EARLY_EXPLOSION_MIN:
+                signal_class = "EARLY_EXPLOSION"
+            else:
+                return {"symbol": symbol, "qualified": False, "reason": "NO_LEARNED_SIGNAL_CLASS"}
+        cohort = LEARNER._cohort(features, signal_class)
+    except Exception as exc:
+        return {"symbol": symbol, "qualified": False, "reason": f"FEATURE_ERROR:{type(exc).__name__}"}
+
+    setup = str(features.get("setup") or "UNKNOWN")
+    keys = [f"COHORT::{cohort}", f"SETUP::{setup}", f"CLASS::{signal_class}"]
+    candidates = []
+    for key in keys:
+        metric = _metric_for_key(key, ML_OVERRIDE_TARGET_PCT)
+        if metric:
+            candidates.append(metric)
+    if not candidates:
+        return {"symbol": symbol, "qualified": False, "reason": "NO_CALIBRATION"}
+
+    candidates.sort(
+        key=lambda m: (
+            min(m["overall_probability"], m["test_probability"]),
+            min(m["overall_ci_low"], m["test_ci_low"]),
+            m["overall_samples"] + m["test_samples"],
+        ),
+        reverse=True,
+    )
+    best = candidates[0]
+    probability = min(best["overall_probability"], best["test_probability"])
+    sample_ok = best["overall_samples"] >= ML_OVERRIDE_MIN_TOTAL and best["test_samples"] >= ML_OVERRIDE_MIN_TEST
+    prob_ok = probability > ML_OVERRIDE_THRESHOLD
+    ci_ok = (
+        best["overall_ci_low"] >= ML_OVERRIDE_THRESHOLD
+        and best["test_ci_low"] >= ML_OVERRIDE_THRESHOLD
+    ) if ML_OVERRIDE_REQUIRE_CI70 else True
+    qualified = bool(sample_ok and prob_ok and ci_ok)
+    return {
+        "symbol": symbol,
+        "qualified": qualified,
+        "probability": round(probability, 4),
+        "target_pct": ML_OVERRIDE_TARGET_PCT,
+        "horizon": "24h_before_invalidation",
+        "threshold": ML_OVERRIDE_THRESHOLD,
+        "calibration_key": best["key"],
+        "overall_samples": best["overall_samples"],
+        "test_samples": best["test_samples"],
+        "overall_probability": round(best["overall_probability"], 4),
+        "test_probability": round(best["test_probability"], 4),
+        "overall_ci_low": round(best["overall_ci_low"], 4),
+        "test_ci_low": round(best["test_ci_low"], 4),
+        "signal_class": signal_class,
+        "setup": setup,
+        "reason": "QUALIFIED" if qualified else (
+            "INSUFFICIENT_SAMPLES" if not sample_ok else "PROBABILITY_BELOW_THRESHOLD" if not prob_ok else "CI_NOT_VALIDATED"
+        ),
+    }
+
+
+def ml_watch_candidates(limit=None):
+    global _ml_watch_cache
+    core = _core()
+    structural = _structural_map()
+    seed = []
+    seen = set()
+
+    def add(sym):
+        sym = str(sym or "").upper()
+        if sym.endswith("USDT") and sym not in seen:
+            seen.add(sym)
+            seed.append(sym)
+
+    for row in ma_priority_candidates(MA_PROMOTION_SLOTS * 2):
+        add(row.get("symbol"))
+    for row in early_explosion_candidates(40):
+        add(row.get("symbol"))
+    for sym in structural:
+        add(sym)
+    for sym in list(getattr(core.app, "selected_micro_symbols", []) or []):
+        add(sym)
+
+    rows = []
+    latest = getattr(core.q, "latest", {}) or {}
+    for symbol in seed[:100]:
+        d = ml_probability(symbol, structural.get(symbol) or {}, latest.get(symbol) or {})
+        if _f(d.get("probability")) >= 0.55 or d.get("qualified"):
+            rows.append(d)
+    rows.sort(key=lambda d: (_f(d.get("probability")), int(d.get("overall_samples") or 0)), reverse=True)
+    _ml_watch_cache = rows
+    return rows[:limit] if limit else rows
+
+
+def _risk_plan(structural, legacy):
+    structural = structural or {}
+    legacy = legacy or {}
+    entry = _f(legacy.get("pinpoint_trigger"))
+    if entry <= 0:
+        entry = _f(structural.get("entry"), _f(structural.get("current")))
+    stop = _f(legacy.get("pinpoint_stop"))
+    if stop <= 0 or stop >= entry:
+        stop = _f(structural.get("stop"), _f(structural.get("invalidation")))
+    if entry <= 0 or stop <= 0 or stop >= entry:
+        return {"valid": False, "entry": entry, "stop": stop, "risk_pct": 0.0}
+    risk_pct = (entry - stop) / entry * 100.0
+    return {"valid": risk_pct > 0, "entry": entry, "stop": stop, "risk_pct": risk_pct}
+
+
+def _hard_execution_safety(structural, legacy, micro, integrity):
+    core = _core()
+    structural = structural or {}
+    legacy = legacy or {}
+    micro = micro or {}
+    integrity = integrity or {}
+    blockers = []
+
+    current = _f(structural.get("current"), _current_price(structural.get("symbol") or legacy.get("symbol")))
+    if current <= 0:
+        blockers.append("LIVE_PRICE")
+    if not bool(micro.get("micro_ready")):
+        blockers.append("LIVE_MICRO_DATA")
+    if not bool(micro.get("sequence_verified")):
+        blockers.append("TRADE_SEQUENCE_VALID")
+    if not bool(micro.get("book_sequence_verified")):
+        blockers.append("BOOK_SEQUENCE_VALID")
+
+    spread = _f(micro.get("spread_bps"), 999999.0)
+    slip = _f(micro.get("slippage_bps"), 999999.0)
+    if spread > MAX_SPREAD_BPS:
+        blockers.append("SPREAD_FILTER")
+    if slip > MAX_SLIPPAGE_BPS:
+        blockers.append("SLIPPAGE_FILTER")
+
+    if bool(structural.get("anti_chase")):
+        blockers.append("CUMULATIVE_EXTENSION_GUARD")
+    max_chase = _f(structural.get("max_chase"))
+    if current > 0 and max_chase > 0 and current > max_chase:
+        blockers.append("CUMULATIVE_EXTENSION_GUARD")
+
+    hard = legacy.get("pinpoint_hard_status") or {}
+    if "MARKET_REGIME_SAFETY" in hard and not bool(hard.get("MARKET_REGIME_SAFETY")):
+        blockers.append("MARKET_REGIME_SAFETY")
+    if "market_regime_safety" in hard and not bool(hard.get("market_regime_safety")):
+        blockers.append("MARKET_REGIME_SAFETY")
+
+    ages = integrity.get("ages") if isinstance(integrity.get("ages"), dict) else {}
+    trade_age = _f(ages.get("micro_trade_ms"), 999999999.0)
+    book_age = _f(ages.get("micro_book_ms"), 999999999.0)
+    structure_age = _f(ages.get("structure_s"), 999999999.0)
+    legacy_mod = getattr(core, "legacy", None)
+    if trade_age > _f(getattr(legacy_mod, "INTEGRITY_MICRO_TRADE_MAX_AGE_MS", 15000), 15000):
+        blockers.append("STALE_DEPTH_TRADE")
+    if book_age > _f(getattr(legacy_mod, "INTEGRITY_MICRO_BOOK_MAX_AGE_MS", 5000), 5000):
+        blockers.append("STALE_DEPTH_BOOK")
+    if structure_age > _f(getattr(legacy_mod, "INTEGRITY_STRUCTURE_MAX_AGE_S", 1200), 1200):
+        blockers.append("STALE_STRUCTURE")
+
+    risk = _risk_plan(structural, legacy)
+    if not risk["valid"]:
+        blockers.append("VALID_RISK_PLAN")
+
+    blockers = list(dict.fromkeys(blockers))
+    return {"pass": not blockers, "blockers": blockers, "risk": risk, "spread_bps": spread, "slippage_bps": slip}
+
+
+def _gate_wrapper(structural_row, legacy_row=None, micro_metrics=None, integrity=None):
+    global _active_ml_overrides
+    result = dict(_original_gate(structural_row, legacy_row, micro_metrics, integrity))
+    structural_row = structural_row if isinstance(structural_row, dict) else {}
+    legacy_row = legacy_row if isinstance(legacy_row, dict) else {}
+    symbol = str(structural_row.get("symbol") or legacy_row.get("symbol") or "").upper()
+
+    if result.get("buy_now"):
+        result["authority_chain"] = AUTHORITY_CHAIN
+        if symbol:
+            _active_ml_overrides.pop(symbol, None)
+        return result
+
+    decision = ml_probability(symbol, structural_row, legacy_row) if symbol else {"qualified": False}
+    if not decision.get("qualified"):
+        if symbol:
+            _active_ml_overrides.pop(symbol, None)
+        result["authority_chain"] = AUTHORITY_CHAIN
+        return result
+
+    safety = _hard_execution_safety(structural_row, legacy_row, micro_metrics, integrity)
+    if not safety["pass"]:
+        result["authority_chain"] = AUTHORITY_CHAIN
+        result["ml_override_candidate"] = True
+        result["ml_override_probability"] = decision.get("probability")
+        result["ml_override_safety_blockers"] = safety["blockers"]
+        if symbol:
+            _active_ml_overrides.pop(symbol, None)
+        return result
+
+    result.update({
+        "buy_now": True,
+        "execution_state": "BUY NOW",
+        "blockers": [],
+        "authority_chain": ML_AUTHORITY_CHAIN,
+        "pinpoint_entry_status": "ML_OVERRIDE_TRIGGERED",
+        "pinpoint_state": "ML OVERRIDE BUY",
+        "ml_override_buy": True,
+        "ml_override_probability": decision.get("probability"),
+        "ml_override_target_pct": decision.get("target_pct"),
+        "ml_override_calibration_key": decision.get("calibration_key"),
+    })
+    if symbol:
+        _active_ml_overrides[symbol] = {
+            **decision,
+            "risk": safety["risk"],
+            "activated_ms": _now_ms(),
+        }
+    return result
+
+
+def _combined_promotions():
+    ma = ma_priority_candidates(MA_PROMOTION_SLOTS)
+    ml = ml_watch_candidates(ML_PROMOTION_SLOTS)
+    early = early_explosion_candidates(EARLY_PROMOTION_SLOTS)
+    out = []
+    seen = set()
+    for source, rows in (("ML", ml), ("MA", ma), ("EARLY", early)):
+        for row in rows:
+            sym = str(row.get("symbol") or "").upper()
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append((sym, source, row))
+    return out
+
+
+def promoted_micro_symbols():
+    core = _core()
+    base = list(_original_micro() or [])
+    pool_size = int(core.REDIS_MICRO_POOL_SIZE)
+    universe_set = set(_universe())
+    promoted = _combined_promotions()
+
+    out = []
+    seen = set()
+    def add(sym):
+        sym = str(sym or "").upper()
+        if sym in universe_set and sym not in seen and len(out) < pool_size:
+            seen.add(sym)
+            out.append(sym)
+
+    for sym in base[:min(CORE_RETAIN_SLOTS, pool_size)]:
+        add(sym)
+    for sym, _, _ in promoted:
+        add(sym)
+    for sym in base:
+        add(sym)
+    for sym in _universe():
+        add(sym)
+
+    if HARDENING is not None:
+        try:
+            HARDENING._protected_pool[:] = list(out)
+        except Exception:
+            pass
+    core._distributed_micro_sticky_pool = list(out)
+    _stats["dynamic_micro_pool"] = len(out)
+    _stats["ma_promoted"] = sum(1 for _, src, _ in promoted if src == "MA")
+    _stats["ml_promoted"] = sum(1 for _, src, _ in promoted if src == "ML")
+    _stats["early_promoted"] = sum(1 for _, src, _ in promoted if src == "EARLY")
+    return out
+
+
+def priority_symbols(universe):
+    core = _core()
+    base = list(_original_priority(universe) or [])
+    universe_set = set(universe)
+    promoted = [sym for sym, _, _ in _combined_promotions() if sym in universe_set]
+    limit = int(getattr(core, "ACTIVE_SYMBOLS_PER_CYCLE", 8))
+    promo_cap = max(1, min(limit // 2 + 1, len(promoted)))
+    out = []
+    for sym in promoted[:promo_cap] + base + promoted[promo_cap:]:
+        if sym in universe_set and sym not in out:
+            out.append(sym)
+        if len(out) >= limit:
+            break
+    _stats["priority_hydration_promoted"] = sum(sym in out for sym in promoted)
+    return out
+
+
+def _wrap_learning():
+    global _original_features, _original_cohort, _original_candidates, _original_signal_class
+    if LEARNER is None or _original_features is not None:
+        return
+    _original_features = LEARNER._features
+    _original_cohort = LEARNER._cohort
+    _original_candidates = LEARNER._candidate_rows
+    _original_signal_class = LEARNER._signal_class
+
+    def features(symbol, structural, legacy):
+        out = dict(_original_features(symbol, structural, legacy) or {})
+        ma = _ma_signal(symbol)
+        out["ma_priority"] = bool(ma)
+        out["ma_priority_label"] = str(ma.get("label") or "")
+        out["ma_priority_proximity"] = str(ma.get("proximity") or "")
+        out["ma_priority_distance_pct"] = _f(ma.get("distance_pct"), 999.0)
+        out["early_explosion_score"] = _early_explosion_score(symbol)
+        return out
+
+    def signal_class(structural, legacy, features_row):
+        state = _original_signal_class(structural, legacy, features_row)
+        if state:
+            return state
+        if features_row.get("ma_priority"):
+            return "MA_PRIORITY"
+        if _f(features_row.get("early_explosion_score")) >= EARLY_EXPLOSION_MIN:
+            return "EARLY_EXPLOSION"
+        return ""
+
+    def cohort(features_row, signal_class):
+        base = _original_cohort(features_row, signal_class)
+        ma = "MA1" if features_row.get("ma_priority") else "MA0"
+        ex = _f(features_row.get("early_explosion_score"))
+        band = "EX3" if ex >= 100 else "EX2" if ex >= 85 else "EX1" if ex >= EARLY_EXPLOSION_MIN else "EX0"
+        return f"{base}|{ma}|{band}"
+
+    def candidate_rows():
+        rows = list(_original_candidates() or [])
+        seen = {str(r[0]).upper() for r in rows if r}
+        smap = _structural_map()
+        latest = getattr(_core().q, "latest", {}) or {}
+        extra = []
+        for sym, _, _ in _combined_promotions():
+            if sym not in seen:
+                seen.add(sym)
+                extra.append((sym, smap.get(sym) or {}, latest.get(sym) or {}))
+            if len(extra) >= 40:
+                break
+        return rows + extra
+
+    LEARNER._features = features
+    LEARNER._signal_class = signal_class
+    LEARNER._cohort = cohort
+    LEARNER._candidate_rows = candidate_rows
+
+
+def _ml_synthetic_row(symbol):
+    core = _core()
+    symbol = str(symbol or "").upper()
+    legacy = (getattr(core.q, "latest", {}) or {}).get(symbol) or {}
+    decision = ml_probability(symbol, {}, legacy)
+    if not decision.get("qualified"):
+        return None
+    cache = core._cache.get(symbol) or {}
+    s1 = (cache.get("1h") or {}).get("snap") or {}
+    s4 = (cache.get("4h") or {}).get("snap") or {}
+    sd = (cache.get("1d") or {}).get("snap") or {}
+    current = _current_price(symbol)
+    if current <= 0 or not (s1 and s4 and sd):
+        return None
+
+    supports = []
+    for snap in (s1, s4, sd):
+        for key in ("sma50", "sma200", "ema50", "ema200", "sup20", "sup60"):
+            level = _f(snap.get(key))
+            if 0 < level < current:
+                supports.append(level)
+    if not supports:
+        return None
+    support = max(supports)
+    atr = max(_f(s4.get("atr")), _f(s1.get("atr")), current * 0.005)
+    stop = support - 0.35 * atr
+    if stop <= 0 or stop >= current:
+        return None
+    risk_pct = (current - stop) / current * 100.0
+    ma = _ma_signal(symbol)
+    return {
+        "symbol": symbol,
+        "state": "WATCH",
+        "emoji": "🟡",
+        "setup": "ML_EXPERIENCE_OVERRIDE_CANDIDATE",
+        "setup_strength": round(100.0 * _f(decision.get("probability")), 1),
+        "reason": (
+            f"Validated learned pattern P(+{int(ML_OVERRIDE_TARGET_PCT)}%/24h before invalidation)="
+            f"{100*_f(decision.get('probability')):.1f}%; waiting only for hard execution safety"
+        ),
+        "timeframe": "ML/MTF",
+        "current": current,
+        "entry_low": current,
+        "entry_high": current,
+        "entry": current,
+        "max_chase": current * 1.01,
+        "invalidation": stop,
+        "stop": stop,
+        "risk_pct": round(risk_pct, 3),
+        "tp1": current * 1.03,
+        "tp1_gain_pct": 3.0,
+        "tp2": current * 1.05,
+        "tp2_gain_pct": 5.0,
+        "tp3": current * (1.0 + ML_OVERRIDE_TARGET_PCT / 100.0),
+        "tp3_gain_pct": ML_OVERRIDE_TARGET_PCT,
+        "extended": current * 1.20,
+        "extended_gain_pct": 20.0,
+        "target_sources": ["ML_CALIBRATION", "ML_CALIBRATION", "ML_OVERRIDE_TARGET", "RUNNER"],
+        "anti_chase": False,
+        "trend_regime": "ML_OVERRIDE_CANDIDATE",
+        "counter_trend": False,
+        "buy_setup_count": 0,
+        "armed_setup_count": 0,
+        "active_setups": [],
+        "micro_required_by_best": True,
+        "micro_fresh": False,
+        "micro_positive": False,
+        "quote_volume_24h": _f((core.app.symbol_meta.get(symbol, {}) or {}).get("quote_volume_24h")),
+        "generated_ms": _now_ms(),
+        "ml_probability": decision,
+        "ma_priority": ma,
+    }
+
+
+def evaluate_symbol(symbol):
+    row = _original_evaluate(symbol)
+    if row is not None:
+        return row
+    return _ml_synthetic_row(symbol)
+
+
+def _augment_response(response):
+    core = _core()
+    try:
+        data = json.loads(response.body.decode("utf-8"))
+    except Exception:
+        return response
+    data["upgrade_revision"] = REVISION
+    data["execution_authority"] = "V12.3.4_CONVENTIONAL_PLUS_V12.4_ML70"
+    data["authority_chain"] = AUTHORITY_CHAIN
+    data["ma_priority_rule"] = {
+        "automatic_buy": False,
+        "levels": ["1H_SMA200", "4H_SMA200", "DAILY_SMA200", "4H_SMA50", "DAILY_SMA50"],
+        "touch_pct": MA_TOUCH_PCT,
+        "near_pct": MA_NEAR_PCT,
+        "approach_atr": MA_APPROACH_ATR,
+        "candidates": ma_priority_candidates(20),
+    }
+    data["ml_override"] = {
+        "threshold": ML_OVERRIDE_THRESHOLD,
+        "target_pct": ML_OVERRIDE_TARGET_PCT,
+        "hard_safety_required": True,
+        "active": list(_active_ml_overrides.values())[:10],
+        "watch": ml_watch_candidates(15),
+    }
+    data["dynamic_promotion"] = {
+        "pool_size": _stats.get("dynamic_micro_pool", 0),
+        "ma_promoted": _stats.get("ma_promoted", 0),
+        "ml_promoted": _stats.get("ml_promoted", 0),
+        "early_promoted": _stats.get("early_promoted", 0),
+        "priority_hydration_promoted": _stats.get("priority_hydration_promoted", 0),
+    }
+    data["structure_rescue_v12_4"] = {
+        "attempted": _stats.get("structure_rescue_attempted", 0),
+        "imported": _stats.get("structure_rescue_imported", 0),
+        "stale": _stats.get("structure_rescue_stale", 0),
+        "invalid": _stats.get("structure_rescue_invalid", 0),
+    }
+    data["missed_mover_training"] = {
+        "labelled": _stats.get("missed_labelled", 0),
+        "history_symbols": len(_price_feature_history),
+        "redis_key": MISSED_KEY,
+    }
+    data["upgrade_last_error"] = _last_error or None
+    return core.app.web.json_response(data, status=response.status)
+
+
+async def _scan_wrapper(request):
+    return _augment_response(await _original_scan(request))
+
+
+async def _health_wrapper(request):
+    return _augment_response(await _original_health(request))
+
+
+def _snapshot_feature(symbol, micro_pool):
+    core = _core()
+    price = _current_price(symbol)
+    if price <= 0:
+        return None
+    ma = _ma_signal(symbol)
+    in_micro = symbol in micro_pool
+    mm = {}
+    if in_micro:
+        try:
+            mm = core.app.micro_metrics(symbol) or {}
+        except Exception:
+            mm = {}
+    c = core._cache.get(symbol) or {}
+    structure_ready = all(bool((c.get(tf) or {}).get("snap")) for tf in ("1h", "4h", "1d"))
+    return {
+        "ts": _now_ms(),
+        "price": price,
+        "rapid": round(_rapid_score(symbol), 3),
+        "early": round(_early_explosion_score(symbol), 3),
+        "ma": str(ma.get("label") or ""),
+        "ma_state": str(ma.get("proximity") or ""),
+        "in_micro": bool(in_micro),
+        "micro_ready": bool(mm.get("micro_ready")),
+        "structure_ready": bool(structure_ready),
+    }
+
+
+def _nearest_snapshot(history, age_minutes):
+    if not history:
+        return None
+    target = _now_ms() - int(age_minutes * 60 * 1000)
+    return min(history, key=lambda x: abs(int(x.get("ts") or 0) - target))
+
+
+def _miss_root(history):
+    if not history:
+        return "NOT_DISCOVERED"
+    pre = history[-2] if len(history) >= 2 else history[-1]
+    discovered = bool(pre.get("ma")) or _f(pre.get("early")) >= EARLY_EXPLOSION_MIN or _f(pre.get("rapid")) >= 85.0
+    if not discovered:
+        return "MODEL_RANKED_TOO_LOW"
+    if not pre.get("in_micro"):
+        return "DISCOVERED_NOT_PROMOTED"
+    if not pre.get("micro_ready"):
+        return "MICRO_DATA_MISSING"
+    if not pre.get("structure_ready"):
+        return "STRUCTURE_STALE"
+    return "PROMOTED_TOO_LATE"
+
+
+async def _sample_and_label_missed(client):
+    global _last_sample_mono
+    now_mono = time.monotonic()
+    if now_mono - _last_sample_mono < HISTORY_SAMPLE_S:
+        return
+    _last_sample_mono = now_mono
+    try:
+        micro_pool = set(promoted_micro_symbols())
+    except Exception:
+        micro_pool = set(getattr(_core(), "_distributed_micro_sticky_pool", []) or [])
+
+    for symbol in _universe():
+        snap = _snapshot_feature(symbol, micro_pool)
+        if not snap:
+            continue
+        history = _price_feature_history[symbol]
+        history.append(snap)
+        if len(history) < 6:
+            continue
+        returns = {}
+        for mins in (5, 10, 15, 30, 60):
+            old = _nearest_snapshot(history, mins)
+            old_p = _f((old or {}).get("price"))
+            if old_p > 0:
+                returns[str(mins)] = (snap["price"] / old_p - 1.0) * 100.0
+        best_move = max(returns.values()) if returns else 0.0
+        if best_move < MISSED_MOVE_MIN_PCT:
+            continue
+        if now_mono - _last_missed_label_mono[symbol] < MISSED_COOLDOWN_S:
+            continue
+        _last_missed_label_mono[symbol] = now_mono
+        event = {
+            "symbol": symbol,
+            "labelled_ms": _now_ms(),
+            "move_pct": round(best_move, 4),
+            "returns_pct": {k: round(v, 4) for k, v in returns.items()},
+            "targets_hit": [t for t in (5, 10, 15, 20, 30, 40) if best_move >= t],
+            "root_cause": _miss_root(history),
+            "snapshots": {
+                str(mins): _nearest_snapshot(history, mins)
+                for mins in (60, 30, 15, 10, 5)
+            },
+            "revision": REVISION,
+        }
+        await client.lpush(MISSED_KEY, json.dumps(event, separators=(",", ":"), sort_keys=True))
+        await client.ltrim(MISSED_KEY, 0, MISSED_MAX - 1)
+        _stats["missed_labelled"] += 1
+        print(
+            f"Ψ-V12.4 MISSED-MOVER-TRAINING symbol={symbol} move={best_move:.1f}% "
+            f"root={event['root_cause']} targets={event['targets_hit']}",
+            flush=True,
+        )
+
+
+async def _rescue_worker_structure(client):
+    core = _core()
+    symbols = []
+    seen = set()
+    for sym, _, _ in _combined_promotions():
+        if sym not in seen:
+            seen.add(sym); symbols.append(sym)
+        if len(symbols) >= 30:
+            break
+    for sym in list(getattr(core, "_distributed_micro_sticky_pool", []) or []):
+        sym = str(sym).upper()
+        if sym not in seen:
+            seen.add(sym); symbols.append(sym)
+        if len(symbols) >= 44:
+            break
+    if not symbols:
+        return
+
+    keys = []
+    mapping = []
+    for sym in symbols:
+        for tf in ("1h", "4h", "1d"):
+            keys.append(f"{STRUCTURE_PREFIX}:{sym}:{tf}")
+            mapping.append((sym, tf))
+    raws = await client.mget(keys)
+    now_ms = _now_ms()
+    for (sym, tf), raw in zip(mapping, raws):
+        _stats["structure_rescue_attempted"] += 1
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            _stats["structure_rescue_invalid"] += 1
+            continue
+        fetched = int(_f(payload.get("fetched_ms")))
+        if fetched <= 0 or (now_ms - fetched) / 1000.0 > RESCUE_MAX_AGE_S:
+            _stats["structure_rescue_stale"] += 1
+            continue
+        key = (sym, tf)
+        if fetched <= int(_last_worker_fetch_ms.get(key) or 0):
+            continue
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or len(rows) < 16:
+            _stats["structure_rescue_invalid"] += 1
+            continue
+        requested = int(payload.get("requested_limit") or len(rows))
+        if core._commit_authoritative_rows(sym, tf, rows, requested, source="WORKER_RESCUE_V12_4"):
+            _last_worker_fetch_ms[key] = fetched
+            _stats["structure_rescue_imported"] += 1
+
+
+async def bootstrap():
+    return
+
+
+async def supervisor_loop():
+    global _last_diag_mono, _last_error
+    core = _core()
+    if not core.REDIS_URL:
+        _stats["supervisor_disabled"] = 1
+        return
+    while True:
+        client = None
+        try:
+            client = redis_async.from_url(core.REDIS_URL, encoding="utf-8", decode_responses=True)
+            await client.ping()
+            while True:
+                await _rescue_worker_structure(client)
+                await _sample_and_label_missed(client)
+                now_mono = time.monotonic()
+                if now_mono - _last_diag_mono >= DIAG_SECONDS:
+                    _last_diag_mono = now_mono
+                    ma = ma_priority_candidates(10)
+                    ml = ml_watch_candidates(10)
+                    qualified = [r for r in ml if r.get("qualified")]
+                    print(
+                        "Ψ-V12.4 UPGRADE "
+                        f"maPriority={len(_ma_cache)} topMA={','.join(r['symbol']+':'+r['label']+'/'+r['proximity'] for r in ma[:5]) or '-'} "
+                        f"mlWatch={len(_ml_watch_cache)} ml70={len(qualified)} "
+                        f"micro={_stats.get('dynamic_micro_pool',0)} "
+                        f"rescue={_stats.get('structure_rescue_imported',0)}/{_stats.get('structure_rescue_attempted',0)} "
+                        f"missedLabelled={_stats.get('missed_labelled',0)} authority={AUTHORITY_CHAIN}",
+                        flush=True,
+                    )
+                await asyncio.sleep(RESCUE_POLL_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _last_error = f"{type(exc).__name__}:{exc}"
+            print(f"Ψ-V12.4 UPGRADE_ERROR {_last_error}", flush=True)
+            await asyncio.sleep(max(3.0, RESCUE_POLL_S))
+        finally:
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+
+def install(core, hardening, learner):
+    global CORE, HARDENING, LEARNER
+    global _original_gate, _original_micro, _original_priority, _original_scan, _original_health, _original_evaluate
+    if CORE is not None:
+        return
+    CORE = core
+    HARDENING = hardening
+    LEARNER = learner
+
+    _original_gate = core._strict_execution_gate
+    _original_micro = core._distributed_micro_symbols
+    _original_priority = core._priority_symbols
+    _original_scan = core.v12_scan
+    _original_health = core.v12_health
+    _original_evaluate = core.evaluate_symbol
+
+    _wrap_learning()
+    core._strict_execution_gate = _gate_wrapper
+    core._distributed_micro_symbols = promoted_micro_symbols
+    core._priority_symbols = priority_symbols
+    core.evaluate_symbol = evaluate_symbol
+    core.v12_scan = _scan_wrapper
+    core.v12_health = _health_wrapper
+    core.app.scan_endpoint = _scan_wrapper
+    core.app.health = _health_wrapper
+
+    print(
+        f"Ψ-V12.4 UPGRADE installed — {REVISION}; MA proximity=promotion-only; "
+        f"ML override>{100*ML_OVERRIDE_THRESHOLD:.0f}% requires validated TEST calibration + hard execution safety",
+        flush=True,
+    )
