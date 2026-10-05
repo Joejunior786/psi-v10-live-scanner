@@ -11,21 +11,24 @@ import redis.asyncio as redis_async
 # V12.3.4; this layer adds discovery/promotion, worker-cache rescue and a
 # separately-labelled calibrated ML override that can bypass technical BUY
 # confirmation but never bypass hard execution/data-safety checks.
-REVISION = "12.4.2-scan-completeness+ma-priority+dynamic-micro+structure-rescue+missed-mover-training+ml70-safety"
+REVISION = "12.4.3-full-ma-ema-weekly-hydration+cap-truth+scan-completeness+ml70-safety"
 AUTHORITY_CHAIN = "V12.3.4_CONVENTIONAL_OR_V12.4_ML70_HARD_SAFETY->BUY_NOW"
 ML_AUTHORITY_CHAIN = "V12.4_ML70->HARD_EXECUTION_SAFETY->BUY_NOW"
 ROLE = "PROMOTION_AND_CALIBRATED_OVERRIDE"
 
-SCAN_REPORT_VERSION = "1.0"
+SCAN_REPORT_VERSION = "1.1"
 SCAN_REQUIRED_SECTIONS = (
     "EXECUTION_AUTHORITY",
     "MA_PRIORITY_50_200",
+    "WEEKLY_MA_EMA",
+    "HYDRATION_200_COVERAGE",
     "ML_OVERRIDE",
     "PINPOINT",
     "RISKMAP_CONDITIONAL",
     "PRE_IGNITION",
     "PULLBACK_EXHAUSTION",
     "LOWCAP_ROTATION",
+    "LOWCAP_CAP_SOURCE",
     "RAPID_ROTATION",
     "MONSTER",
     "STRUCTURAL_SETUPS",
@@ -34,12 +37,15 @@ SCAN_REQUIRED_SECTIONS = (
 )
 SCAN_NEVER_OMIT_WHEN_NONEMPTY = (
     "MA_PRIORITY_50_200",
+    "WEEKLY_MA_EMA",
+    "HYDRATION_200_COVERAGE",
     "ML_OVERRIDE",
     "PINPOINT",
     "RISKMAP_CONDITIONAL",
     "PRE_IGNITION",
     "PULLBACK_EXHAUSTION",
     "LOWCAP_ROTATION",
+    "LOWCAP_CAP_SOURCE",
     "RAPID_ROTATION",
     "STRUCTURAL_SETUPS",
 )
@@ -52,7 +58,25 @@ MA_TOUCH_PCT = max(0.05, float(os.getenv("PSI_MA_PROMOTE_TOUCH_PCT", "0.50")))
 MA_NEAR_PCT = max(MA_TOUCH_PCT, float(os.getenv("PSI_MA_PROMOTE_NEAR_PCT", "1.00")))
 MA_APPROACH_ATR = max(0.25, float(os.getenv("PSI_MA_PROMOTE_APPROACH_ATR", "0.90")))
 MA_APPROACH_MAX_PCT = max(MA_NEAR_PCT, float(os.getenv("PSI_MA_PROMOTE_MAX_PCT", "3.00")))
-MA_PROMOTION_SLOTS = max(4, min(int(os.getenv("PSI_MA_PROMOTION_SLOTS", "12")), 24))
+MA_PROMOTION_SLOTS = max(4, min(int(os.getenv("PSI_MA_PROMOTION_SLOTS", "16")), 24))
+MA_PRIORITY_LEVELS = (
+    ("WEEKLY_SMA200", "1w", "sma200", 122.0),
+    ("WEEKLY_EMA200", "1w", "ema200", 121.0),
+    ("DAILY_SMA200", "1d", "sma200", 120.0),
+    ("DAILY_EMA200", "1d", "ema200", 119.0),
+    ("4H_SMA200", "4h", "sma200", 114.0),
+    ("4H_EMA200", "4h", "ema200", 113.0),
+    ("1H_SMA200", "1h", "sma200", 108.0),
+    ("1H_EMA200", "1h", "ema200", 107.0),
+    ("WEEKLY_SMA50", "1w", "sma50", 104.0),
+    ("WEEKLY_EMA50", "1w", "ema50", 103.0),
+    ("DAILY_SMA50", "1d", "sma50", 100.0),
+    ("DAILY_EMA50", "1d", "ema50", 99.0),
+    ("4H_SMA50", "4h", "sma50", 94.0),
+    ("4H_EMA50", "4h", "ema50", 93.0),
+    ("1H_SMA50", "1h", "sma50", 88.0),
+    ("1H_EMA50", "1h", "ema50", 87.0),
+)
 ML_PROMOTION_SLOTS = max(2, min(int(os.getenv("PSI_ML_PROMOTION_SLOTS", "8")), 20))
 EARLY_PROMOTION_SLOTS = max(4, min(int(os.getenv("PSI_EARLY_EXPLOSION_PROMOTION_SLOTS", "12")), 24))
 CORE_RETAIN_SLOTS = max(4, min(int(os.getenv("PSI_DYNAMIC_MICRO_CORE_RETAIN", "10")), 24))
@@ -65,6 +89,8 @@ ML_OVERRIDE_MIN_TEST = max(10, int(os.getenv("PSI_ML_OVERRIDE_MIN_TEST", "75")))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_ML_OVERRIDE_MAX_SPREAD_BPS", "20")))
 MAX_SLIPPAGE_BPS = max(1.0, float(os.getenv("PSI_ML_OVERRIDE_MAX_SLIPPAGE_BPS", "35")))
 RESCUE_MAX_AGE_S = max(30.0, float(os.getenv("PSI_STRUCTURE_WORKER_RESCUE_MAX_AGE_S", "600")))
+WEEKLY_RESCUE_MAX_AGE_S = max(RESCUE_MAX_AGE_S, float(os.getenv("PSI_STRUCTURE_WORKER_WEEKLY_RESCUE_MAX_AGE_S", "1800")))
+RESCUE_BATCH_SYMBOLS = max(44, min(int(os.getenv("PSI_STRUCTURE_RESCUE_BATCH_SYMBOLS", "72")), 120))
 RESCUE_POLL_S = max(3.0, float(os.getenv("PSI_STRUCTURE_WORKER_RESCUE_POLL_S", "10")))
 DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V12_4_DIAG_SECONDS", "30")))
 HISTORY_SAMPLE_S = max(30.0, float(os.getenv("PSI_MISSED_HISTORY_SAMPLE_S", "60")))
@@ -87,6 +113,7 @@ _original_signal_class = None
 _original_evaluate = None
 
 _last_worker_fetch_ms = {}
+_rescue_cursor = 0
 _price_feature_history = defaultdict(lambda: deque(maxlen=70))
 _last_missed_label_mono = defaultdict(float)
 _last_sample_mono = 0.0
@@ -135,7 +162,7 @@ def _current_price(symbol):
             return p
     except Exception:
         pass
-    for tf in ("1h", "4h", "1d"):
+    for tf in ("1h", "4h", "1d", "1w"):
         snap = ((core._cache.get(symbol) or {}).get(tf) or {}).get("snap") or {}
         p = _f(snap.get("current"), _f(snap.get("close")))
         if p > 0:
@@ -149,10 +176,10 @@ def _current_price(symbol):
 
 
 def _ma_matches_from_cache(symbol, cache=None):
-    """Return user-requested SIMPLE moving-average proximity matches.
+    """Return SMA/EMA 50/200 proximity across 1H, 4H, Daily and Weekly.
 
-    MA proximity is discovery/promotion only. It never creates a BUY by itself.
-    EMA remains available to the conventional V12 confirmation path.
+    Proximity is discovery/promotion only. It never creates a BUY by itself;
+    conventional V12 confirmation and Pinpoint remain authoritative.
     """
     core = _core()
     symbol = str(symbol or "").upper()
@@ -161,15 +188,8 @@ def _ma_matches_from_cache(symbol, cache=None):
     if current <= 0:
         return []
 
-    levels = (
-        ("DAILY_SMA200", "1d", "sma200", 100.0),
-        ("4H_SMA200", "4h", "sma200", 92.0),
-        ("1H_SMA200", "1h", "sma200", 84.0),
-        ("DAILY_SMA50", "1d", "sma50", 76.0),
-        ("4H_SMA50", "4h", "sma50", 70.0),
-    )
     out = []
-    for label, tf, key, base_score in levels:
+    for label, tf, key, base_score in MA_PRIORITY_LEVELS:
         snap = (cache.get(tf) or {}).get("snap") or {}
         level = _f(snap.get(key))
         atr = _f(snap.get("atr"))
@@ -195,6 +215,8 @@ def _ma_matches_from_cache(symbol, cache=None):
             "label": label,
             "timeframe": tf,
             "ma": key.upper(),
+            "family": "EMA" if key.startswith("ema") else "SMA",
+            "period": 200 if key.endswith("200") else 50,
             "level": level,
             "price": current,
             "distance_pct": round(dist_pct, 4),
@@ -230,6 +252,61 @@ def ma_priority_candidates(limit=None):
     return rows[:limit] if limit else rows
 
 
+def _hydration_summary():
+    core = _core()
+    universe = _universe()
+    deep_min = max(201, int(getattr(core, "DEEP_MIN_ROWS", 202)))
+    core_ready = 0
+    deep_200_ready = 0
+    weekly_ready = 0
+    weekly_deep_ready = 0
+    for symbol in universe:
+        cache = core._cache.get(symbol) or {}
+        core_snaps = [(cache.get(tf) or {}).get("snap") or {} for tf in ("1h", "4h", "1d")]
+        if all(core_snaps):
+            core_ready += 1
+        deep_ok = True
+        for tf in ("1h", "4h", "1d"):
+            node = cache.get(tf) or {}
+            rows = node.get("rows") or []
+            if len(rows) < deep_min and not bool(node.get("history_capped")):
+                deep_ok = False
+                break
+        if deep_ok:
+            deep_200_ready += 1
+        weekly = cache.get("1w") or {}
+        if weekly.get("snap"):
+            weekly_ready += 1
+        weekly_rows = weekly.get("rows") or []
+        if len(weekly_rows) >= deep_min or bool(weekly.get("history_capped")):
+            weekly_deep_ready += 1
+    return {
+        "universe": len(universe),
+        "core_mtf_ready": core_ready,
+        "deep_200_ready": deep_200_ready,
+        "weekly_ready": weekly_ready,
+        "weekly_deep_ready": weekly_deep_ready,
+        "deep_min_rows": deep_min,
+    }
+
+
+def _lowcap_truth_summary():
+    if HARDENING is None or not hasattr(HARDENING, "_lowcap_summary"):
+        return {"available": False, "verified_market_cap": 0, "quote_volume_proxy": 0, "top": []}
+    try:
+        summary = HARDENING._lowcap_summary(20) or {}
+    except Exception:
+        return {"available": False, "verified_market_cap": 0, "quote_volume_proxy": 0, "top": []}
+    rows = list(summary.get("top") or [])
+    return {
+        "available": True,
+        "verified_market_cap": sum(1 for r in rows if r.get("cap_source") == "MARKET_CAP"),
+        "quote_volume_proxy": sum(1 for r in rows if r.get("cap_source") == "QUOTE_VOLUME_PROXY"),
+        "top": rows,
+        "rule": "Never describe QUOTE_VOLUME_PROXY as verified market cap.",
+    }
+
+
 def scan_report_contract():
     """Machine-readable contract for every user-facing Scan result.
 
@@ -241,9 +318,20 @@ def scan_report_contract():
     qualified_ml = [r for r in ml_rows if r.get("qualified")]
     by_level = defaultdict(int)
     by_proximity = defaultdict(int)
+    by_family = defaultdict(int)
+    by_timeframe = defaultdict(int)
+    all_matches = []
     for row in _ma_cache:
-        by_level[str(row.get("label") or "UNKNOWN")] += 1
-        by_proximity[str(row.get("proximity") or "UNKNOWN")] += 1
+        matches = list(row.get("matches") or [row])
+        all_matches.extend(matches)
+        for match in matches:
+            by_level[str(match.get("label") or "UNKNOWN")] += 1
+            by_proximity[str(match.get("proximity") or "UNKNOWN")] += 1
+            by_family[str(match.get("family") or "UNKNOWN")] += 1
+            by_timeframe[str(match.get("timeframe") or "UNKNOWN")] += 1
+    all_matches.sort(key=lambda r: (r.get("score", 0.0), -r.get("distance_pct", 999.0)), reverse=True)
+    hydration = _hydration_summary()
+    lowcap_truth = _lowcap_truth_summary()
     return {
         "version": SCAN_REPORT_VERSION,
         "required_sections": list(SCAN_REQUIRED_SECTIONS),
@@ -251,12 +339,15 @@ def scan_report_contract():
         "section_sources": {
             "EXECUTION_AUTHORITY": ["Ψ-V12 SIGNAL BOARD", "Ψ-PINPOINT BOARD"],
             "MA_PRIORITY_50_200": ["Ψ-V12.4 UPGRADE", "ma_priority_rule"],
+            "WEEKLY_MA_EMA": ["Ψ-V12.4 UPGRADE", "ma_priority_rule", "Ψ-V12 SIGNAL BOARD"],
+            "HYDRATION_200_COVERAGE": ["Ψ-V12.4 UPGRADE", "Ψ-V12 REFRESH", "structure_rescue_v12_4"],
             "ML_OVERRIDE": ["Ψ-V12.4 UPGRADE", "ml_override"],
             "PINPOINT": ["Ψ-PINPOINT BOARD"],
             "RISKMAP_CONDITIONAL": ["Ψ-V10.19.9 RISKMAP"],
             "PRE_IGNITION": ["PRE", "EARLY STATES"],
             "PULLBACK_EXHAUSTION": ["PULLBACK BOARD", "PX"],
             "LOWCAP_ROTATION": ["LOWCAP PROMOTION"],
+            "LOWCAP_CAP_SOURCE": ["LOWCAP PROMOTION", "low_cap_early_explosion"],
             "RAPID_ROTATION": ["RAPID PROMOTION", "RAPID promoted="],
             "MONSTER": ["MONSTER-CANDIDATES", "MR"],
             "STRUCTURAL_SETUPS": ["structural=BUY", "EX"],
@@ -264,12 +355,24 @@ def scan_report_contract():
             "MISSED_MOVER_LEARNING": ["MISSED-MOVER-TRAINING", "MISSED-EXPERIENCE"],
         },
         "ma_priority_summary": {
-            "count": len(_ma_cache),
+            "symbol_count": len(_ma_cache),
+            "match_count": len(all_matches),
             "by_level": dict(by_level),
             "by_proximity": dict(by_proximity),
+            "by_family": dict(by_family),
+            "by_timeframe": dict(by_timeframe),
             "top": ma_rows,
+            "top_matches": all_matches[:40],
             "automatic_buy": False,
         },
+        "weekly_ma_ema_summary": {
+            "ready": hydration.get("weekly_ready", 0),
+            "deep_ready": hydration.get("weekly_deep_ready", 0),
+            "universe": hydration.get("universe", 0),
+            "top_matches": [r for r in all_matches if r.get("timeframe") == "1w"][:20],
+        },
+        "hydration_200_coverage": hydration,
+        "lowcap_cap_truth": lowcap_truth,
         "ml_summary": {
             "watch_count": len(_ml_watch_cache),
             "qualified_70_count": len(qualified_ml),
@@ -279,7 +382,12 @@ def scan_report_contract():
             "dynamic_micro_pool": _stats.get("dynamic_micro_pool", 0),
             "structure_rescue_imported": _stats.get("structure_rescue_imported", 0),
             "structure_rescue_attempted": _stats.get("structure_rescue_attempted", 0),
+            "structure_rescue_imported_1h": _stats.get("structure_rescue_imported_1h", 0),
+            "structure_rescue_imported_4h": _stats.get("structure_rescue_imported_4h", 0),
+            "structure_rescue_imported_1d": _stats.get("structure_rescue_imported_1d", 0),
+            "structure_rescue_imported_1w": _stats.get("structure_rescue_imported_1w", 0),
             "missed_labelled": _stats.get("missed_labelled", 0),
+            "hydration": hydration,
         },
         "reporting_rule": "Every Scan must show every required section or explicitly mark it NONE/UNAVAILABLE; MA proximity is never silently omitted.",
     }
@@ -865,7 +973,7 @@ def _augment_response(response):
     data["authority_chain"] = AUTHORITY_CHAIN
     data["ma_priority_rule"] = {
         "automatic_buy": False,
-        "levels": ["1H_SMA200", "4H_SMA200", "DAILY_SMA200", "4H_SMA50", "DAILY_SMA50"],
+        "levels": [row[0] for row in MA_PRIORITY_LEVELS],
         "touch_pct": MA_TOUCH_PCT,
         "near_pct": MA_NEAR_PCT,
         "approach_atr": MA_APPROACH_ATR,
@@ -888,8 +996,15 @@ def _augment_response(response):
     data["structure_rescue_v12_4"] = {
         "attempted": _stats.get("structure_rescue_attempted", 0),
         "imported": _stats.get("structure_rescue_imported", 0),
+        "imported_by_tf": {
+            "1h": _stats.get("structure_rescue_imported_1h", 0),
+            "4h": _stats.get("structure_rescue_imported_4h", 0),
+            "1d": _stats.get("structure_rescue_imported_1d", 0),
+            "1w": _stats.get("structure_rescue_imported_1w", 0),
+        },
         "stale": _stats.get("structure_rescue_stale", 0),
         "invalid": _stats.get("structure_rescue_invalid", 0),
+        "hydration": _hydration_summary(),
     }
     data["missed_mover_training"] = {
         "labelled": _stats.get("missed_labelled", 0),
@@ -914,7 +1029,7 @@ async def _scan_wrapper(request):
         print(
             "Ψ-V12.4 SCAN-COMPLETENESS "
             f"v={SCAN_REPORT_VERSION} required={len(SCAN_REQUIRED_SECTIONS)} "
-            f"maPriority={ma_summary.get('count',0)} "
+            f"maPriority={ma_summary.get('symbol_count',0)} maMatches={ma_summary.get('match_count',0)} "
             f"topMA={','.join(str(r.get('symbol'))+':'+str(r.get('label'))+'/'+str(r.get('proximity')) for r in top_ma) or '-'} "
             f"ml70={(contract.get('ml_summary') or {}).get('qualified_70_count',0)} "
             f"micro={(contract.get('runtime_summary') or {}).get('dynamic_micro_pool',0)} "
@@ -945,6 +1060,7 @@ def _snapshot_feature(symbol, micro_pool):
             mm = {}
     c = core._cache.get(symbol) or {}
     structure_ready = all(bool((c.get(tf) or {}).get("snap")) for tf in ("1h", "4h", "1d"))
+    weekly_ready = bool((c.get("1w") or {}).get("snap"))
     return {
         "ts": _now_ms(),
         "price": price,
@@ -955,6 +1071,7 @@ def _snapshot_feature(symbol, micro_pool):
         "in_micro": bool(in_micro),
         "micro_ready": bool(mm.get("micro_ready")),
         "structure_ready": bool(structure_ready),
+        "weekly_ready": bool(weekly_ready),
     }
 
 
@@ -1036,6 +1153,7 @@ async def _sample_and_label_missed(client):
 
 
 async def _rescue_worker_structure(client):
+    global _rescue_cursor
     core = _core()
     symbols = []
     seen = set()
@@ -1050,13 +1168,24 @@ async def _rescue_worker_structure(client):
             seen.add(sym); symbols.append(sym)
         if len(symbols) >= 44:
             break
+
+    universe = sorted(_universe())
+    if universe and len(symbols) < RESCUE_BATCH_SYMBOLS:
+        checked = 0
+        while checked < len(universe) and len(symbols) < RESCUE_BATCH_SYMBOLS:
+            sym = universe[_rescue_cursor % len(universe)]
+            _rescue_cursor = (_rescue_cursor + 1) % len(universe)
+            checked += 1
+            if sym not in seen:
+                seen.add(sym); symbols.append(sym)
+                _stats["structure_rescue_background_symbols"] += 1
     if not symbols:
         return
 
     keys = []
     mapping = []
     for sym in symbols:
-        for tf in ("1h", "4h", "1d"):
+        for tf in ("1h", "4h", "1d", "1w"):
             keys.append(f"{STRUCTURE_PREFIX}:{sym}:{tf}")
             mapping.append((sym, tf))
     raws = await client.mget(keys)
@@ -1071,7 +1200,8 @@ async def _rescue_worker_structure(client):
             _stats["structure_rescue_invalid"] += 1
             continue
         fetched = int(_f(payload.get("fetched_ms")))
-        if fetched <= 0 or (now_ms - fetched) / 1000.0 > RESCUE_MAX_AGE_S:
+        max_age_s = WEEKLY_RESCUE_MAX_AGE_S if tf == "1w" else RESCUE_MAX_AGE_S
+        if fetched <= 0 or (now_ms - fetched) / 1000.0 > max_age_s:
             _stats["structure_rescue_stale"] += 1
             continue
         key = (sym, tf)
@@ -1085,6 +1215,7 @@ async def _rescue_worker_structure(client):
         if core._commit_authoritative_rows(sym, tf, rows, requested, source="WORKER_RESCUE_V12_4"):
             _last_worker_fetch_ms[key] = fetched
             _stats["structure_rescue_imported"] += 1
+            _stats[f"structure_rescue_imported_{tf}"] += 1
 
 
 def _legacy_modules():
@@ -1184,12 +1315,20 @@ async def supervisor_loop():
                     ma = ma_priority_candidates(10)
                     ml = ml_watch_candidates(10)
                     qualified = [r for r in ml if r.get("qualified")]
-                    ma200 = sum(1 for r in _ma_cache if "SMA200" in str(r.get("label") or ""))
-                    ma50 = sum(1 for r in _ma_cache if "SMA50" in str(r.get("label") or ""))
+                    all_ma = [m for r in _ma_cache for m in list(r.get("matches") or [r])]
+                    sma200 = sum(1 for r in all_ma if r.get("ma") == "SMA200")
+                    sma50 = sum(1 for r in all_ma if r.get("ma") == "SMA50")
+                    ema200 = sum(1 for r in all_ma if r.get("ma") == "EMA200")
+                    ema50 = sum(1 for r in all_ma if r.get("ma") == "EMA50")
+                    weekly_ma = sum(1 for r in all_ma if r.get("timeframe") == "1w")
+                    hyd = _hydration_summary()
                     print(
                         "Ψ-V12.4 UPGRADE "
-                        f"maPriority={len(_ma_cache)} ma200={ma200} ma50={ma50} "
+                        f"maPriority={len(_ma_cache)} maMatches={len(all_ma)} "
+                        f"sma200={sma200} sma50={sma50} ema200={ema200} ema50={ema50} weeklyMA={weekly_ma} "
                         f"topMA={','.join(r['symbol']+':'+r['label']+'/'+r['proximity'] for r in ma[:5]) or '-'} "
+                        f"deep200={hyd['deep_200_ready']}/{hyd['universe']} weeklyReady={hyd['weekly_ready']}/{hyd['universe']} "
+                        f"weeklyDeep={hyd['weekly_deep_ready']}/{hyd['universe']} "
                         f"mlWatch={len(_ml_watch_cache)} ml70={len(qualified)} "
                         f"micro={_stats.get('dynamic_micro_pool',0)} "
                         f"rescue={_stats.get('structure_rescue_imported',0)}/{_stats.get('structure_rescue_attempted',0)} "
