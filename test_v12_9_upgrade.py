@@ -105,16 +105,16 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_redis_read_does_not_block_scanner_event_loop(self):
         ticks = []
         def slow_sync_get(key):
-            time.sleep(0.055)
+            time.sleep(0.075)
             return json.dumps(payload())
         fast._client.get = slow_sync_get
         async def ticker():
             await asyncio.sleep(0.01)
-            ticks.append(1)
+            ticks.append("4h" not in self.core._cache.get("TESTUSDT", {}))
         job = asyncio.create_task(ticker())
         self.assertTrue(await fast._worker_first_fetch("TESTUSDT", "4h", deep=True))
         await job
-        self.assertTrue(ticks)
+        self.assertEqual(ticks, [True], "Main scanner event loop was blocked by Redis")
 
     async def test_prefetch_caps_per_cycle_work_and_yields(self):
         from unittest.mock import patch
