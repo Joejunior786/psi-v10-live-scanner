@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 
-REVISION = "13.1.2-independent-ml30-held-back"
+REVISION = "13.2.0-independent-ml30-rotation"
 STATE_PATH = os.getenv("PSI_V13_STATE_PATH", "/data/psi_v13_model.json")
 OUTCOME_PATH = os.getenv("PSI_V13_OUTCOME_PATH", "/data/psi_v13_outcomes.jsonl")
 TRAIN_HORIZON_MS = 15 * 60_000
@@ -40,6 +40,13 @@ _last_collection_ms = 0
 _last_save_ms = 0
 _last_diag_ms = 0
 _rotation = 0
+# Distinct from the ML outcome-training rotation.
+_coverage_history = {}
+_coverage_last = []
+_coverage_last_ms = 0
+_coverage_cycle = 0
+_held_progress = {}
+_held_last_symbols = []
 _stats = {"captured": 0, "resolved": 0, "invalid": 0, "model_errors": 0,
           "worker_errors": 0, "last_error": "", "promotion_requests": 0}
 
@@ -353,12 +360,19 @@ def _save():
     with open(name, "w", encoding="utf-8") as f:
         json.dump({"model": _model, "pending": _pending[-MAX_PENDING:],
                    "stats": _stats, "rotation": _rotation,
-                   "held_back": _held_back_state}, f, separators=(",", ":"))
+                   "held_back": _held_back_state,
+                   "rotation_snapshot": {"history": _coverage_history,
+                                         "last": _coverage_last,
+                                         "last_ms": _coverage_last_ms,
+                                         "cycle": _coverage_cycle,
+                                         "held_progress": _held_progress,
+                                         "held_last_symbols": _held_last_symbols}}, f,
+                  separators=(",", ":"))
     os.replace(name, STATE_PATH)
 
 
 def _restore():
-    global _rotation
+    global _rotation, _coverage_last_ms, _coverage_cycle, _coverage_last, _held_last_symbols
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -370,6 +384,15 @@ def _restore():
         _rotation = int(data.get("rotation") or 0)
         _held_back_state.clear()
         _held_back_state.update(data.get("held_back") or {})
+        rotation_state = data.get("rotation_snapshot") or {}
+        _coverage_history.clear()
+        _coverage_history.update(rotation_state.get("history") or {})
+        _coverage_last = list(rotation_state.get("last") or [])[:30]
+        _coverage_last_ms = int(rotation_state.get("last_ms") or 0)
+        _coverage_cycle = int(rotation_state.get("cycle") or 0)
+        _held_progress.clear()
+        _held_progress.update(rotation_state.get("held_progress") or {})
+        _held_last_symbols = list(rotation_state.get("held_last_symbols") or [])[:5]
     except (OSError, ValueError, TypeError):
         pass
 
@@ -454,65 +477,212 @@ def _symbol(row):
     return str(row.get("symbol") or "").upper()
 
 
-def thirty():
-    picked, seen = [], set()
-    rows = _rows()
-    by_sym = {r["symbol"]: r for r in rows}
-    board = list(CORE._board() or [])
-    monsters = list((getattr(CORE.base, "latest", {}) or {}).get("_all_candidates") or [])
-    universe = list(getattr(CORE.q, "universe", []) or [])
-    counter = {"ml": 0, "monster": 0, "pullback": 0, "pre_ignition": 0,
-               "armed": 0, "dark_horse": 0}
 
-    def add(category, sym, state, score=None):
+ROTATION_COOLDOWN_CYCLES = 3
+ROTATION_MIN_INTERVAL_MS = 35_000
+PEGGED_SYMBOLS = {"XUSDUSDT", "USDCUSDT", "FDUSDUSDT", "DAIUSDT",
+                  "TUSDUSDT", "USDDUSDT", "USDEUSDT", "USD1USDT",
+                  "BFUSDUSDT"}
+
+
+def _rotation_price(sensor, at):
+    if not isinstance(sensor, dict):
+        return None
+    age = at - num(sensor.get("generated_ms"), -1)
+    trade_age = num(sensor.get("trade_age_ms"), 1e12)
+    px = num(sensor.get("entry_reference"))
+    return px if px > 0 and 0 <= age <= 15_000 and 0 <= trade_age <= 15_000 else None
+
+
+def _rotation_evidence(sensor, structural, at):
+    px = _rotation_price(sensor, at)
+    verified = bool(sensor and fresh(sensor, at))
+    strength = num(structural.get("setup_strength")) if structural else 0
+    hazard = num(sensor.get("hazard_score")) if sensor else 0
+    delta = num(sensor.get("change_point_delta")) if sensor else 0
+    score = ((30 if verified else 0) + (10 if px is not None else 0)
+             + (20 if structural and structural.get("state") == "BUY" else
+                10 if structural and structural.get("state") == "ARMED" else 0)
+             + min(25, strength / 4) + min(15, hazard / 8)
+             + min(8, max(0, delta) / 4))
+    return {"priced": px is not None, "verified": verified,
+            "quality": round(score, 3)}
+
+
+def _rotation_trend(current, previous):
+    if not previous:
+        return "NEW"
+    if previous.get("verified") and not current["verified"]:
+        return "DETERIORATING"
+    if previous.get("priced") and not current["priced"]:
+        return "DETERIORATING"
+    if (current["verified"] and not previous.get("verified") or
+            current["priced"] and not previous.get("priced")):
+        return "IMPROVING"
+    d = current["quality"] - num(previous.get("quality"))
+    return "IMPROVING" if d >= 8 else "DETERIORATING" if d <= -8 else "UNCHANGED"
+
+
+def thirty(at=None, record=False):
+    """Display-only: 5 independent ML, 10 strongest, 15 rotating challengers.
+
+    Only discovery_worker advances rotation history; endpoint reads do not.
+    Missing market data never becomes a BUY or a manufactured price.
+    """
+    global _coverage_last_ms, _coverage_cycle, _coverage_last
+    at = ts() if at is None else at
+    if _coverage_last and (not record or
+            0 <= at - _coverage_last_ms < ROTATION_MIN_INTERVAL_MS):
+        return [dict(x) for x in _coverage_last]
+    if CORE is None:
+        return []
+    universe = list(dict.fromkeys(str(s).upper()
+                     for s in (getattr(CORE.q, "universe", []) or [])))
+    allowed = set(universe)
+    sensors = {_symbol(r): r for r in _rows()}
+    stricts = {_symbol(r): r for r in (CORE._board() or [])
+               if isinstance(r, dict)}
+    monsters = {_symbol(r): r for r in
+                ((getattr(CORE.base, "latest", {}) or {}).get("_all_candidates") or [])
+                if isinstance(r, dict)}
+    selected, used = [], set()
+
+    def setup(sym):
+        s, m, q = stricts.get(sym) or {}, monsters.get(sym) or {}, sensors.get(sym) or {}
+        if s.get("state") == "BUY":
+            return "armed"
+        if m.get("monsterPullbackState"):
+            return "pullback"
+        if m.get("state") in {"MONSTER-HOT", "MONSTER-IGNITION",
+                               "MONSTER-RESCUE", "MONSTER-WATCH"}:
+            return "monster"
+        if q.get("state") not in (None, "", "NONE", "DATA_WAIT", "NO_DATA"):
+            return "pre_ignition"
+        if s.get("state") in {"ARMED", "WATCH"}:
+            return "armed"
+        return "dark_horse" if q else "unqualified"
+
+    def add(sym, category, state, score, reason):
         sym = str(sym or "").upper()
-        if sym not in universe or sym in seen or counter[category] >= 5:
-            return
-        seen.add(sym)
-        counter[category] += 1
-        picked.append({"symbol": sym, "category": category, "state": state,
-                       "score": score, "entry_verified": False})
+        if sym not in allowed or sym in used or len(selected) >= 30:
+            return False
+        used.add(sym)
+        ev = _rotation_evidence(sensors.get(sym), stricts.get(sym), at)
+        prev = _coverage_history.get(sym)
+        gap = _coverage_cycle - int(prev.get("cycle") or 0) if prev else None
+        selected.append({
+            "symbol": sym, "category": category, "setup_category": setup(sym),
+            "state": str(state or "UNQUALIFIED_WATCH"), "score": score,
+            "selection_reason": reason, "entry_verified": False,
+            "rotation_progress": _rotation_trend(ev, prev),
+            "rotation_previous_cycle_gap": gap,
+            "rotation_cooldown_satisfied": bool(
+                not prev or gap >= ROTATION_COOLDOWN_CYCLES),
+            "recent_trade_observed": ev["priced"],
+            "hard_sensor_verified": ev["verified"],
+            "rotation_quality": ev["quality"],
+        })
+        return True
 
     for ml in five():
-        add("ml", ml["symbol"], ml["signal"], ml["rank_score"])
+        add(ml["symbol"], "ml", ml["signal"], ml["rank_score"],
+            "INDEPENDENT_ML_RANKING")
+    for sym in universe:
+        if sum(x["category"] == "ml" for x in selected) >= min(5, len(universe)):
+            break
+        add(sym, "ml", "ML NO DATA", None, "UNQUALIFIED_ML_COVERAGE_ONLY")
 
-    for r in sorted(monsters, key=lambda x: (str(x.get("state")) in
-         {"MONSTER-IGNITION", "MONSTER-HOT", "MONSTER-RESCUE"}, num(x.get("layers"))),
-         reverse=True):
-        add("monster", _symbol(r), str(r.get("state") or "MONSTER-WATCH"),
-            num(r.get("layers")))
+    def quality(sym):
+        s, m, q = stricts.get(sym) or {}, monsters.get(sym) or {}, sensors.get(sym) or {}
+        ev = _rotation_evidence(q, s, at)
+        return (int(ev["priced"]), int(ev["verified"]),
+                int(s.get("state") == "BUY"), int(s.get("state") == "ARMED"),
+                int(m.get("state") in {"MONSTER-HOT", "MONSTER-IGNITION", "MONSTER-RESCUE"}),
+                num(s.get("setup_strength")), num(q.get("hazard_score")),
+                num(m.get("layers")), num(q.get("change_point_delta")))
 
-    pulls = [r for r in monsters if r.get("monsterPullbackState")]
-    pulls.sort(key=lambda r: num(r.get("monsterExhaustionScore")), reverse=True)
-    for r in pulls:
-        add("pullback", _symbol(r), str(r.get("monsterPullbackState")),
-            num(r.get("monsterExhaustionScore")))
+    strong = [s for s in universe if s not in used and s not in PEGGED_SYMBOLS
+              and (stricts.get(s) or {}).get("state") in {"BUY", "ARMED"}]
+    strong.sort(key=lambda s: (quality(s), s), reverse=True)
+    for sym in strong:
+        if sum(x["category"] == "strongest" for x in selected) >= 10:
+            break
+        st = stricts[sym]
+        add(sym, "strongest", "STRUCTURAL_" + str(st.get("state")),
+            num(st.get("setup_strength")), "CONTINUING_STRUCTURAL_SETUP")
 
-    for r in sorted(rows, key=lambda r: num(r.get("hazard_score")), reverse=True):
-        if r.get("state") not in {"NONE", "DATA_WAIT"}:
-            add("pre_ignition", _symbol(r), str(r["state"]),
-                num(r.get("hazard_score")))
-
-    for r in board:
-        if r.get("state") in {"BUY", "ARMED", "WATCH"}:
-            add("armed", _symbol(r), "STRUCTURAL_" + str(r.get("state")),
-                num(r.get("setup_strength")))
-
-    for r in sorted(rows, key=lambda r: num(r.get("change_point_delta")), reverse=True):
-        add("dark_horse", _symbol(r), "DISCOVERY_WATCH",
-            num(r.get("change_point_delta")))
-
-    # Guarantee 30 unique symbols without inventing qualifiers.
-    for category in list(counter):
-        for r in sorted(rows, key=lambda r: num(r.get("hazard_score")), reverse=True):
-            if counter[category] >= 5:
+    if sum(x["category"] == "strongest" for x in selected) < 10:
+        extras = [s for s in universe if s not in used and s not in PEGGED_SYMBOLS
+                  and (s in sensors or s in monsters)]
+        extras.sort(key=lambda s: (quality(s), s), reverse=True)
+        for sym in extras:
+            if sum(x["category"] == "strongest" for x in selected) >= 10:
                 break
-            add(category, _symbol(r), "UNQUALIFIED_WATCH", None)
-        for sym in universe:
-            if counter[category] >= 5:
-                break
-            add(category, sym, "UNQUALIFIED_WATCH", None)
-    return picked[:30]
+            m, q = monsters.get(sym) or {}, sensors.get(sym) or {}
+            add(sym, "strongest", m.get("state") or q.get("state") or "DISCOVERY_WATCH",
+                num(q.get("hazard_score")) or num(m.get("layers")),
+                "BEST_AVAILABLE_WATCH_NOT_CONFIRMED")
+
+    def challenge_rank(sym):
+        ev = _rotation_evidence(sensors.get(sym), stricts.get(sym), at)
+        prev = _coverage_history.get(sym)
+        gap = _coverage_cycle - int(prev.get("cycle") or 0) if prev else 100000
+        m, q, st = monsters.get(sym) or {}, sensors.get(sym) or {}, stricts.get(sym) or {}
+        evidence = bool(
+            st.get("state") in {"BUY", "ARMED"} or
+            m.get("state") in {"MONSTER-WATCH", "MONSTER-HOT",
+                               "MONSTER-IGNITION", "MONSTER-RESCUE"} or
+            m.get("monsterPullbackState") or
+            q.get("state") not in (None, "", "NONE", "DATA_WAIT", "NO_DATA") or
+            num(q.get("change_point_delta")) >= 10)
+        return (int(ev["priced"]), int(gap >= ROTATION_COOLDOWN_CYCLES),
+                int(evidence), int(ev["verified"]), min(gap, 10000),
+                ev["quality"], sym)
+
+    pool = [s for s in universe if s not in used and s not in PEGGED_SYMBOLS]
+    pool.sort(key=challenge_rank, reverse=True)
+    for sym in pool:
+        if sum(x["category"] == "fresh_challenger" for x in selected) >= 15:
+            break
+        q, m = sensors.get(sym) or {}, monsters.get(sym) or {}
+        ev = _rotation_evidence(sensors.get(sym), stricts.get(sym), at)
+        old = _coverage_history.get(sym)
+        gap = _coverage_cycle - int(old.get("cycle") or 0) if old else 100000
+        reason = ("NEW_RECENT_OBSERVATION" if ev["priced"] and not old else
+                  "COOLDOWN_RECENT_OBSERVATION" if ev["priced"] and
+                  gap >= ROTATION_COOLDOWN_CYCLES else
+                  "REPEATED_LIMITED_FRESH_COVERAGE" if ev["priced"] else
+                  "NO_RECENT_PRICE_COVERAGE_ONLY")
+        add(sym, "fresh_challenger", m.get("state") or q.get("state") or "UNQUALIFIED_WATCH",
+            num(q.get("hazard_score")) or num(q.get("change_point_delta")) or
+            num(m.get("layers")) or None, reason)
+
+    for sym in universe:
+        if len(selected) >= min(30, len(universe)):
+            break
+        if sym not in used:
+            category = ("strongest" if sum(x["category"] == "strongest"
+                                          for x in selected) < 10 else "fresh_challenger")
+            add(sym, category, "UNQUALIFIED_WATCH", None,
+                "NO_RECENT_PRICE_COVERAGE_ONLY")
+
+    if record and selected:
+        _coverage_cycle += 1
+        _coverage_last_ms = at
+        _coverage_last = [dict(x) for x in selected]
+        for x in selected:
+            _coverage_history[x["symbol"]] = {
+                "cycle": _coverage_cycle, "last_seen_ms": at,
+                "quality": x["rotation_quality"],
+                "priced": x["recent_trade_observed"],
+                "verified": x["hard_sensor_verified"],
+            }
+        if len(_coverage_history) > 1200:
+            oldest = sorted(_coverage_history,
+                            key=lambda s: int(_coverage_history[s].get("last_seen_ms") or 0))
+            for sym in oldest[:-1200]:
+                _coverage_history.pop(sym, None)
+    return selected[:30]
 
 
 
@@ -570,6 +740,11 @@ def coverage30_audit(report=None, at=None):
 
         audited.append({
             "symbol": sym, "category": category,
+            "setup_category": selected.get("setup_category"),
+            "selection_reason": selected.get("selection_reason"),
+            "rotation_progress": selected.get("rotation_progress"),
+            "rotation_cooldown_satisfied": selected.get("rotation_cooldown_satisfied"),
+            "rotation_previous_cycle_gap": selected.get("rotation_previous_cycle_gap"),
             "state": str(selected.get("state") or ""),
             "score": selected.get("score"),
             "execution_status": status, "execution_authority": authority,
@@ -592,6 +767,10 @@ def coverage30_audit(report=None, at=None):
     return {
         "version": REVISION, "generated_ms": at,
         "total": len(audited), "unique": len({r["symbol"] for r in audited}),
+        "rotation_cycle": _coverage_cycle,
+        "rotation_layout": {"ml": 5, "strongest": 10, "fresh_challenger": 15},
+        "rotation_progress_counts": {p: sum(x.get("rotation_progress") == p for x in report)
+                                     for p in ("NEW", "IMPROVING", "DETERIORATING", "UNCHANGED")},
         "execution_ready": sum(bool(r["entry_verified"]) for r in audited),
         "rows": audited, "unqualified_are_not_buys": True,
     }
@@ -775,7 +954,7 @@ def log_held_back_lane(at=None):
 
 
 def log_coverage30_audit(report=None, at=None):
-    """Single structured Railway line, all six categories and all 30 rows."""
+    """Single structured Railway line with ML, strongest and challengers."""
     snapshot = coverage30_audit(report, at)
     print("PSI-V13 COVERAGE30_JSON " +
           json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
@@ -817,6 +996,7 @@ def _inject(response):
         "unqualified_are_not_buys": True,
     }
     payload["v13_held_back"] = held_back_lane()
+    payload["rotation_layout"] = {"ml": 5, "strongest": 10, "fresh_challenger": 15}
     payload["generated_ms"] = ts()
     return CORE.app.web.json_response(payload, status=response.status)
 
@@ -846,10 +1026,10 @@ async def discovery_worker():
                       " pending=" + str(len(_pending)) +
                       " top=" + top +
                       " independent=YES", flush=True)
-                report = thirty()
+                report = thirty(at=at, record=True)
                 print("PSI-V13 COVERAGE30 unique=" + str(len({r["symbol"] for r in report})) +
                       " rows=" + str(len(report)) +
-                      " categories=6x5", flush=True)
+                      " categories=5ML+10strongest+15challengers", flush=True)
                 log_coverage30_audit(report, at)
                 log_held_back_lane(at)
         except asyncio.CancelledError:
