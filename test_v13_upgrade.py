@@ -381,7 +381,7 @@ class V13Tests(unittest.TestCase):
         board = [{"symbol": sym, "state": "BUY",
                   "setup_strength": 100-i*.1,
                   "execution_state": "COLLECTING DATA"}
-                 for i, sym in enumerate(universe)]
+                 for i, sym in enumerate(universe[:15])]
         ml.CORE = types.SimpleNamespace(
             q=types.SimpleNamespace(universe=universe),
             base=types.SimpleNamespace(latest={"_all_candidates": []}),
