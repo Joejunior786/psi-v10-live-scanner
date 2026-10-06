@@ -173,6 +173,52 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.core._cache["TESTUSDT"]), 4)
         redis_client.mget.assert_not_called()
 
+    async def test_recovery_hook_imports_official_four_tf_packets_immediately(self):
+        packet_map = {tf: payload(timeframe=tf) for tf in ("1h", "4h", "1d", "1w")}
+        self.core.legacy = SimpleNamespace(_structure_worker_symbol_cache={
+            "TESTUSDT": packet_map
+        })
+        original = fast._original_legacy_prefetch
+        try:
+            fast._original_legacy_prefetch = Mock(return_value=1)
+            result = fast._legacy_prefetch_wrapper(["TESTUSDT"])
+            self.assertEqual(result, 1)
+            self.assertEqual(set(self.core._cache["TESTUSDT"]), {"1h", "4h", "1d", "1w"})
+            fast._original_legacy_prefetch.assert_called_once_with(["TESTUSDT"])
+        finally:
+            fast._original_legacy_prefetch = original
+
+    async def test_recovery_hook_rejects_old_packet_without_extending_freshness(self):
+        old = payload(fetched=int(time.time() * 1000) - fast.STRUCTURE_AGE_MS - 100)
+        self.core.legacy = SimpleNamespace(_structure_worker_symbol_cache={
+            "TESTUSDT": {"4h": old}
+        })
+        original = fast._original_legacy_prefetch
+        try:
+            fast._original_legacy_prefetch = Mock(return_value=1)
+            self.assertEqual(fast._legacy_prefetch_wrapper(["TESTUSDT"]), 1)
+            self.assertNotIn("TESTUSDT", self.core._cache)
+        finally:
+            fast._original_legacy_prefetch = original
+
+    async def test_recovery_hook_caps_batch_imports(self):
+        from unittest.mock import patch
+        symbols = ["TESTUSDT", "NEXTUSDT", "THIRDUSDT", "FOURTHUSDT"]
+        self.core.legacy = SimpleNamespace(_structure_worker_symbol_cache={
+            sym: {"4h": payload(symbol=sym)} for sym in symbols
+        })
+        original = fast._original_legacy_prefetch
+        try:
+            fast._original_legacy_prefetch = Mock(return_value=len(symbols))
+            with patch.object(fast, "HOOK_SYMBOL_LIMIT", 2), \
+                 patch.object(fast, "HOOK_TIME_BUDGET_S", 1.0):
+                self.assertEqual(fast._legacy_prefetch_wrapper(symbols), len(symbols))
+            self.assertIn("TESTUSDT", self.core._cache)
+            self.assertIn("NEXTUSDT", self.core._cache)
+            self.assertNotIn("THIRDUSDT", self.core._cache)
+        finally:
+            fast._original_legacy_prefetch = original
+
     async def test_prefetch_caps_per_cycle_work_and_yields(self):
         from unittest.mock import patch
         redis_client = SimpleNamespace(
