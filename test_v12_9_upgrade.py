@@ -4,7 +4,7 @@ import time
 import unittest
 from collections import defaultdict
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import psi_v12_9_upgrade as fast
 
@@ -61,7 +61,7 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         fast.CORE = self.core
         fast._seen.clear()
         fast._original_fetch = AsyncMock(return_value=False)
-        fast._client = SimpleNamespace(get=AsyncMock(return_value=json.dumps(payload())))
+        fast._client = SimpleNamespace(get=Mock(return_value=json.dumps(payload())))
 
     async def asyncTearDown(self):
         fast.CORE, fast._client, fast._original_fetch, old_seen = self.old
@@ -95,11 +95,33 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("TESTUSDT", self.core._cache)
         fast._original_fetch.assert_awaited_once()
 
+    async def test_redis_error_fails_closed_and_uses_existing_fallback(self):
+        fast._client.get.side_effect = TimeoutError("redis socket unavailable")
+        ok = await fast._worker_first_fetch("TESTUSDT", "4h", deep=True)
+        self.assertFalse(ok)
+        fast._original_fetch.assert_awaited_once()
+        self.assertGreater(fast._stats["redis_errors"], 0)
+
+    async def test_slow_redis_read_does_not_block_scanner_event_loop(self):
+        ticks = []
+        def slow_sync_get(key):
+            time.sleep(0.055)
+            return json.dumps(payload())
+        fast._client.get = slow_sync_get
+        async def ticker():
+            await asyncio.sleep(0.01)
+            ticks.append(1)
+        job = asyncio.create_task(ticker())
+        self.assertTrue(await fast._worker_first_fetch("TESTUSDT", "4h", deep=True))
+        await job
+        self.assertTrue(ticks)
+
     async def test_prefetch_caps_per_cycle_work_and_yields(self):
         from unittest.mock import patch
         redis_client = SimpleNamespace(
-            mget=AsyncMock(side_effect=[["{}"] * fast.PREFETCH_BATCH, []])
+            mget=Mock(side_effect=[["{}"] * fast.PREFETCH_BATCH, []])
         )
+        fast._client = redis_client
         with patch.object(fast, "_hot_symbols", return_value=["TESTUSDT"] * 10), \
              patch.object(fast, "_try_import", new_callable=AsyncMock) as importer:
             await fast._prefetch(redis_client)
