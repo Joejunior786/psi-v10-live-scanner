@@ -12,7 +12,7 @@ import psi_v12_9_upgrade as upgrade_v129
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v12.9.3-shared-worker-cache-bridge+v12.9.2-threaded-redis-handoff+v12.8.0-early-probe-sticky-sequence-memory"
+UPGRADE_RUNTIME = "v12.9.4-unified-worker-cache-hydration+v12.9.3-shared-worker-cache-bridge+v12.8.0-early-probe-sticky-sequence-memory"
 
 
 async def main():
