@@ -95,6 +95,17 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("TESTUSDT", self.core._cache)
         fast._original_fetch.assert_awaited_once()
 
+    async def test_prefetch_caps_per_cycle_work_and_yields(self):
+        from unittest.mock import patch
+        redis_client = SimpleNamespace(
+            mget=AsyncMock(side_effect=[["{}"] * fast.PREFETCH_BATCH, []])
+        )
+        with patch.object(fast, "_hot_symbols", return_value=["TESTUSDT"] * 10), \
+             patch.object(fast, "_try_import", new_callable=AsyncMock) as importer:
+            await fast._prefetch(redis_client)
+            self.assertLessEqual(importer.await_count, fast.PREFETCH_BATCH)
+            self.assertEqual(redis_client.mget.await_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
