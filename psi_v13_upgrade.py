@@ -865,6 +865,7 @@ def held_back_lane(at=None, record=False):
 
     The original 30-coin/ML boards and strict execution checks are untouched.
     """
+    global _held_last_symbols, _held_rotation_cycle, _held_last_snapshot
     at = ts() if at is None else at
     if not record and _held_last_snapshot:
         # Endpoint requests return the last recorded shortlist; reading cannot
@@ -873,7 +874,6 @@ def held_back_lane(at=None, record=False):
     if CORE is None:
         return {"status": "UNAVAILABLE", "rows": [], "rejected": [],
                 "total_held": 0, "execution_ready": 0}
-    global _held_last_symbols, _held_rotation_cycle, _held_last_snapshot
     sensors = {_symbol(r): r for r in _rows()}
     held, rejected = [], []
     observations = {}
