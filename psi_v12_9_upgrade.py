@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import redis as redis_sync
 
-REVISION = "12.9.5-direct-recovery-commit"
+REVISION = "12.9.6-full-eight-symbol-recovery-batch"
 ROLE = "WORKER_FIRST_STRUCTURE+HOT_PREFETCH+HANDOFF_DIAGNOSTICS"
 STRICT_BUY_AUTHORITY_UNCHANGED = True
 
@@ -38,7 +38,7 @@ DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V129_DIAG_SECONDS", "20")))
 READ_TIMEOUT = max(2.0, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "4.0")), 8.0))
 REDIS_BACKOFF_S = max(10.0, float(os.getenv("PSI_V129_REDIS_BACKOFF_S", "45")))
 PREFETCH_REMOTE_ENABLED = os.getenv("PSI_V129_DUPLICATE_REDIS_FETCH", "0").strip().lower() in {"1", "true", "yes"}
-HOOK_SYMBOL_LIMIT = max(2, min(int(os.getenv("PSI_V129_HOOK_SYMBOL_LIMIT", "4")), 8))
+HOOK_SYMBOL_LIMIT = max(2, min(int(os.getenv("PSI_V129_HOOK_SYMBOL_LIMIT", "8")), 8))
 HOOK_TIME_BUDGET_S = max(0.02, min(float(os.getenv("PSI_V129_HOOK_TIME_BUDGET_S", "0.08")), 0.20))
 STRUCTURE_AGE_MS = max(30000, int(os.getenv("PSI_V129_STRUCTURE_AGE_MS", "120000")))
 WEEKLY_AGE_MS = max(120000, int(os.getenv("PSI_V129_WEEKLY_AGE_MS", "1200000")))
