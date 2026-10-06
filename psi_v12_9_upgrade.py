@@ -8,8 +8,9 @@ import json
 import os
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
-import redis.asyncio as redis_async
+import redis as redis_sync
 
 REVISION = "12.9.0-worker-first-fast-confirmation"
 ROLE = "WORKER_FIRST_STRUCTURE+HOT_PREFETCH+HANDOFF_DIAGNOSTICS"
@@ -19,6 +20,7 @@ CORE = None
 V128 = None
 _original_fetch = None
 _client = None
+_redis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="psi-v129-redis")
 _stats = defaultdict(int)
 _seen = {}
 _last_report = 0.0
@@ -30,7 +32,7 @@ HOT_COUNT = max(8, min(int(os.getenv("PSI_V129_HOT_COUNT", "32")), 60))
 PREFETCH_BATCH = max(2, min(int(os.getenv("PSI_V129_PREFETCH_BATCH", "8")), 16))
 PREFETCH_SECONDS = max(2.0, float(os.getenv("PSI_V129_PREFETCH_SECONDS", "5")))
 DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V129_DIAG_SECONDS", "20")))
-READ_TIMEOUT = max(0.1, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "0.65")), 1.5))
+READ_TIMEOUT = max(2.0, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "4.0")), 8.0))
 STRUCTURE_AGE_MS = max(30000, int(os.getenv("PSI_V129_STRUCTURE_AGE_MS", "120000")))
 WEEKLY_AGE_MS = max(120000, int(os.getenv("PSI_V129_WEEKLY_AGE_MS", "1200000")))
 RISK_AGE_MS = max(15000, int(os.getenv("PSI_V129_RISK_AGE_MS", "90000")))
@@ -127,12 +129,61 @@ def _get_client():
     if _client is None:
         if CORE is None or not getattr(CORE, "REDIS_URL", ""):
             return None
-        _client = redis_async.from_url(
+        # Redis operations run on dedicated threads; never queue socket reads
+        # on the scanner's overloaded main asyncio event loop.
+        _client = redis_sync.from_url(
             CORE.REDIS_URL, encoding="utf-8", decode_responses=True,
-            socket_connect_timeout=READ_TIMEOUT, socket_timeout=READ_TIMEOUT,
+            socket_connect_timeout=min(READ_TIMEOUT, 3.0),
+            socket_timeout=min(READ_TIMEOUT, 3.0),
             health_check_interval=15,
+            max_connections=8,
         )
     return _client
+
+
+def _redis_failure(label, exc):
+    _stats["redis_errors"] += 1
+    _stats["last_redis_error"] = f"{label}:{type(exc).__name__}:{str(exc)[:110]}"
+
+
+async def _redis_get(key):
+    client = _get_client()
+    if client is None:
+        _stats["redis_not_configured"] += 1
+        return None
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_redis_executor, client.get, key),
+            timeout=READ_TIMEOUT,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _redis_failure("GET", exc)
+        return None
+
+
+async def _redis_mget(keys):
+    client = _get_client()
+    if client is None:
+        _stats["redis_not_configured"] += 1
+        return None
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(_redis_executor, client.mget, keys),
+            timeout=READ_TIMEOUT,
+        )
+        if not isinstance(result, (list, tuple)) or len(result) != len(keys):
+            _stats["redis_bad_batch"] += 1
+            return None
+        return result
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _redis_failure("MGET", exc)
+        return None
 
 
 async def _try_import(symbol, timeframe, deep=False, raw=None):
@@ -142,20 +193,8 @@ async def _try_import(symbol, timeframe, deep=False, raw=None):
     timeframe = str(timeframe or "")
     if timeframe not in ("1h", "4h", "1d", "1w"):
         return False
-    client = _get_client()
     if raw is None:
-        if client is None:
-            return False
-        try:
-            raw = await asyncio.wait_for(
-                client.get(f"{STRUCTURE_PREFIX}:{symbol}:{timeframe}"),
-                timeout=READ_TIMEOUT,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _stats["redis_errors"] += 1
-            return False
+        raw = await _redis_get(f"{STRUCTURE_PREFIX}:{symbol}:{timeframe}")
     if not raw:
         _stats["cache_miss"] += 1
         return False
@@ -182,8 +221,13 @@ async def _try_import(symbol, timeframe, deep=False, raw=None):
         # Already imported and still valid. Never extend its source timestamp.
         _stats["already_imported"] += 1
         return True
+    try:
+        requested = int(payload.get("requested_limit") or len(rows))
+    except (TypeError, ValueError):
+        requested = len(rows)
+    requested = max(len(rows), min(requested, 1500))
     if CORE._commit_authoritative_rows(
-        symbol, timeframe, rows, len(rows), source="WORKER_FAST_V129"
+        symbol, timeframe, rows, requested, source="WORKER_FAST_V129"
     ):
         _seen[key] = stamp
         _stats["worker_commits"] += 1
@@ -211,7 +255,10 @@ async def _prefetch(client):
     mapping = (all_mapping[cursor:] + all_mapping[:cursor])[:PREFETCH_BATCH]
     _prefetch_cursor = (cursor + len(mapping)) % len(all_mapping)
     keys = [f"{STRUCTURE_PREFIX}:{sym}:{tf}" for sym, tf in mapping]
-    raws = await asyncio.wait_for(client.mget(keys), timeout=max(1.0, READ_TIMEOUT * 2.0))
+    raws = await _redis_mget(keys)
+    if raws is None:
+        _stats["prefetch_structure_fail"] += 1
+        return
     for (sym, tf), raw in zip(mapping, raws):
         if raw:
             await _try_import(sym, tf, deep=False, raw=raw)
@@ -221,7 +268,10 @@ async def _prefetch(client):
     touched = list(dict.fromkeys(sym for sym, _ in mapping))
     risk_map = [(sym, tf) for sym in touched for tf in ("1m", "5m", "15m")]
     risk_keys = [f"{RISK_PREFIX}:{sym}:{tf}" for sym, tf in risk_map]
-    raw_risk = await asyncio.wait_for(client.mget(risk_keys), timeout=max(1.0, READ_TIMEOUT * 2.0))
+    raw_risk = await _redis_mget(risk_keys)
+    if raw_risk is None:
+        _stats["prefetch_risk_fail"] += 1
+        return
     fresh = 0
     for (sym, tf), raw in zip(risk_map, raw_risk):
         if raw:
@@ -256,6 +306,8 @@ async def supervisor_loop():
                     f"invalidOrStale={_stats['invalid_or_stale']} "
                     f"riskCandleFresh={_stats['risk_candle_fresh']}/{_stats['risk_candle_total']} "
                     f"redisErrors={_stats['redis_errors']} "
+                    f"redisDetail={_stats['last_redis_error'] or '-'} "
+                    f"prefetchFailures={_stats['prefetch_structure_fail']}/{_stats['prefetch_risk_fail']} "
                     f"cycleMs={_stats['last_prefetch_ms']} "
                     "strictBuyAuthority=UNCHANGED",
                     flush=True,
@@ -266,6 +318,14 @@ async def supervisor_loop():
             _stats["supervisor_errors"] += 1
             _stats["last_error"] = f"{type(exc).__name__}:{str(exc)[:120]}"
             print(f"PSI-V12.9 HANDOFF_ERROR {_stats['last_error']}", flush=True)
+            # Do not suppress periodic diagnostics after an operation fails.
+            if time.monotonic() - _last_report >= DIAG_SECONDS:
+                _last_report = time.monotonic()
+                print(
+                    f"PSI-V12.9 HANDOFF_RECOVERY errors={_stats['supervisor_errors']} "
+                    f"redisErrors={_stats['redis_errors']} detail={_stats['last_redis_error'] or '-'}",
+                    flush=True,
+                )
         await asyncio.sleep(PREFETCH_SECONDS)
 
 
