@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 
-REVISION = "13.2.0-independent-ml30-rotation"
+REVISION = "13.2.1-held-back-rotation"
 STATE_PATH = os.getenv("PSI_V13_STATE_PATH", "/data/psi_v13_model.json")
 OUTCOME_PATH = os.getenv("PSI_V13_OUTCOME_PATH", "/data/psi_v13_outcomes.jsonl")
 TRAIN_HORIZON_MS = 15 * 60_000
@@ -47,6 +47,9 @@ _coverage_last_ms = 0
 _coverage_cycle = 0
 _held_progress = {}
 _held_last_symbols = []
+_held_rotation_seen = {}
+_held_rotation_cycle = 0
+_held_last_snapshot = None
 _stats = {"captured": 0, "resolved": 0, "invalid": 0, "model_errors": 0,
           "worker_errors": 0, "last_error": "", "promotion_requests": 0}
 
@@ -366,13 +369,17 @@ def _save():
                                          "last_ms": _coverage_last_ms,
                                          "cycle": _coverage_cycle,
                                          "held_progress": _held_progress,
-                                         "held_last_symbols": _held_last_symbols}}, f,
+                                         "held_last_symbols": _held_last_symbols,
+                                         "held_rotation_seen": _held_rotation_seen,
+                                         "held_rotation_cycle": _held_rotation_cycle,
+                                         "held_last_snapshot": _held_last_snapshot}}, f,
                   separators=(",", ":"))
     os.replace(name, STATE_PATH)
 
 
 def _restore():
-    global _rotation, _coverage_last_ms, _coverage_cycle, _coverage_last, _held_last_symbols
+    global _rotation, _coverage_last_ms, _coverage_cycle, _coverage_last
+    global _held_last_symbols, _held_rotation_cycle, _held_last_snapshot
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -393,6 +400,10 @@ def _restore():
         _held_progress.clear()
         _held_progress.update(rotation_state.get("held_progress") or {})
         _held_last_symbols = list(rotation_state.get("held_last_symbols") or [])[:5]
+        _held_rotation_seen.clear()
+        _held_rotation_seen.update(rotation_state.get("held_rotation_seen") or {})
+        _held_rotation_cycle = int(rotation_state.get("held_rotation_cycle") or 0)
+        _held_last_snapshot = rotation_state.get("held_last_snapshot") or None
     except (OSError, ValueError, TypeError):
         pass
 
@@ -780,6 +791,7 @@ def coverage30_audit(report=None, at=None):
 # Read-only seventh lane; never changes V12/ML execution authority.
 HELD_BACK_LIMIT = 5
 HELD_BACK_MIN_RR = 1.5
+HELD_BACK_ROTATION_COOLDOWN = 3
 HELD_BACK_HORIZON_MS = 24 * 60 * 60_000
 _held_back_state = {}
 
@@ -854,10 +866,14 @@ def held_back_lane(at=None, record=False):
     The original 30-coin/ML boards and strict execution checks are untouched.
     """
     at = ts() if at is None else at
+    if not record and _held_last_snapshot:
+        # Endpoint requests return the last recorded shortlist; reading cannot
+        # consume the next rotation or manufacture a new market observation.
+        return json.loads(json.dumps(_held_last_snapshot))
     if CORE is None:
         return {"status": "UNAVAILABLE", "rows": [], "rejected": [],
                 "total_held": 0, "execution_ready": 0}
-    global _held_last_symbols
+    global _held_last_symbols, _held_rotation_cycle, _held_last_snapshot
     sensors = {_symbol(r): r for r in _rows()}
     held, rejected = [], []
     observations = {}
@@ -886,8 +902,7 @@ def held_back_lane(at=None, record=False):
               if valid_plan and observed is not None and stop < observed < tp1
               else None)
         risk_reason = None
-        if sym in {"XUSDUSDT", "USDCUSDT", "FDUSDUSDT", "DAIUSDT",
-                   "TUSDUSDT", "USDDUSDT", "USDEUSDT", "USD1USDT"}:
+        if sym in PEGGED_SYMBOLS:
             risk_reason = "PEGGED_ASSET"
         elif not valid_plan:
             risk_reason = "INVALID_OR_MISSING_REFERENCE_PLAN"
@@ -937,31 +952,84 @@ def held_back_lane(at=None, record=False):
             "rejection_reason": risk_reason, "missing_confirmations": blockers[:15],
             "entry_verified": False, "trade_instruction": False,
         }
-        rank = (int(rr is not None), int(new_display),
-                int(trend == "IMPROVING"), int(verified),
+        rank = (int(trend == "IMPROVING"), int(verified),
                 int(structural.get("state") == "BUY"),
                 num(structural.get("setup_strength")), num(rr))
         (rejected if risk_reason else held).append((rank, sym, item))
     held.sort(key=lambda x: (x[0], x[1]), reverse=True)
     rejected.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    # A fresh shortlist must rotate *priced, non-rejected* research candidates
+    # before recycling a previously shown name. Never replace a priced option
+    # with stale/unknown-price data merely to make a rotation look different.
+    rotation_cycle = _held_rotation_cycle + 1 if record else _held_rotation_cycle
+    previous_top = set(_held_last_symbols)
+    priced = [r for r in held if r[2]["observed_price"] is not None
+              and r[2]["reward_risk"] is not None]
+    unpriced = [r for r in held if r not in priced]
+    chosen, chosen_symbols = [], set()
+
+    def cooled(sym):
+        last = _held_rotation_seen.get(sym)
+        return last is None or rotation_cycle - int(last) >= HELD_BACK_ROTATION_COOLDOWN
+
+    # Cooldown is strongest among candidates with usable price evidence.
+    # If fewer than five alternatives exist, report the repeated names honestly.
+    tiers = [
+        ("PRICED_ROTATED", [r for r in priced if cooled(r[1])]),
+        ("PRICED_LIMITED_POOL", [r for r in priced if not cooled(r[1])]),
+        ("UNPRICED_ROTATED", [r for r in unpriced if cooled(r[1])]),
+        ("UNPRICED_LIMITED_POOL", [r for r in unpriced if not cooled(r[1])]),
+    ]
+    for tier, candidates in tiers:
+        for _rank, sym, row in candidates:
+            if len(chosen) >= HELD_BACK_LIMIT:
+                break
+            if sym in chosen_symbols:
+                continue
+            chosen_symbols.add(sym)
+            row["rotation_status"] = (
+                "ROTATED_IN" if sym not in previous_top else
+                "CONTINUING_LIMITED_POOL" if "LIMITED_POOL" in tier else
+                "CONTINUING_AFTER_COOLDOWN")
+            row["rotation_reason"] = tier
+            row["rotation_cooldown_satisfied"] = cooled(sym)
+            if sym in previous_top and not cooled(sym):
+                row["repeat_reason"] = "INSUFFICIENT_PRICED_ELIGIBLE_ALTERNATIVES"
+            chosen.append(row)
+
     snapshot = {
         "version": REVISION, "generated_ms": at,
         "label": "HELD-BACK BUYS - NOT APPROVED",
         "authority": "REPORTING_ONLY_NO_EXECUTION_AUTHORITY",
         "total_held": len(held), "total_rejected": len(rejected),
-        "rows": [r[2] for r in held[:HELD_BACK_LIMIT]],
+        "rows": chosen,
         "rejected": [r[2] for r in rejected[:HELD_BACK_LIMIT]],
-        "new_top_five": sum(r[2]["display_status"] == "NEW TO TOP 5"
-                            for r in held[:HELD_BACK_LIMIT]),
-        "continuing_top_five": sum(r[2]["display_status"] == "CONTINUING"
-                                   for r in held[:HELD_BACK_LIMIT]),
+        "new_top_five": sum(r["display_status"] == "NEW TO TOP 5"
+                            for r in chosen),
+        "continuing_top_five": sum(r["display_status"] == "CONTINUING"
+                                   for r in chosen),
+        "rotation_cycle": rotation_cycle,
+        "rotation_cooldown_cycles": HELD_BACK_ROTATION_COOLDOWN,
+        "rotated_from_previous": sum(r["symbol"] not in previous_top for r in chosen),
+        "eligible_priced_pool": len(priced),
+        "continuing_limited_pool": sum(r["rotation_status"] == "CONTINUING_LIMITED_POOL"
+                                       for r in chosen),
         "execution_ready": 0, "entry_orders_allowed": False,
         "held_min_reward_risk": HELD_BACK_MIN_RR,
         "tracking_method": "OBSERVED_TP1_OR_STOP_TOUCH_24H_NOT_FILL_PROOF",
     }
     if record:
         _held_tracking(snapshot, sensors, at)
+        _held_rotation_cycle = rotation_cycle
+        for r in snapshot["rows"]:
+            _held_rotation_seen[r["symbol"]] = rotation_cycle
         _held_last_symbols = [r["symbol"] for r in snapshot["rows"]]
+        if len(_held_rotation_seen) > 1200:
+            oldest = sorted(_held_rotation_seen,
+                            key=lambda k: int(_held_rotation_seen[k]))
+            for sym in oldest[:-1200]:
+                _held_rotation_seen.pop(sym, None)
         for symbol, ev in observations.items():
             _held_progress[symbol] = dict(ev, last_seen_ms=at)
         if len(_held_progress) > 1200:
@@ -980,6 +1048,8 @@ def held_back_lane(at=None, record=False):
                                   for x in _held_back_state.values()),
         "not_verified_pnl": True,
     }
+    if record:
+        _held_last_snapshot = json.loads(json.dumps(snapshot))
     return snapshot
 
 
@@ -992,6 +1062,8 @@ def log_held_back_lane(at=None):
           " shown=" + str(len(snapshot["rows"])) +
           " newTop=" + str(snapshot["new_top_five"]) +
           " continuing=" + str(snapshot["continuing_top_five"]) +
+          " rotated=" + str(snapshot["rotated_from_previous"]) +
+          " eligiblePriced=" + str(snapshot["eligible_priced_pool"]) +
           " buyNow=0 reportingOnly=YES", flush=True)
     return snapshot
 
