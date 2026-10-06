@@ -1728,7 +1728,9 @@ def _prefetch_structure_worker_symbols(symbols):
         keys=[]
         mapping=[]
         for sym in syms:
-            for tf in ("15m","1h","4h"):
+            # Unified cache serves legacy 15m/1h/4h recovery and V12 1d/1w
+            # hydration with the SAME known-good Redis MGET transaction.
+            for tf in ("15m","1h","4h","1d","1w"):
                 keys.append(f"{STRUCTURE_WORKER_REDIS_PREFIX}:{sym}:{tf}")
                 mapping.append((sym,tf))
         started=time.time()
