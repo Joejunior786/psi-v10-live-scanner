@@ -172,7 +172,12 @@ async def _try_import(symbol, timeframe, deep=False, raw=None):
         item = (getattr(CORE, "_cache", {}) or {}).get(symbol, {}).get(timeframe, {})
         if not item.get("snap") or (deep and len(item.get("rows") or []) < getattr(CORE, "DEEP_MIN_ROWS", 202)):
             return False
-        # Already imported. Do not falsify its updated timestamp.
+        age_s = time.time() - float(item.get("updated") or 0)
+        ttl = float((getattr(CORE, "TF_TTL", {}) or {}).get(timeframe, 120.0))
+        if age_s < 0 or age_s > max(1.0, min(ttl, (WEEKLY_AGE_MS if timeframe == "1w" else STRUCTURE_AGE_MS) / 1000.0)):
+            _stats["already_imported_stale"] += 1
+            return False
+        # Already imported and still valid. Never extend its source timestamp.
         _stats["already_imported"] += 1
         return True
     if CORE._commit_authoritative_rows(
