@@ -219,6 +219,24 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         finally:
             fast._original_legacy_prefetch = original
 
+    async def test_recovery_eight_symbol_batch_imports_all_within_budget(self):
+        from unittest.mock import patch
+        symbols = [f"COIN{i}USDT" for i in range(8)]
+        self.core.legacy = SimpleNamespace(_structure_worker_symbol_cache={
+            sym: {tf: payload(symbol=sym, timeframe=tf) for tf in ("1h", "4h", "1d", "1w")}
+            for sym in symbols
+        })
+        original = fast._original_legacy_prefetch
+        try:
+            fast._original_legacy_prefetch = Mock(return_value=8)
+            with patch.object(fast, "HOOK_SYMBOL_LIMIT", 8), \
+                 patch.object(fast, "HOOK_TIME_BUDGET_S", 1.0):
+                self.assertEqual(fast._legacy_prefetch_wrapper(symbols), 8)
+            for sym in symbols:
+                self.assertEqual(set(self.core._cache[sym]), {"1h", "4h", "1d", "1w"})
+        finally:
+            fast._original_legacy_prefetch = original
+
     async def test_prefetch_caps_per_cycle_work_and_yields(self):
         from unittest.mock import patch
         redis_client = SimpleNamespace(
