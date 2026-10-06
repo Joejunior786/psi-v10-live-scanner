@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import redis as redis_sync
 
-REVISION = "12.9.0-worker-first-fast-confirmation"
+REVISION = "12.9.2-threaded-redis-handoff"
 ROLE = "WORKER_FIRST_STRUCTURE+HOT_PREFETCH+HANDOFF_DIAGNOSTICS"
 STRICT_BUY_AUTHORITY_UNCHANGED = True
 
@@ -226,9 +226,15 @@ async def _try_import(symbol, timeframe, deep=False, raw=None):
     except (TypeError, ValueError):
         requested = len(rows)
     requested = max(len(rows), min(requested, 1500))
-    if CORE._commit_authoritative_rows(
-        symbol, timeframe, rows, requested, source="WORKER_FAST_V129"
-    ):
+    try:
+        committed = CORE._commit_authoritative_rows(
+            symbol, timeframe, rows, requested, source="WORKER_FAST_V129"
+        )
+    except Exception as exc:
+        _stats["worker_commit_errors"] += 1
+        _stats["worker_commit_last_error"] = f"{type(exc).__name__}:{str(exc)[:100]}"
+        return False
+    if committed:
         _seen[key] = stamp
         _stats["worker_commits"] += 1
         return True
@@ -300,6 +306,7 @@ async def supervisor_loop():
                     "PSI-V12.9 HANDOFF "
                     f"hot={_stats['hot_count']} "
                     f"workerCommits={_stats['worker_commits']} "
+                    f"workerCommitErrors={_stats['worker_commit_errors']} "
                     f"fastHits={_stats['fast_path_hits']} "
                     f"fallbacks={_stats['legacy_fallbacks']} "
                     f"cacheMiss={_stats['cache_miss']} "
