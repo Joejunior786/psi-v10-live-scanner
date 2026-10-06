@@ -50,7 +50,8 @@ class PayloadValidationTests(unittest.TestCase):
 
 class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.old = (fast.CORE, fast._client, fast._original_fetch, dict(fast._seen))
+        self.old = (fast.CORE, fast._client, fast._original_fetch, dict(fast._seen), fast._redis_pause_until)
+        fast._redis_pause_until = 0.0
         self.core = SimpleNamespace(
             REDIS_URL="redis://dummy",
             DEEP_MIN_ROWS=202,
@@ -64,7 +65,7 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         fast._client = SimpleNamespace(get=Mock(return_value=json.dumps(payload())))
 
     async def asyncTearDown(self):
-        fast.CORE, fast._client, fast._original_fetch, old_seen = self.old
+        fast.CORE, fast._client, fast._original_fetch, old_seen, fast._redis_pause_until = self.old
         fast._seen.clear()
         fast._seen.update(old_seen)
 
@@ -115,6 +116,36 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await fast._worker_first_fetch("TESTUSDT", "4h", deep=True))
         await job
         self.assertEqual(ticks, [True], "Main scanner event loop was blocked by Redis")
+
+    async def test_existing_legacy_worker_cache_bypasses_redis_network(self):
+        self.core.legacy = SimpleNamespace(
+            _structure_worker_symbol_cache={"TESTUSDT": {"4h": payload()}}
+        )
+        fast._client.get.side_effect = AssertionError("Redundant remote read")
+        ok = await fast._worker_first_fetch("TESTUSDT", "4h", deep=True)
+        self.assertTrue(ok)
+        fast._client.get.assert_not_called()
+        fast._original_fetch.assert_not_awaited()
+        self.assertGreater(fast._stats["legacy_worker_reuse"], 0)
+
+    async def test_stale_legacy_worker_cache_cannot_create_buy_data(self):
+        stale = payload(fetched=int(time.time() * 1000) - fast.STRUCTURE_AGE_MS - 8000)
+        self.core.legacy = SimpleNamespace(
+            _structure_worker_symbol_cache={"TESTUSDT": {"4h": stale}}
+        )
+        fast._client.get.return_value = json.dumps(stale)
+        self.assertFalse(await fast._worker_first_fetch("TESTUSDT", "4h", deep=True))
+        self.assertNotIn("TESTUSDT", self.core._cache)
+        fast._original_fetch.assert_awaited_once()
+
+    async def test_redis_circuit_skips_remote_but_reuses_valid_legacy_cache(self):
+        fast._redis_failure("MGET", TimeoutError("unavailable"))
+        self.core.legacy = SimpleNamespace(
+            _structure_worker_symbol_cache={"TESTUSDT": {"4h": payload()}}
+        )
+        self.assertIsNone(await fast._redis_mget(["any"]))
+        self.assertTrue(await fast._worker_first_fetch("TESTUSDT", "4h", deep=True))
+        fast._client.get.assert_not_called()
 
     async def test_prefetch_caps_per_cycle_work_and_yields(self):
         from unittest.mock import patch
