@@ -17,6 +17,18 @@ class V13Tests(unittest.TestCase):
         self.learner = ml.LEARNER
         self.stats = dict(ml._stats)
         self.held = {k: dict(v) for k, v in ml._held_back_state.items()}
+        self.coverage_history = {k: dict(v) for k, v in ml._coverage_history.items()}
+        self.coverage_last = [dict(v) for v in ml._coverage_last]
+        self.coverage_ms = ml._coverage_last_ms
+        self.coverage_cycle = ml._coverage_cycle
+        self.held_progress = {k: dict(v) for k, v in ml._held_progress.items()}
+        self.held_last = list(ml._held_last_symbols)
+        ml._coverage_history.clear()
+        ml._coverage_last.clear()
+        ml._coverage_last_ms = 0
+        ml._coverage_cycle = 0
+        ml._held_progress.clear()
+        ml._held_last_symbols.clear()
 
     def tearDown(self):
         ml._model.clear()
@@ -29,6 +41,14 @@ class V13Tests(unittest.TestCase):
         ml._stats.update(self.stats)
         ml._held_back_state.clear()
         ml._held_back_state.update(self.held)
+        ml._coverage_history.clear()
+        ml._coverage_history.update(self.coverage_history)
+        ml._coverage_last = self.coverage_last
+        ml._coverage_last_ms = self.coverage_ms
+        ml._coverage_cycle = self.coverage_cycle
+        ml._held_progress.clear()
+        ml._held_progress.update(self.held_progress)
+        ml._held_last_symbols = self.held_last
 
     def sample(self, sym, now=1_000_000, fresh=True):
         return {
@@ -93,7 +113,7 @@ class V13Tests(unittest.TestCase):
         after = (ml._model["trained"], ml._model["bias"], list(ml._model["weights"]))
         self.assertEqual(before, after)
 
-    def test_thirty_distinct_coins_across_six_groups(self):
+    def test_thirty_distinct_coins_in_5_10_15_layout(self):
         now = ml.ts()
         universe = [f"COIN{i}USDT" for i in range(45)]
         rows = [self.sample(s, now=now) for s in universe]
@@ -113,7 +133,8 @@ class V13Tests(unittest.TestCase):
         self.assertEqual(len(result), 30)
         self.assertEqual(len({r["symbol"] for r in result}), 30)
         from collections import Counter
-        self.assertEqual(set(Counter(r["category"] for r in result).values()), {5})
+        self.assertEqual(dict(Counter(r["category"] for r in result)),
+                         {"ml": 5, "strongest": 10, "fresh_challenger": 15})
 
 
     def test_historical_warm_start_uses_resolved_pre_signal_data(self):
@@ -171,7 +192,9 @@ class V13Tests(unittest.TestCase):
         self.assertEqual(audit["total"], 30)
         self.assertEqual(audit["unique"], 30)
         self.assertEqual(audit["execution_ready"], 0)
-        self.assertEqual(len({r["category"] for r in audit["rows"]}), 6)
+        self.assertEqual(len({r["category"] for r in audit["rows"]}), 3)
+        self.assertEqual(audit["rotation_layout"],
+                         {"ml": 5, "strongest": 10, "fresh_challenger": 15})
         self.assertTrue(all(r["entry"] is None and r["stop"] is None
                             and r["tp1"] is None for r in audit["rows"]))
         self.assertTrue(all("research_only_levels" in r and "blockers" in r
@@ -269,6 +292,111 @@ class V13Tests(unittest.TestCase):
         self.assertEqual(ml._held_back_state["GOODUSDT"]["outcome"],
                          "OBSERVED_TP1_TOUCH")
         self.assertEqual(board[0]["execution_state"], "COLLECTING DATA")
+
+
+
+    def test_challengers_rotate_without_repeating_previous_scan(self):
+        now = 1_000_000
+        universe = [f"COIN{i:03}USDT" for i in range(95)]
+        samples = [self.sample(sym, now=now) for sym in universe]
+        board = [{"symbol": sym, "state": "BUY",
+                  "setup_strength": 95 if i < 18 else 40,
+                  "execution_state": "COLLECTING DATA"}
+                 for i, sym in enumerate(universe)]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=universe),
+            base=types.SimpleNamespace(latest={"_all_candidates": []}),
+            _board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        ml.rank()
+        first = ml.thirty(now, record=True)
+        self.assertEqual(len(first), 30)
+        self.assertEqual(len({x["symbol"] for x in first}), 30)
+        self.assertEqual(sum(x["category"] == "fresh_challenger" for x in first), 15)
+        first_challengers = {x["symbol"] for x in first
+                             if x["category"] == "fresh_challenger"}
+        read = ml.thirty(now + 5000, record=False)
+        self.assertEqual(first, read)
+        self.assertEqual(ml._coverage_cycle, 1)
+        for sample in samples:
+            sample["generated_ms"] = now + 40_000
+        second = ml.thirty(now + 40_000, record=True)
+        second_challengers = {x["symbol"] for x in second
+                              if x["category"] == "fresh_challenger"}
+        self.assertEqual(len(second), 30)
+        self.assertFalse(first_challengers & second_challengers)
+        self.assertEqual(ml._coverage_cycle, 2)
+        self.assertTrue(any(x["rotation_progress"] == "UNCHANGED" for x in second))
+        self.assertTrue(all(not x["entry_verified"] for x in second))
+
+    def test_missing_price_is_labeled_not_promoted_by_rotation(self):
+        now = 1_000_000
+        universe = [f"S{i}USDT" for i in range(50)]
+        samples = [self.sample(s, now=now) for s in universe[:5]]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=universe),
+            base=types.SimpleNamespace(latest={"_all_candidates": []}),
+            _board=lambda: [])
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        ml.rank()
+        selections = ml.thirty(now, record=True)
+        audit = ml.coverage30_audit(selections, now)
+        self.assertEqual(len(audit["rows"]), 30)
+        self.assertTrue(any(not r["observed_price"] for r in audit["rows"]))
+        self.assertEqual(audit["execution_ready"], 0)
+        self.assertTrue(all(r["entry"] is None for r in audit["rows"]))
+
+    def test_held_display_prioritizes_observed_and_marks_continuing(self):
+        now = 1_000_000
+        universe = [f"HB{i}USDT" for i in range(7)]
+        board = [{"symbol": sym, "state": "BUY", "setup_strength": 95-i,
+                  "execution_state": "COLLECTING DATA",
+                  "execution_blockers": ["LIVE_MICRO_DATA"],
+                  "entry_low": 10, "invalidation": 9.5,
+                  "tp1": 11, "tp2": 12, "tp3": 13}
+                 for i, sym in enumerate(universe)]
+        samples = [self.sample(sym, now=now) for sym in universe[:4]]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=universe),
+            _board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        first = ml.held_back_lane(now, record=True)
+        self.assertEqual(first["rows"][0]["symbol"], "HB0USDT")
+        self.assertEqual(first["rows"][0]["display_status"], "NEW TO TOP 5")
+        self.assertTrue(all(x["observed_price"] is not None
+                            for x in first["rows"][:4]))
+        for sample in samples:
+            sample["generated_ms"] = now + 40_000
+        second = ml.held_back_lane(now + 40_000, record=True)
+        displayed = {x["symbol"]: x for x in second["rows"]}
+        self.assertEqual(displayed["HB0USDT"]["display_status"], "CONTINUING")
+        self.assertEqual(displayed["HB0USDT"]["evidence_progress"], "UNCHANGED")
+        self.assertEqual(second["execution_ready"], 0)
+        self.assertEqual(board[0]["execution_state"], "COLLECTING DATA")
+
+    def test_rotation_progress_detects_lost_fresh_confirmation(self):
+        now = 1_000_000
+        universe = [f"T{i}USDT" for i in range(45)]
+        samples = [self.sample(sym, now=now) for sym in universe]
+        board = [{"symbol": sym, "state": "BUY",
+                  "setup_strength": 100-i*.1,
+                  "execution_state": "COLLECTING DATA"}
+                 for i, sym in enumerate(universe)]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=universe),
+            base=types.SimpleNamespace(latest={"_all_candidates": []}),
+            _board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        ml.rank()
+        first = ml.thirty(now, record=True)
+        strong = next(x["symbol"] for x in first if x["category"] == "strongest")
+        for sample in samples:
+            sample["generated_ms"] = now + 40_000
+            if sample["symbol"] == strong:
+                sample["hard_sensor_safety"] = False
+        second = ml.thirty(now + 40_000, record=True)
+        report = next(x for x in second if x["symbol"] == strong)
+        self.assertEqual(report["rotation_progress"], "DETERIORATING")
 
 
 if __name__ == "__main__":
