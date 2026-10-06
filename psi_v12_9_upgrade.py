@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import redis as redis_sync
 
-REVISION = "12.9.3-shared-worker-cache-bridge"
+REVISION = "12.9.4-unified-worker-cache-hydration"
 ROLE = "WORKER_FIRST_STRUCTURE+HOT_PREFETCH+HANDOFF_DIAGNOSTICS"
 STRICT_BUY_AUTHORITY_UNCHANGED = True
 
@@ -35,6 +35,7 @@ PREFETCH_SECONDS = max(2.0, float(os.getenv("PSI_V129_PREFETCH_SECONDS", "5")))
 DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V129_DIAG_SECONDS", "20")))
 READ_TIMEOUT = max(2.0, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "4.0")), 8.0))
 REDIS_BACKOFF_S = max(10.0, float(os.getenv("PSI_V129_REDIS_BACKOFF_S", "45")))
+PREFETCH_REMOTE_ENABLED = os.getenv("PSI_V129_DUPLICATE_REDIS_FETCH", "0").strip().lower() in {"1", "true", "yes"}
 STRUCTURE_AGE_MS = max(30000, int(os.getenv("PSI_V129_STRUCTURE_AGE_MS", "120000")))
 WEEKLY_AGE_MS = max(120000, int(os.getenv("PSI_V129_WEEKLY_AGE_MS", "1200000")))
 RISK_AGE_MS = max(15000, int(os.getenv("PSI_V129_RISK_AGE_MS", "90000")))
@@ -156,7 +157,7 @@ def _legacy_worker_payload(symbol, timeframe):
     This is the same Redis-worker source, without a second network round trip.
     It never accepts an outdated or mismatched packet.
     """
-    if CORE is None or timeframe not in {"1h", "4h"}:
+    if CORE is None or timeframe not in {"1h", "4h", "1d", "1w"}:
         return None
     legacy = getattr(CORE, "legacy", None)
     cache = getattr(legacy, "_structure_worker_symbol_cache", None)
@@ -164,7 +165,7 @@ def _legacy_worker_payload(symbol, timeframe):
         return None
     bundle = cache.get(str(symbol).upper())
     packet = bundle.get(timeframe) if isinstance(bundle, dict) else None
-    if _valid_payload(packet, symbol, timeframe, deep=True) is None:
+    if _valid_payload(packet, symbol, timeframe, deep=False) is None:
         return None
     return packet
 
@@ -226,7 +227,7 @@ async def _try_import(symbol, timeframe, deep=False, raw=None):
         raw = _legacy_worker_payload(symbol, timeframe)
         if raw is not None:
             _stats["legacy_worker_reuse"] += 1
-    if raw is None:
+    if raw is None and PREFETCH_REMOTE_ENABLED:
         raw = await _redis_get(f"{STRUCTURE_PREFIX}:{symbol}:{timeframe}")
     if not raw:
         _stats["cache_miss"] += 1
@@ -303,7 +304,7 @@ async def _prefetch(client):
             missing.append((sym, tf))
         # Cooperatively yield before looking at the next candidate.
         await asyncio.sleep(0)
-    if missing:
+    if missing and PREFETCH_REMOTE_ENABLED:
         keys = [f"{STRUCTURE_PREFIX}:{sym}:{tf}" for sym, tf in missing]
         raws = await _redis_mget(keys)
         if raws is None:
@@ -313,8 +314,11 @@ async def _prefetch(client):
                 if raw:
                     await _try_import(sym, tf, deep=False, raw=raw)
                 await asyncio.sleep(0)
-    # Risk feed is diagnostic only: skip it during Redis circuit recovery.
-    if time.monotonic() < _redis_pause_until:
+    else:
+        _stats["shared_cache_not_ready"] += len(missing)
+    # The independent recovery reader provides all four TFs in memory.
+    # Avoid duplicating its Redis MGET and starving live microstructure.
+    if not PREFETCH_REMOTE_ENABLED or time.monotonic() < _redis_pause_until:
         _stats["risk_candle_fresh"] = 0
         _stats["risk_candle_total"] = 0
         return
@@ -356,6 +360,8 @@ async def supervisor_loop():
                     f"workerCommitErrors={_stats['worker_commit_errors']} "
                     f"fastHits={_stats['fast_path_hits']} "
                     f"legacyCacheReuse={_stats['legacy_worker_reuse']} "
+                    f"sharedCacheNotReady={_stats['shared_cache_not_ready']} "
+                    f"remoteRead={'ON' if PREFETCH_REMOTE_ENABLED else 'OFF'} "
                     f"redisCircuitSkips={_stats['redis_circuit_skips']} "
                     f"fallbacks={_stats['legacy_fallbacks']} "
                     f"cacheMiss={_stats['cache_miss']} "
