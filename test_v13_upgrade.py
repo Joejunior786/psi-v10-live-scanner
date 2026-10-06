@@ -420,7 +420,9 @@ class V13Tests(unittest.TestCase):
                   "tp1": 11, "tp2": 12, "tp3": 13}
                  for i, sym in enumerate(names)]
         samples = [self.sample(sym, now=now) for sym in names]
-        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=names),
+            _board=lambda: board)
         ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
 
         first = ml.held_back_lane(now, record=True)
@@ -453,7 +455,9 @@ class V13Tests(unittest.TestCase):
                   "tp1": 11, "tp2": 12, "tp3": 13}
                  for i, sym in enumerate(names)]
         samples = [self.sample(sym, now=now) for sym in names]
-        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=names),
+            _board=lambda: board)
         ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
         recorded = ml.held_back_lane(now, record=True)
         self.assertEqual(ml._held_rotation_cycle, 1)
@@ -477,7 +481,9 @@ class V13Tests(unittest.TestCase):
                   "tp1": 11, "tp2": 12, "tp3": 13}
                  for i, sym in enumerate(names)]
         samples = [self.sample(sym, now=now) for sym in names[:4]]
-        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=names),
+            _board=lambda: board)
         ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
         first = ml.held_back_lane(now, record=True)
         for sample in samples:
@@ -509,7 +515,9 @@ class V13Tests(unittest.TestCase):
         peg = self.sample("BFUSDUSDT", now=now)
         peg["entry_reference"] = 1.0
         samples.append(peg)
-        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=names + ["BFUSDUSDT", "BADUSDT"]),
+            _board=lambda: board)
         ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
         first = ml.held_back_lane(now, record=True)
         self.assertNotIn("BFUSDUSDT", [r["symbol"] for r in first["rows"]])
