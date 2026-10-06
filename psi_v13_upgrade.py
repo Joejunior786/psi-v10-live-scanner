@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 
-REVISION = "13.1.1-independent-ml30-audited-board"
+REVISION = "13.1.2-independent-ml30-held-back"
 STATE_PATH = os.getenv("PSI_V13_STATE_PATH", "/data/psi_v13_model.json")
 OUTCOME_PATH = os.getenv("PSI_V13_OUTCOME_PATH", "/data/psi_v13_outcomes.jsonl")
 TRAIN_HORIZON_MS = 15 * 60_000
@@ -352,7 +352,8 @@ def _save():
     name = STATE_PATH + ".tmp"
     with open(name, "w", encoding="utf-8") as f:
         json.dump({"model": _model, "pending": _pending[-MAX_PENDING:],
-                   "stats": _stats, "rotation": _rotation}, f, separators=(",", ":"))
+                   "stats": _stats, "rotation": _rotation,
+                   "held_back": _held_back_state}, f, separators=(",", ":"))
     os.replace(name, STATE_PATH)
 
 
@@ -367,6 +368,8 @@ def _restore():
         _pending.extend(list(data.get("pending") or [])[-MAX_PENDING:])
         _stats.update(data.get("stats") or {})
         _rotation = int(data.get("rotation") or 0)
+        _held_back_state.clear()
+        _held_back_state.update(data.get("held_back") or {})
     except (OSError, ValueError, TypeError):
         pass
 
@@ -594,6 +597,183 @@ def coverage30_audit(report=None, at=None):
     }
 
 
+
+# Read-only seventh lane; never changes V12/ML execution authority.
+HELD_BACK_LIMIT = 5
+HELD_BACK_MIN_RR = 1.5
+HELD_BACK_HORIZON_MS = 24 * 60 * 60_000
+_held_back_state = {}
+
+
+def _held_price(sensor, at):
+    """Recent Binance-backed sensor observation; no stale-price substitution."""
+    if not isinstance(sensor, dict):
+        return None
+    age = at - num(sensor.get("generated_ms"))
+    trade_age = num(sensor.get("trade_age_ms"), 1e9)
+    price = num(sensor.get("entry_reference"))
+    if price > 0 and 0 <= age <= 15_000 and 0 <= trade_age <= 15_000:
+        return price
+    return None
+
+
+def _held_tracking(snapshot, sensors, at):
+    """24h observed target/stop touches, not guaranteed fills or exact P&L."""
+    for sym, event in list(_held_back_state.items()):
+        if event.get("outcome") != "PENDING":
+            continue
+        age = at - int(event.get("started_ms") or 0)
+        price = _held_price(sensors.get(sym), at)
+        if 0 < age <= HELD_BACK_HORIZON_MS and price is not None:
+            if price >= num(event.get("tp1")):
+                event["outcome"], event["resolved_ms"] = "OBSERVED_TP1_TOUCH", at
+            elif price <= num(event.get("stop")):
+                event["outcome"], event["resolved_ms"] = "OBSERVED_STOP_TOUCH", at
+        if age >= HELD_BACK_HORIZON_MS and event["outcome"] == "PENDING":
+            event["outcome"], event["resolved_ms"] = "EXPIRED_UNRESOLVED", at
+    for item in snapshot["rows"]:
+        if item["observed_price"] is None or item["reward_risk"] is None:
+            continue
+        sym = item["symbol"]
+        existing = _held_back_state.get(sym) or {}
+        if existing and at - int(existing.get("started_ms") or at) < HELD_BACK_HORIZON_MS:
+            continue
+        levels = item["research_only_levels"]
+        _held_back_state[sym] = {
+            "symbol": sym, "started_ms": at,
+            "observed_entry": item["observed_price"],
+            "stop": levels["stop"], "tp1": levels["tp1"],
+            "outcome": "PENDING", "resolved_ms": None,
+            "source": "OBSERVED_SPOT_SENSOR_ONLY",
+        }
+    if len(_held_back_state) > 300:
+        ordered = sorted(_held_back_state,
+                         key=lambda sym: int(_held_back_state[sym].get("started_ms") or 0))
+        for sym in ordered[:-300]:
+            del _held_back_state[sym]
+
+
+def held_back_lane(at=None, record=False):
+    """Five clearly labelled withheld setups plus separate risk rejections.
+
+    The original 30-coin/ML boards and strict execution checks are untouched.
+    """
+    at = ts() if at is None else at
+    if CORE is None:
+        return {"status": "UNAVAILABLE", "rows": [], "rejected": [],
+                "total_held": 0, "execution_ready": 0}
+    sensors = {_symbol(r): r for r in _rows()}
+    held, rejected = [], []
+    for structural in (CORE._board() or []):
+        if not isinstance(structural, dict):
+            continue
+        sym = _symbol(structural)
+        if not sym or structural.get("state") not in {"BUY", "ARMED"}:
+            continue
+        if structural.get("execution_state") == "BUY NOW" or structural.get("buy_now"):
+            continue
+        entry = (num(structural.get("pinpoint_trigger")) or
+                 num(structural.get("entry_low")) or num(structural.get("entry")))
+        stop = (num(structural.get("pinpoint_stop")) or
+                num(structural.get("invalidation")))
+        tp1, tp2, tp3 = (num(structural.get(k)) for k in ("tp1", "tp2", "tp3"))
+        valid_plan = bool(0 < stop < entry < tp1 < tp2 < tp3)
+        sensor = sensors.get(sym)
+        observed = _held_price(sensor, at)
+        verified = bool(sensor and fresh(sensor, at))
+        blockers = list(dict.fromkeys(str(b) for b in
+                      (structural.get("execution_blockers") or []) if str(b)))
+        distance_pct = ((entry / observed - 1) * 100
+                        if observed is not None and entry > 0 else None)
+        rr = ((tp1 - observed) / (observed - stop)
+              if valid_plan and observed is not None and stop < observed < tp1
+              else None)
+        risk_reason = None
+        if sym in {"XUSDUSDT", "USDCUSDT", "FDUSDUSDT", "DAIUSDT",
+                   "TUSDUSDT", "USDDUSDT", "USDEUSDT", "USD1USDT"}:
+            risk_reason = "PEGGED_ASSET"
+        elif not valid_plan:
+            risk_reason = "INVALID_OR_MISSING_REFERENCE_PLAN"
+        elif structural.get("anti_chase"):
+            risk_reason = "ANTI_CHASE"
+        elif observed is not None and observed <= stop:
+            risk_reason = "REFERENCE_STOP_INVALIDATED"
+        elif observed is not None and observed >= tp1:
+            risk_reason = "TP1_ALREADY_PASSED"
+        elif distance_pct is not None and abs(distance_pct) > 3:
+            risk_reason = "OUTSIDE_3_PERCENT_ENTRY_WINDOW"
+        elif rr is not None and rr < HELD_BACK_MIN_RR:
+            risk_reason = "REWARD_RISK_BELOW_1_5"
+        if risk_reason:
+            label = "REJECTED - RISK"
+        elif observed is None or not verified or any(
+                b.startswith(("LIVE_", "STALE_", "TRADE_SEQUENCE",
+                              "BOOK_SEQUENCE", "QUALIFIED_MICRO"))
+                for b in blockers):
+            label = "HELD - DATA"
+        else:
+            label = "HELD - CONFIRMATION"
+        item = {
+            "symbol": sym, "label": label, "status": "NOT_EXECUTABLE",
+            "structural_state": str(structural.get("state")),
+            "execution_state": str(structural.get("execution_state") or "NOT_APPROVED"),
+            "score": num(structural.get("setup_strength")),
+            "observed_price": observed, "observed_at_ms": at if observed is not None else None,
+            "sensor_fully_verified": verified,
+            "research_only_levels": {"entry": entry or None, "stop": stop or None,
+                                     "tp1": tp1 or None, "tp2": tp2 or None,
+                                     "tp3": tp3 or None},
+            "reference_distance_pct": round(distance_pct, 3) if distance_pct is not None else None,
+            "reward_risk": round(rr, 3) if rr is not None else None,
+            "tp1_distance_pct": (round((tp1 / observed - 1) * 100, 3)
+                                  if observed is not None and tp1 > 0 else None),
+            "rejection_reason": risk_reason, "missing_confirmations": blockers[:15],
+            "entry_verified": False, "trade_instruction": False,
+        }
+        rank = (int(structural.get("state") == "BUY"),
+                int(observed is not None), int(verified),
+                num(structural.get("setup_strength")), num(rr))
+        (rejected if risk_reason else held).append((rank, sym, item))
+    held.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    rejected.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    snapshot = {
+        "version": REVISION, "generated_ms": at,
+        "label": "HELD-BACK BUYS - NOT APPROVED",
+        "authority": "REPORTING_ONLY_NO_EXECUTION_AUTHORITY",
+        "total_held": len(held), "total_rejected": len(rejected),
+        "rows": [r[2] for r in held[:HELD_BACK_LIMIT]],
+        "rejected": [r[2] for r in rejected[:HELD_BACK_LIMIT]],
+        "execution_ready": 0, "entry_orders_allowed": False,
+        "held_min_reward_risk": HELD_BACK_MIN_RR,
+        "tracking_method": "OBSERVED_TP1_OR_STOP_TOUCH_24H_NOT_FILL_PROOF",
+    }
+    if record:
+        _held_tracking(snapshot, sensors, at)
+    snapshot["tracking"] = {
+        "total": len(_held_back_state),
+        "pending": sum(x.get("outcome") == "PENDING" for x in _held_back_state.values()),
+        "observed_tp1": sum(x.get("outcome") == "OBSERVED_TP1_TOUCH"
+                            for x in _held_back_state.values()),
+        "observed_stop": sum(x.get("outcome") == "OBSERVED_STOP_TOUCH"
+                             for x in _held_back_state.values()),
+        "expired_unresolved": sum(x.get("outcome") == "EXPIRED_UNRESOLVED"
+                                  for x in _held_back_state.values()),
+        "not_verified_pnl": True,
+    }
+    return snapshot
+
+
+def log_held_back_lane(at=None):
+    snapshot = held_back_lane(at=at, record=True)
+    print("PSI-V13 HELD_BACK_JSON " +
+          json.dumps(snapshot, separators=(",", ":"), allow_nan=False), flush=True)
+    print("PSI-V13 HELD_BACK_BOARD held=" + str(snapshot["total_held"]) +
+          " rejected=" + str(snapshot["total_rejected"]) +
+          " shown=" + str(len(snapshot["rows"])) +
+          " buyNow=0 reportingOnly=YES", flush=True)
+    return snapshot
+
+
 def log_coverage30_audit(report=None, at=None):
     """Single structured Railway line, all six categories and all 30 rows."""
     snapshot = coverage30_audit(report, at)
@@ -636,6 +816,7 @@ def _inject(response):
         "audit": coverage30_audit(report),
         "unqualified_are_not_buys": True,
     }
+    payload["v13_held_back"] = held_back_lane()
     payload["generated_ms"] = ts()
     return CORE.app.web.json_response(payload, status=response.status)
 
@@ -670,6 +851,7 @@ async def discovery_worker():
                       " rows=" + str(len(report)) +
                       " categories=6x5", flush=True)
                 log_coverage30_audit(report, at)
+                log_held_back_lane(at)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -709,4 +891,4 @@ def install(core, sensor, early, learner=None):
     core.app.health = _health
     _restore()
     print("PSI-V13 INSTALLED revision=" + REVISION +
-          " ml=INDEPENDENT coverage=30 workers=DISCOVERY+LEARNING orders=DISABLED", flush=True)
+          " ml=INDEPENDENT coverage=30 heldBack=REPORTING_ONLY workers=DISCOVERY+LEARNING orders=DISABLED", flush=True)

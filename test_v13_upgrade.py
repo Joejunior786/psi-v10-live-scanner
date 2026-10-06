@@ -16,6 +16,7 @@ class V13Tests(unittest.TestCase):
         self.pending = list(ml._pending)
         self.learner = ml.LEARNER
         self.stats = dict(ml._stats)
+        self.held = {k: dict(v) for k, v in ml._held_back_state.items()}
 
     def tearDown(self):
         ml._model.clear()
@@ -26,6 +27,8 @@ class V13Tests(unittest.TestCase):
         ml.LEARNER = self.learner
         ml._stats.clear()
         ml._stats.update(self.stats)
+        ml._held_back_state.clear()
+        ml._held_back_state.update(self.held)
 
     def sample(self, sym, now=1_000_000, fresh=True):
         return {
@@ -204,6 +207,68 @@ class V13Tests(unittest.TestCase):
         stale_ml = [r for r in stale["rows"] if r["category"] == "ml"]
         self.assertTrue(all(not r["entry_verified"] for r in stale_ml))
         self.assertTrue(all(r["entry"] is None for r in stale_ml))
+
+
+
+    def test_held_back_lane_is_read_only_and_rejects_invalidated_stop(self):
+        now = 1_000_000
+        good = self.sample("GOODUSDT", now=now)
+        bad = self.sample("BADUSDT", now=now)
+        bad["entry_reference"] = 9.0
+        board = [
+            {"symbol": "GOODUSDT", "state": "BUY", "setup_strength": 98,
+             "execution_state": "COLLECTING DATA",
+             "execution_blockers": ["LIVE_MICRO_DATA", "PINPOINT_TRIGGERED"],
+             "entry_low": 10.0, "invalidation": 9.5,
+             "tp1": 11.0, "tp2": 12.0, "tp3": 13.0},
+            {"symbol": "BADUSDT", "state": "BUY", "setup_strength": 97,
+             "execution_state": "COLLECTING DATA",
+             "execution_blockers": ["LIVE_MICRO_DATA"],
+             "entry_low": 10.0, "invalidation": 9.5,
+             "tp1": 11.0, "tp2": 12.0, "tp3": 13.0},
+            {"symbol": "APPROVEDUSDT", "state": "BUY", "setup_strength": 99,
+             "execution_state": "BUY NOW", "buy_now": True,
+             "entry_low": 10, "invalidation": 9.5,
+             "tp1": 11, "tp2": 12, "tp3": 13},
+        ]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=["GOODUSDT", "BADUSDT", "APPROVEDUSDT"]),
+            _board=lambda: board,
+        )
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=[good, bad])
+        result = ml.held_back_lane(now)
+        self.assertEqual(result["total_held"], 1)
+        self.assertEqual(result["total_rejected"], 1)
+        self.assertEqual(result["rows"][0]["symbol"], "GOODUSDT")
+        self.assertEqual(result["rows"][0]["label"], "HELD - DATA")
+        self.assertEqual(result["rows"][0]["reward_risk"], 2.0)
+        self.assertFalse(result["rows"][0]["entry_verified"])
+        self.assertEqual(result["rejected"][0]["rejection_reason"],
+                         "REFERENCE_STOP_INVALIDATED")
+        self.assertEqual(result["execution_ready"], 0)
+        self.assertEqual(board[0]["execution_state"], "COLLECTING DATA")
+
+    def test_held_back_outcomes_are_only_observed_touches(self):
+        now = 1_000_000
+        sample = self.sample("GOODUSDT", now=now)
+        board = [{"symbol": "GOODUSDT", "state": "BUY",
+                  "execution_state": "COLLECTING DATA",
+                  "entry_low": 10.0, "invalidation": 9.5,
+                  "tp1": 11.0, "tp2": 12.0, "tp3": 13.0,
+                  "execution_blockers": ["LIVE_MICRO_DATA"]}]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=["GOODUSDT"]),
+            _board=lambda: board,
+        )
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=[sample])
+        ml.held_back_lane(now, record=True)
+        self.assertEqual(ml._held_back_state["GOODUSDT"]["outcome"], "PENDING")
+        sample["generated_ms"] = now + 1000
+        sample["entry_reference"] = 11.1
+        ml.held_back_lane(now + 1000, record=True)
+        self.assertEqual(ml._held_back_state["GOODUSDT"]["outcome"],
+                         "OBSERVED_TP1_TOUCH")
+        self.assertEqual(board[0]["execution_state"], "COLLECTING DATA")
 
 
 if __name__ == "__main__":
