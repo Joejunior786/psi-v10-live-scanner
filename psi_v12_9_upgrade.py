@@ -22,10 +22,12 @@ _client = None
 _stats = defaultdict(int)
 _seen = {}
 _last_report = 0.0
+_prefetch_cursor = 0
 
 STRUCTURE_PREFIX = os.getenv("PSI_STRUCTURE_REDIS_PREFIX", "psi:v12:structure").strip()
 RISK_PREFIX = os.getenv("PSI_RISK_REDIS_PREFIX", "psi:v12:risk-candle").strip()
 HOT_COUNT = max(8, min(int(os.getenv("PSI_V129_HOT_COUNT", "32")), 60))
+PREFETCH_BATCH = max(2, min(int(os.getenv("PSI_V129_PREFETCH_BATCH", "8")), 16))
 PREFETCH_SECONDS = max(2.0, float(os.getenv("PSI_V129_PREFETCH_SECONDS", "5")))
 DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V129_DIAG_SECONDS", "20")))
 READ_TIMEOUT = max(0.1, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "0.65")), 1.5))
@@ -199,18 +201,25 @@ async def _worker_first_fetch(symbol, timeframe, deep=False):
 
 
 async def _prefetch(client):
+    global _prefetch_cursor
     symbols = _hot_symbols()
     _stats["hot_count"] = len(symbols)
     if not symbols:
         return
-    mapping = [(sym, tf) for sym in symbols for tf in ("1h", "4h", "1d", "1w")]
+    all_mapping = [(sym, tf) for sym in symbols for tf in ("1h", "4h", "1d", "1w")]
+    cursor = _prefetch_cursor % len(all_mapping)
+    mapping = (all_mapping[cursor:] + all_mapping[:cursor])[:PREFETCH_BATCH]
+    _prefetch_cursor = (cursor + len(mapping)) % len(all_mapping)
     keys = [f"{STRUCTURE_PREFIX}:{sym}:{tf}" for sym, tf in mapping]
     raws = await asyncio.wait_for(client.mget(keys), timeout=max(1.0, READ_TIMEOUT * 2.0))
     for (sym, tf), raw in zip(mapping, raws):
         if raw:
             await _try_import(sym, tf, deep=False, raw=raw)
-    # Diagnose worker->RiskMap handoff. Do not manufacture risk plans or permit BUY.
-    risk_map = [(sym, tf) for sym in symbols for tf in ("1m", "5m", "15m")]
+        # Never monopolise the central scanner's event loop.
+        await asyncio.sleep(0)
+    # Diagnose worker->RiskMap handoff for just this small batch.
+    touched = list(dict.fromkeys(sym for sym, _ in mapping))
+    risk_map = [(sym, tf) for sym in touched for tf in ("1m", "5m", "15m")]
     risk_keys = [f"{RISK_PREFIX}:{sym}:{tf}" for sym, tf in risk_map]
     raw_risk = await asyncio.wait_for(client.mget(risk_keys), timeout=max(1.0, READ_TIMEOUT * 2.0))
     fresh = 0
