@@ -12,13 +12,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 import redis as redis_sync
 
-REVISION = "12.9.4-unified-worker-cache-hydration"
+REVISION = "12.9.5-direct-recovery-commit"
 ROLE = "WORKER_FIRST_STRUCTURE+HOT_PREFETCH+HANDOFF_DIAGNOSTICS"
 STRICT_BUY_AUTHORITY_UNCHANGED = True
 
 CORE = None
 V128 = None
 _original_fetch = None
+_original_legacy_prefetch = None
+_hook_last_report = 0.0
 _client = None
 _redis_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="psi-v129-redis")
 _stats = defaultdict(int)
@@ -36,6 +38,8 @@ DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V129_DIAG_SECONDS", "20")))
 READ_TIMEOUT = max(2.0, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "4.0")), 8.0))
 REDIS_BACKOFF_S = max(10.0, float(os.getenv("PSI_V129_REDIS_BACKOFF_S", "45")))
 PREFETCH_REMOTE_ENABLED = os.getenv("PSI_V129_DUPLICATE_REDIS_FETCH", "0").strip().lower() in {"1", "true", "yes"}
+HOOK_SYMBOL_LIMIT = max(2, min(int(os.getenv("PSI_V129_HOOK_SYMBOL_LIMIT", "4")), 8))
+HOOK_TIME_BUDGET_S = max(0.02, min(float(os.getenv("PSI_V129_HOOK_TIME_BUDGET_S", "0.08")), 0.20))
 STRUCTURE_AGE_MS = max(30000, int(os.getenv("PSI_V129_STRUCTURE_AGE_MS", "120000")))
 WEEKLY_AGE_MS = max(120000, int(os.getenv("PSI_V129_WEEKLY_AGE_MS", "1200000")))
 RISK_AGE_MS = max(15000, int(os.getenv("PSI_V129_RISK_AGE_MS", "90000")))
@@ -168,6 +172,69 @@ def _legacy_worker_payload(symbol, timeframe):
     if _valid_payload(packet, symbol, timeframe, deep=False) is None:
         return None
     return packet
+
+
+def _commit_recovery_packet(symbol, timeframe, packet):
+    """Synchronous, bounded bridge from verified recovery data to V12 structure.
+
+    No Redis I/O and no execution decision here: only official candle snapshots.
+    """
+    if CORE is None:
+        return False
+    rows = _valid_payload(packet, symbol, timeframe, deep=False)
+    if rows is None:
+        _stats["hook_stale_or_invalid"] += 1
+        return False
+    stamp = int(packet["fetched_ms"])
+    key = (symbol, timeframe)
+    if stamp <= _seen.get(key, 0):
+        return False
+    try:
+        requested = max(len(rows), min(int(packet.get("requested_limit") or len(rows)), 1500))
+        committed = CORE._commit_authoritative_rows(
+            symbol, timeframe, rows, requested, source="WORKER_RECOVERY_DIRECT_V129"
+        )
+        if committed:
+            _seen[key] = stamp
+            _stats["hook_commits"] += 1
+        return bool(committed)
+    except Exception as exc:
+        _stats["hook_commit_errors"] += 1
+        _stats["hook_last_error"] = f"{type(exc).__name__}:{str(exc)[:110]}"
+        return False
+
+
+def _legacy_prefetch_wrapper(symbols):
+    global _hook_last_report
+    result = _original_legacy_prefetch(symbols)
+    if not result or CORE is None:
+        return result
+    started = time.monotonic()
+    count = 0
+    for sym in list(symbols or [])[:HOOK_SYMBOL_LIMIT]:
+        sym = str(sym or "").upper()
+        for tf in ("1h", "4h", "1d", "1w"):
+            packet = _legacy_worker_payload(sym, tf)
+            if packet is not None:
+                count += int(_commit_recovery_packet(sym, tf, packet))
+        if time.monotonic() - started >= HOOK_TIME_BUDGET_S:
+            _stats["hook_budget_cutoff"] += 1
+            break
+    _stats["hook_batches"] += 1
+    _stats["hook_last_ms"] = round((time.monotonic() - started) * 1000, 1)
+    if time.monotonic() - _hook_last_report >= DIAG_SECONDS:
+        _hook_last_report = time.monotonic()
+        print(
+            "PSI-V12.9 RECOVERY_BRIDGE "
+            f"batchImported={count} totalImported={_stats['hook_commits']} "
+            f"batchMs={_stats['hook_last_ms']} "
+            f"budgetCutoffs={_stats['hook_budget_cutoff']} "
+            f"invalidOrStale={_stats['hook_stale_or_invalid']} "
+            f"commitErrors={_stats['hook_commit_errors']} "
+            "strictBuyAuthority=UNCHANGED",
+            flush=True,
+        )
+    return result
 
 
 async def _redis_get(key):
@@ -392,10 +459,25 @@ async def supervisor_loop():
 
 
 def install(core, v128=None):
-    global CORE, V128, _original_fetch
+    global CORE, V128, _original_fetch, _original_legacy_prefetch
     if CORE is not None:
         raise RuntimeError("V12.9 already installed")
     CORE, V128 = core, v128
     _original_fetch = core._fetch_tf
     core._fetch_tf = _worker_first_fetch
-    print(f"PSI-V12.9 INSTALLED revision={REVISION} strictBuyAuthority=UNCHANGED", flush=True)
+    # Attach directly to the established structure recovery cache-fill path,
+    # eliminating a second scheduler and duplicate Redis trips for hot symbols.
+    legacy = getattr(core, "legacy", None)
+    existing = getattr(legacy, "_prefetch_structure_worker_symbols", None)
+    if callable(existing):
+        _original_legacy_prefetch = existing
+        legacy._prefetch_structure_worker_symbols = _legacy_prefetch_wrapper
+        _stats["recovery_hook_installed"] = 1
+    else:
+        _stats["recovery_hook_installed"] = 0
+    print(
+        f"PSI-V12.9 INSTALLED revision={REVISION} "
+        f"recoveryHook={_stats['recovery_hook_installed']} "
+        "strictBuyAuthority=UNCHANGED",
+        flush=True,
+    )
