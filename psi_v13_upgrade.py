@@ -832,6 +832,22 @@ def _held_tracking(snapshot, sensors, at):
             del _held_back_state[sym]
 
 
+
+def _held_evidence_trend(current, previous):
+    """Compare observed evidence; do not infer missing confirmations."""
+    if not previous:
+        return "NEW"
+    if previous.get("verified") and not current["verified"]:
+        return "DETERIORATING"
+    if previous.get("priced") and not current["priced"]:
+        return "DETERIORATING"
+    if (current["verified"] and not previous.get("verified") or
+            current["priced"] and not previous.get("priced")):
+        return "IMPROVING"
+    delta = int(previous.get("blockers_count") or 0) - current["blockers_count"]
+    return "IMPROVING" if delta >= 2 else "DETERIORATING" if delta <= -2 else "UNCHANGED"
+
+
 def held_back_lane(at=None, record=False):
     """Five clearly labelled withheld setups plus separate risk rejections.
 
@@ -841,8 +857,10 @@ def held_back_lane(at=None, record=False):
     if CORE is None:
         return {"status": "UNAVAILABLE", "rows": [], "rejected": [],
                 "total_held": 0, "execution_ready": 0}
+    global _held_last_symbols
     sensors = {_symbol(r): r for r in _rows()}
     held, rejected = [], []
+    observations = {}
     for structural in (CORE._board() or []):
         if not isinstance(structural, dict):
             continue
@@ -892,8 +910,18 @@ def held_back_lane(at=None, record=False):
             label = "HELD - DATA"
         else:
             label = "HELD - CONFIRMATION"
+        evidence = {"priced": observed is not None, "verified": verified,
+                    "blockers_count": len(blockers)}
+        previous = _held_progress.get(sym)
+        trend = _held_evidence_trend(evidence, previous)
+        new_display = sym not in _held_last_symbols
+        observations[sym] = evidence
         item = {
             "symbol": sym, "label": label, "status": "NOT_EXECUTABLE",
+            "display_status": "NEW TO TOP 5" if new_display else "CONTINUING",
+            "evidence_progress": trend,
+            "repeat_reason": (None if new_display else
+                              "RETAINS_STRUCTURAL_SETUP_AWAITING_LIVE_CONFIRMATION"),
             "structural_state": str(structural.get("state")),
             "execution_state": str(structural.get("execution_state") or "NOT_APPROVED"),
             "score": num(structural.get("setup_strength")),
@@ -909,8 +937,9 @@ def held_back_lane(at=None, record=False):
             "rejection_reason": risk_reason, "missing_confirmations": blockers[:15],
             "entry_verified": False, "trade_instruction": False,
         }
-        rank = (int(structural.get("state") == "BUY"),
-                int(observed is not None), int(verified),
+        rank = (int(rr is not None), int(new_display),
+                int(trend == "IMPROVING"), int(verified),
+                int(structural.get("state") == "BUY"),
                 num(structural.get("setup_strength")), num(rr))
         (rejected if risk_reason else held).append((rank, sym, item))
     held.sort(key=lambda x: (x[0], x[1]), reverse=True)
@@ -922,12 +951,24 @@ def held_back_lane(at=None, record=False):
         "total_held": len(held), "total_rejected": len(rejected),
         "rows": [r[2] for r in held[:HELD_BACK_LIMIT]],
         "rejected": [r[2] for r in rejected[:HELD_BACK_LIMIT]],
+        "new_top_five": sum(r[2]["display_status"] == "NEW TO TOP 5"
+                            for r in held[:HELD_BACK_LIMIT]),
+        "continuing_top_five": sum(r[2]["display_status"] == "CONTINUING"
+                                   for r in held[:HELD_BACK_LIMIT]),
         "execution_ready": 0, "entry_orders_allowed": False,
         "held_min_reward_risk": HELD_BACK_MIN_RR,
         "tracking_method": "OBSERVED_TP1_OR_STOP_TOUCH_24H_NOT_FILL_PROOF",
     }
     if record:
         _held_tracking(snapshot, sensors, at)
+        _held_last_symbols = [r["symbol"] for r in snapshot["rows"]]
+        for symbol, ev in observations.items():
+            _held_progress[symbol] = dict(ev, last_seen_ms=at)
+        if len(_held_progress) > 1200:
+            oldest = sorted(_held_progress,
+                            key=lambda k: int(_held_progress[k].get("last_seen_ms") or 0))
+            for symbol in oldest[:-1200]:
+                _held_progress.pop(symbol, None)
     snapshot["tracking"] = {
         "total": len(_held_back_state),
         "pending": sum(x.get("outcome") == "PENDING" for x in _held_back_state.values()),
@@ -949,6 +990,8 @@ def log_held_back_lane(at=None):
     print("PSI-V13 HELD_BACK_BOARD held=" + str(snapshot["total_held"]) +
           " rejected=" + str(snapshot["total_rejected"]) +
           " shown=" + str(len(snapshot["rows"])) +
+          " newTop=" + str(snapshot["new_top_five"]) +
+          " continuing=" + str(snapshot["continuing_top_five"]) +
           " buyNow=0 reportingOnly=YES", flush=True)
     return snapshot
 
