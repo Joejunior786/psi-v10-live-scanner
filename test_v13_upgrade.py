@@ -23,6 +23,12 @@ class V13Tests(unittest.TestCase):
         self.coverage_cycle = ml._coverage_cycle
         self.held_progress = {k: dict(v) for k, v in ml._held_progress.items()}
         self.held_last = list(ml._held_last_symbols)
+        self.held_rotation_seen = dict(ml._held_rotation_seen)
+        self.held_rotation_cycle = ml._held_rotation_cycle
+        self.held_snapshot = ml._held_last_snapshot
+        ml._held_rotation_seen.clear()
+        ml._held_rotation_cycle = 0
+        ml._held_last_snapshot = None
         ml._coverage_history.clear()
         ml._coverage_last.clear()
         ml._coverage_last_ms = 0
@@ -49,6 +55,10 @@ class V13Tests(unittest.TestCase):
         ml._held_progress.clear()
         ml._held_progress.update(self.held_progress)
         ml._held_last_symbols = self.held_last
+        ml._held_rotation_seen.clear()
+        ml._held_rotation_seen.update(self.held_rotation_seen)
+        ml._held_rotation_cycle = self.held_rotation_cycle
+        ml._held_last_snapshot = self.held_snapshot
 
     def sample(self, sym, now=1_000_000, fresh=True):
         return {
@@ -397,6 +407,114 @@ class V13Tests(unittest.TestCase):
         second = ml.thirty(now + 40_000, record=True)
         report = next(x for x in second if x["symbol"] == strong)
         self.assertEqual(report["rotation_progress"], "DETERIORATING")
+
+
+
+    def test_held_back_rotates_all_five_when_ten_priced_candidates_exist(self):
+        now = 2_000_000
+        names = [f"HB{i:02d}USDT" for i in range(12)]
+        board = [{"symbol": sym, "state": "BUY", "setup_strength": 100-i,
+                  "execution_state": "COLLECTING DATA",
+                  "execution_blockers": ["LIVE_MICRO_DATA"],
+                  "entry_low": 10, "invalidation": 9.5,
+                  "tp1": 11, "tp2": 12, "tp3": 13}
+                 for i, sym in enumerate(names)]
+        samples = [self.sample(sym, now=now) for sym in names]
+        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+
+        first = ml.held_back_lane(now, record=True)
+        self.assertEqual(len(first["rows"]), 5)
+        self.assertEqual(first["eligible_priced_pool"], 12)
+        self.assertEqual(first["rotated_from_previous"], 5)
+        old = {r["symbol"] for r in first["rows"]}
+        self.assertTrue(all(r["rotation_status"] == "ROTATED_IN"
+                            for r in first["rows"]))
+        for sample in samples:
+            sample["generated_ms"] = now + 20_000
+        second = ml.held_back_lane(now + 20_000, record=True)
+        fresh = {r["symbol"] for r in second["rows"]}
+        self.assertEqual(len(second["rows"]), 5)
+        self.assertFalse(old & fresh)
+        self.assertEqual(second["rotated_from_previous"], 5)
+        self.assertEqual(second["continuing_limited_pool"], 0)
+        self.assertEqual(second["rotation_cycle"], 2)
+        self.assertEqual(second["execution_ready"], 0)
+        self.assertTrue(all(not r["entry_verified"] for r in second["rows"]))
+        self.assertTrue(all(r["label"] == "HELD - DATA" for r in second["rows"]))
+
+    def test_held_back_read_only_endpoint_does_not_consume_rotation(self):
+        now = 2_000_000
+        names = [f"HB{i:02d}USDT" for i in range(10)]
+        board = [{"symbol": sym, "state": "ARMED", "setup_strength": 100-i,
+                  "execution_state": "COLLECTING DATA",
+                  "execution_blockers": ["LIVE_MICRO_DATA"],
+                  "entry_low": 10, "invalidation": 9.5,
+                  "tp1": 11, "tp2": 12, "tp3": 13}
+                 for i, sym in enumerate(names)]
+        samples = [self.sample(sym, now=now) for sym in names]
+        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        recorded = ml.held_back_lane(now, record=True)
+        self.assertEqual(ml._held_rotation_cycle, 1)
+        repeated_read = ml.held_back_lane(now + 1000, record=False)
+        self.assertEqual(recorded["rows"], repeated_read["rows"])
+        self.assertEqual(ml._held_rotation_cycle, 1)
+        for sample in samples:
+            sample["generated_ms"] = now + 20_000
+        next_scan = ml.held_back_lane(now + 20_000, record=True)
+        self.assertEqual(ml._held_rotation_cycle, 2)
+        self.assertFalse({r["symbol"] for r in recorded["rows"]} &
+                         {r["symbol"] for r in next_scan["rows"]})
+
+    def test_held_back_repeats_only_when_priced_alternatives_insufficient(self):
+        now = 2_000_000
+        names = [f"HB{i:02d}USDT" for i in range(9)]
+        board = [{"symbol": sym, "state": "BUY", "setup_strength": 100-i,
+                  "execution_state": "COLLECTING DATA",
+                  "execution_blockers": ["LIVE_MICRO_DATA"],
+                  "entry_low": 10, "invalidation": 9.5,
+                  "tp1": 11, "tp2": 12, "tp3": 13}
+                 for i, sym in enumerate(names)]
+        samples = [self.sample(sym, now=now) for sym in names[:4]]
+        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        first = ml.held_back_lane(now, record=True)
+        for sample in samples:
+            sample["generated_ms"] = now + 20_000
+        second = ml.held_back_lane(now + 20_000, record=True)
+        self.assertEqual(second["eligible_priced_pool"], 4)
+        self.assertEqual(len(second["rows"]), 5)
+        self.assertEqual(second["continuing_limited_pool"], 4)
+        self.assertTrue(all(r["rotation_status"] == "CONTINUING_LIMITED_POOL"
+                            for r in second["rows"][:4]))
+        self.assertIsNone(second["rows"][-1]["observed_price"])
+        self.assertEqual(second["execution_ready"], 0)
+
+    def test_held_back_filters_pegged_and_invalidated_stop_during_rotation(self):
+        now = 2_000_000
+        names = [f"HB{i:02d}USDT" for i in range(8)]
+        board = [{"symbol": sym, "state": "BUY", "setup_strength": 100-i,
+                  "execution_state": "COLLECTING DATA",
+                  "entry_low": 10, "invalidation": 9.5,
+                  "tp1": 11, "tp2": 12, "tp3": 13}
+                 for i, sym in enumerate(names)]
+        board.extend([
+            {"symbol": "BFUSDUSDT", "state": "BUY", "entry_low": 1,
+             "invalidation": .99, "tp1": 1.01, "tp2": 1.02, "tp3": 1.03},
+            {"symbol": "BADUSDT", "state": "BUY", "entry_low": 10,
+             "invalidation": 10.5, "tp1": 11, "tp2": 12, "tp3": 13},
+        ])
+        samples = [self.sample(sym, now=now) for sym in names]
+        peg = self.sample("BFUSDUSDT", now=now)
+        peg["entry_reference"] = 1.0
+        samples.append(peg)
+        ml.CORE = types.SimpleNamespace(_board=lambda: board)
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=samples)
+        first = ml.held_back_lane(now, record=True)
+        self.assertNotIn("BFUSDUSDT", [r["symbol"] for r in first["rows"]])
+        self.assertNotIn("BADUSDT", [r["symbol"] for r in first["rows"]])
+        self.assertEqual(first["execution_ready"], 0)
 
 
 if __name__ == "__main__":
