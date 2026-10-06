@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import redis as redis_sync
 
-REVISION = "12.9.2-threaded-redis-handoff"
+REVISION = "12.9.3-shared-worker-cache-bridge"
 ROLE = "WORKER_FIRST_STRUCTURE+HOT_PREFETCH+HANDOFF_DIAGNOSTICS"
 STRICT_BUY_AUTHORITY_UNCHANGED = True
 
@@ -25,6 +25,7 @@ _stats = defaultdict(int)
 _seen = {}
 _last_report = 0.0
 _prefetch_cursor = 0
+_redis_pause_until = 0.0
 
 STRUCTURE_PREFIX = os.getenv("PSI_STRUCTURE_REDIS_PREFIX", "psi:v12:structure").strip()
 RISK_PREFIX = os.getenv("PSI_RISK_REDIS_PREFIX", "psi:v12:risk-candle").strip()
@@ -33,6 +34,7 @@ PREFETCH_BATCH = max(2, min(int(os.getenv("PSI_V129_PREFETCH_BATCH", "8")), 16))
 PREFETCH_SECONDS = max(2.0, float(os.getenv("PSI_V129_PREFETCH_SECONDS", "5")))
 DIAG_SECONDS = max(10.0, float(os.getenv("PSI_V129_DIAG_SECONDS", "20")))
 READ_TIMEOUT = max(2.0, min(float(os.getenv("PSI_V129_READ_TIMEOUT", "4.0")), 8.0))
+REDIS_BACKOFF_S = max(10.0, float(os.getenv("PSI_V129_REDIS_BACKOFF_S", "45")))
 STRUCTURE_AGE_MS = max(30000, int(os.getenv("PSI_V129_STRUCTURE_AGE_MS", "120000")))
 WEEKLY_AGE_MS = max(120000, int(os.getenv("PSI_V129_WEEKLY_AGE_MS", "1200000")))
 RISK_AGE_MS = max(15000, int(os.getenv("PSI_V129_RISK_AGE_MS", "90000")))
@@ -142,11 +144,35 @@ def _get_client():
 
 
 def _redis_failure(label, exc):
+    global _redis_pause_until
     _stats["redis_errors"] += 1
     _stats["last_redis_error"] = f"{label}:{type(exc).__name__}:{str(exc)[:110]}"
+    _redis_pause_until = max(_redis_pause_until, time.monotonic() + REDIS_BACKOFF_S)
+
+
+def _legacy_worker_payload(symbol, timeframe):
+    """Reuse the verified packets already read by the independent structure recovery.
+
+    This is the same Redis-worker source, without a second network round trip.
+    It never accepts an outdated or mismatched packet.
+    """
+    if CORE is None or timeframe not in {"1h", "4h"}:
+        return None
+    legacy = getattr(CORE, "legacy", None)
+    cache = getattr(legacy, "_structure_worker_symbol_cache", None)
+    if not isinstance(cache, dict):
+        return None
+    bundle = cache.get(str(symbol).upper())
+    packet = bundle.get(timeframe) if isinstance(bundle, dict) else None
+    if _valid_payload(packet, symbol, timeframe, deep=True) is None:
+        return None
+    return packet
 
 
 async def _redis_get(key):
+    if time.monotonic() < _redis_pause_until:
+        _stats["redis_circuit_skips"] += 1
+        return None
     client = _get_client()
     if client is None:
         _stats["redis_not_configured"] += 1
@@ -165,6 +191,9 @@ async def _redis_get(key):
 
 
 async def _redis_mget(keys):
+    if time.monotonic() < _redis_pause_until:
+        _stats["redis_circuit_skips"] += 1
+        return None
     client = _get_client()
     if client is None:
         _stats["redis_not_configured"] += 1
@@ -193,6 +222,10 @@ async def _try_import(symbol, timeframe, deep=False, raw=None):
     timeframe = str(timeframe or "")
     if timeframe not in ("1h", "4h", "1d", "1w"):
         return False
+    if raw is None:
+        raw = _legacy_worker_payload(symbol, timeframe)
+        if raw is not None:
+            _stats["legacy_worker_reuse"] += 1
     if raw is None:
         raw = await _redis_get(f"{STRUCTURE_PREFIX}:{symbol}:{timeframe}")
     if not raw:
@@ -260,17 +293,31 @@ async def _prefetch(client):
     cursor = _prefetch_cursor % len(all_mapping)
     mapping = (all_mapping[cursor:] + all_mapping[:cursor])[:PREFETCH_BATCH]
     _prefetch_cursor = (cursor + len(mapping)) % len(all_mapping)
-    keys = [f"{STRUCTURE_PREFIX}:{sym}:{tf}" for sym, tf in mapping]
-    raws = await _redis_mget(keys)
-    if raws is None:
-        _stats["prefetch_structure_fail"] += 1
-        return
-    for (sym, tf), raw in zip(mapping, raws):
-        if raw:
-            await _try_import(sym, tf, deep=False, raw=raw)
-        # Never monopolise the central scanner's event loop.
+    missing = []
+    for sym, tf in mapping:
+        packet = _legacy_worker_payload(sym, tf)
+        if packet is not None:
+            _stats["legacy_worker_reuse"] += 1
+            await _try_import(sym, tf, deep=False, raw=packet)
+        else:
+            missing.append((sym, tf))
+        # Cooperatively yield before looking at the next candidate.
         await asyncio.sleep(0)
-    # Diagnose worker->RiskMap handoff for just this small batch.
+    if missing:
+        keys = [f"{STRUCTURE_PREFIX}:{sym}:{tf}" for sym, tf in missing]
+        raws = await _redis_mget(keys)
+        if raws is None:
+            _stats["prefetch_structure_fail"] += 1
+        else:
+            for (sym, tf), raw in zip(missing, raws):
+                if raw:
+                    await _try_import(sym, tf, deep=False, raw=raw)
+                await asyncio.sleep(0)
+    # Risk feed is diagnostic only: skip it during Redis circuit recovery.
+    if time.monotonic() < _redis_pause_until:
+        _stats["risk_candle_fresh"] = 0
+        _stats["risk_candle_total"] = 0
+        return
     touched = list(dict.fromkeys(sym for sym, _ in mapping))
     risk_map = [(sym, tf) for sym in touched for tf in ("1m", "5m", "15m")]
     risk_keys = [f"{RISK_PREFIX}:{sym}:{tf}" for sym, tf in risk_map]
@@ -308,6 +355,8 @@ async def supervisor_loop():
                     f"workerCommits={_stats['worker_commits']} "
                     f"workerCommitErrors={_stats['worker_commit_errors']} "
                     f"fastHits={_stats['fast_path_hits']} "
+                    f"legacyCacheReuse={_stats['legacy_worker_reuse']} "
+                    f"redisCircuitSkips={_stats['redis_circuit_skips']} "
                     f"fallbacks={_stats['legacy_fallbacks']} "
                     f"cacheMiss={_stats['cache_miss']} "
                     f"invalidOrStale={_stats['invalid_or_stale']} "
