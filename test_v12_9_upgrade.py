@@ -50,8 +50,10 @@ class PayloadValidationTests(unittest.TestCase):
 
 class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.old = (fast.CORE, fast._client, fast._original_fetch, dict(fast._seen), fast._redis_pause_until)
+        self.old = (fast.CORE, fast._client, fast._original_fetch, dict(fast._seen), fast._redis_pause_until, fast.PREFETCH_REMOTE_ENABLED)
         fast._redis_pause_until = 0.0
+        # Explicitly enable the legacy remote-fallback path in older tests.
+        fast.PREFETCH_REMOTE_ENABLED = True
         self.core = SimpleNamespace(
             REDIS_URL="redis://dummy",
             DEEP_MIN_ROWS=202,
@@ -65,7 +67,7 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         fast._client = SimpleNamespace(get=Mock(return_value=json.dumps(payload())))
 
     async def asyncTearDown(self):
-        fast.CORE, fast._client, fast._original_fetch, old_seen, fast._redis_pause_until = self.old
+        fast.CORE, fast._client, fast._original_fetch, old_seen, fast._redis_pause_until, fast.PREFETCH_REMOTE_ENABLED = self.old
         fast._seen.clear()
         fast._seen.update(old_seen)
 
@@ -146,6 +148,30 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await fast._redis_mget(["any"]))
         self.assertTrue(await fast._worker_first_fetch("TESTUSDT", "4h", deep=True))
         fast._client.get.assert_not_called()
+
+    async def test_all_four_worker_timeframes_reused_without_remote_requests(self):
+        fast.PREFETCH_REMOTE_ENABLED = False
+        self.core.legacy = SimpleNamespace(_structure_worker_symbol_cache={
+            "TESTUSDT": {tf: payload(timeframe=tf) for tf in ("1h", "4h", "1d", "1w")}
+        })
+        fast._client.get.side_effect = AssertionError("Duplicate Redis read")
+        for tf in ("1h", "4h", "1d", "1w"):
+            self.assertTrue(await fast._worker_first_fetch("TESTUSDT", tf, deep=True))
+        self.assertEqual(set(self.core._cache["TESTUSDT"].keys()), {"1h", "4h", "1d", "1w"})
+        fast._client.get.assert_not_called()
+
+    async def test_production_prefetch_never_reissues_recovery_redis_reads(self):
+        from unittest.mock import patch
+        fast.PREFETCH_REMOTE_ENABLED = False
+        self.core.legacy = SimpleNamespace(_structure_worker_symbol_cache={
+            "TESTUSDT": {tf: payload(timeframe=tf) for tf in ("1h", "4h", "1d", "1w")}
+        })
+        redis_client = SimpleNamespace(mget=Mock(side_effect=AssertionError("No duplicate MGET")))
+        fast._client = redis_client
+        with patch.object(fast, "_hot_symbols", return_value=["TESTUSDT"]):
+            await fast._prefetch(redis_client)
+        self.assertEqual(len(self.core._cache["TESTUSDT"]), 4)
+        redis_client.mget.assert_not_called()
 
     async def test_prefetch_caps_per_cycle_work_and_yields(self):
         from unittest.mock import patch
