@@ -126,7 +126,7 @@ class WorkerFastPathTests(unittest.IsolatedAsyncioTestCase):
              patch.object(fast, "_try_import", new_callable=AsyncMock) as importer:
             await fast._prefetch(redis_client)
             self.assertLessEqual(importer.await_count, fast.PREFETCH_BATCH)
-            self.assertEqual(redis_client.mget.await_count, 2)
+            self.assertEqual(redis_client.mget.call_count, 2)
 
 
 if __name__ == "__main__":
