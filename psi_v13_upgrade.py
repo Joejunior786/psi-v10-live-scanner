@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 
-REVISION = "13.0.0-independent-ml30"
+REVISION = "13.1.1-independent-ml30-audited-board"
 STATE_PATH = os.getenv("PSI_V13_STATE_PATH", "/data/psi_v13_model.json")
 OUTCOME_PATH = os.getenv("PSI_V13_OUTCOME_PATH", "/data/psi_v13_outcomes.jsonl")
 TRAIN_HORIZON_MS = 15 * 60_000
@@ -512,6 +512,96 @@ def thirty():
     return picked[:30]
 
 
+
+def coverage30_audit(report=None, at=None):
+    """Capture the exact selected board; never turn research into a BUY."""
+    at = ts() if at is None else at
+    report = thirty() if report is None else list(report)
+    ml_map = {r["symbol"]: r for r in five()}
+    sensor_map = {r["symbol"]: r for r in _rows()}
+    strict_map = {
+        _symbol(r): r for r in (CORE._board() or []) if isinstance(r, dict)
+    }
+    audited = []
+    for selected in report:
+        sym = _symbol(selected)
+        category = selected["category"]
+        strict = strict_map.get(sym) or {}
+        sensor = sensor_map.get(sym) or {}
+        ml = (ml_map.get(sym) or {}) if category == "ml" else {}
+        sample_fresh = bool(sensor and fresh(sensor, at))
+        age = at - num(sensor.get("generated_ms"))
+        reference = num(sensor.get("entry_reference"))
+        observed = reference if (
+            reference > 0 and 0 <= age <= 15_000
+            and 0 <= num(sensor.get("trade_age_ms"), 1e9) <= 15_000
+        ) else None
+
+        if category == "ml":
+            approved = bool(ml.get("execution_ready") and sample_fresh
+                            and 0 <= at - num(ml.get("signal_ms")) <= 15_000)
+            entry = num(ml.get("entry"))
+            stop = num(ml.get("stop"))
+            targets = [num(ml.get(k)) for k in ("tp1", "tp2", "tp3")]
+            blockers = list(ml.get("reason") or [])
+            status = "ML BUY NOW" if approved else "ML BUY CANDIDATE"
+            authority = "V13_ML_SAFETY_GATES"
+            if not approved and not blockers:
+                blockers = ["ML_SAFETY_NOT_VERIFIED_AT_REPORT_TIME"]
+        else:
+            entry = (num(strict.get("pinpoint_trigger")) or
+                     num(strict.get("entry_low")) or num(strict.get("entry")))
+            stop = num(strict.get("pinpoint_stop")) or num(strict.get("invalidation"))
+            targets = [num(strict.get(k)) for k in ("tp1", "tp2", "tp3")]
+            approved = bool(
+                strict.get("execution_state") == "BUY NOW"
+                and 0 < stop < entry < targets[0] < targets[1] < targets[2]
+            )
+            blockers = list(strict.get("execution_blockers") or [])
+            status = str(strict.get("execution_state") or "NOT_APPROVED")
+            authority = "V12.3.4_FAIL_CLOSED"
+            if not approved and not blockers:
+                blockers = ["UNQUALIFIED_COVERAGE_ONLY" if
+                            selected.get("state") == "UNQUALIFIED_WATCH" else
+                            "V12_EXECUTION_NOT_APPROVED"]
+
+        audited.append({
+            "symbol": sym, "category": category,
+            "state": str(selected.get("state") or ""),
+            "score": selected.get("score"),
+            "execution_status": status, "execution_authority": authority,
+            "entry_verified": approved,
+            "observed_price": observed, "sensor_fully_verified": sample_fresh,
+            "entry": entry if approved else None,
+            "stop": stop if approved else None,
+            "tp1": targets[0] if approved else None,
+            "tp2": targets[1] if approved else None,
+            "tp3": targets[2] if approved else None,
+            "research_only_levels": (
+                {"entry": entry or None, "stop": stop or None,
+                 "tp1": targets[0] or None, "tp2": targets[1] or None,
+                 "tp3": targets[2] or None}
+                if not approved and category != "ml" and strict else None
+            ),
+            "ml_probability": ml.get("model_probability") if ml else None,
+            "blockers": [str(x) for x in blockers[:5]],
+        })
+    return {
+        "version": REVISION, "generated_ms": at,
+        "total": len(audited), "unique": len({r["symbol"] for r in audited}),
+        "execution_ready": sum(bool(r["entry_verified"]) for r in audited),
+        "rows": audited, "unqualified_are_not_buys": True,
+    }
+
+
+def log_coverage30_audit(report=None, at=None):
+    """Single structured Railway line, all six categories and all 30 rows."""
+    snapshot = coverage30_audit(report, at)
+    print("PSI-V13 COVERAGE30_JSON " +
+          json.dumps(snapshot, separators=(",", ":"), allow_nan=False),
+          flush=True)
+    return snapshot
+
 def _inject(response):
     try:
         payload = json.loads(response.body.decode("utf-8"))
@@ -543,6 +633,7 @@ def _inject(response):
         "total": len(report),
         "unique": len({r["symbol"] for r in report}),
         "categories": report,
+        "audit": coverage30_audit(report),
         "unqualified_are_not_buys": True,
     }
     payload["generated_ms"] = ts()
@@ -578,6 +669,7 @@ async def discovery_worker():
                 print("PSI-V13 COVERAGE30 unique=" + str(len({r["symbol"] for r in report})) +
                       " rows=" + str(len(report)) +
                       " categories=6x5", flush=True)
+                log_coverage30_audit(report, at)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

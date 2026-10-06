@@ -144,5 +144,67 @@ class V13Tests(unittest.TestCase):
         self.assertIn("LIVE_SENSOR_OR_EXECUTION_SAFETY", candidate["reason"])
 
 
+    def test_audit_provides_all_30_rows_without_fake_entries(self):
+        import json
+        now = ml.ts()
+        universe = [f"COIN{i}USDT" for i in range(45)]
+        data = [self.sample(s, now=now) for s in universe]
+        board = [{"symbol": s, "state": "WATCH", "entry_low": 10,
+                  "invalidation": 9.5, "tp1": 10.3, "tp2": 10.5,
+                  "tp3": 11, "execution_state": "COLLECTING DATA"}
+                 for s in universe]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=universe),
+            base=types.SimpleNamespace(latest={"_all_candidates": [
+                {"symbol": s, "state": "MONSTER-WATCH", "layers": 3}
+                for s in universe]}),
+            _board=lambda: board,
+        )
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=data)
+        ml._model["trained"] = 0
+        ml.rank()
+        selection = ml.thirty()
+        audit = ml.coverage30_audit(selection, ml._ranked[0]["signal_ms"])
+        self.assertEqual(audit["total"], 30)
+        self.assertEqual(audit["unique"], 30)
+        self.assertEqual(audit["execution_ready"], 0)
+        self.assertEqual(len({r["category"] for r in audit["rows"]}), 6)
+        self.assertTrue(all(r["entry"] is None and r["stop"] is None
+                            and r["tp1"] is None for r in audit["rows"]))
+        self.assertTrue(all("research_only_levels" in r and "blockers" in r
+                            for r in audit["rows"]))
+        with patch("builtins.print") as printer:
+            ml.log_coverage30_audit(selection, ml._ranked[0]["signal_ms"])
+        output = printer.call_args.args[0]
+        self.assertTrue(output.startswith("PSI-V13 COVERAGE30_JSON "))
+        decoded = json.loads(output[len("PSI-V13 COVERAGE30_JSON "):])
+        self.assertEqual(len(decoded["rows"]), 30)
+
+    def test_ml_audit_revalidates_freshness_before_logging(self):
+        now = ml.ts()
+        universe = [f"COIN{i}USDT" for i in range(45)]
+        data = [self.sample(s, now=now) for s in universe]
+        ml.CORE = types.SimpleNamespace(
+            q=types.SimpleNamespace(universe=universe),
+            base=types.SimpleNamespace(latest={"_all_candidates": []}),
+            _board=lambda: [],
+        )
+        ml.SENSOR = types.SimpleNamespace(_latest_candidates=data)
+        ml._model["trained"] = 200
+        ml._model["bias"] = 5.0
+        ml.rank()
+        selection = ml.thirty()
+        stamp = ml._ranked[0]["signal_ms"]
+        current = ml.coverage30_audit(selection, stamp)
+        current_ml = [r for r in current["rows"] if r["category"] == "ml"]
+        self.assertEqual(len(current_ml), 5)
+        self.assertTrue(all(r["entry_verified"] for r in current_ml))
+        self.assertTrue(all(r["tp1"] > r["entry"] > r["stop"] for r in current_ml))
+        stale = ml.coverage30_audit(selection, stamp + 16_000)
+        stale_ml = [r for r in stale["rows"] if r["category"] == "ml"]
+        self.assertTrue(all(not r["entry_verified"] for r in stale_ml))
+        self.assertTrue(all(r["entry"] is None for r in stale_ml))
+
+
 if __name__ == "__main__":
     unittest.main()
