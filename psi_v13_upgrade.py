@@ -26,6 +26,7 @@ FEATURE_NAMES = (
 CORE = None
 SENSOR = None
 EARLY = None
+LEARNER = None
 _ORIGINAL_SCAN = None
 _ORIGINAL_HEALTH = None
 _ORIGINAL_PROMOTION = None
@@ -227,6 +228,73 @@ def _snapshot_prices():
         if num(r.get("entry_reference")) > 0
         and 0 <= at - num(r.get("generated_ms")) <= 15_000
     }
+
+
+
+def seed_historical():
+    """Warm-start only from recorded, resolved pre-signal outcomes.
+
+    Restrict legacy risk bands to near the new fixed stop. No reconstructed
+    price histories and no look-ahead information are used as input features.
+    """
+    if LEARNER is None or _stats.get("historical_seed_completed"):
+        return
+    if not getattr(LEARNER, "_bootstrapped", False):
+        return
+    _stats["historical_seed_completed"] = True
+    count = 0
+    skipped = 0
+    now = ts()
+    for event in list(getattr(LEARNER, "_recent", []) or []):
+        if not isinstance(event, dict) or not event.get("resolved"):
+            continue
+        feat = event.get("features") or {}
+        created = int(num(event.get("created_ms")))
+        entry = num(event.get("entry_price"))
+        stop = num(event.get("stop_price"))
+        if not isinstance(feat, dict) or not created or not entry or not stop:
+            skipped += 1
+            continue
+        risk = (entry - stop) / entry
+        if not (0.015 <= risk <= 0.035 and created < now - TRAIN_HORIZON_MS):
+            skipped += 1
+            continue
+        target_at = int(num((event.get("first_target_ms") or {}).get("3")))
+        stop_at = int(num(event.get("stop_hit_ms")))
+        if not (
+            target_at
+            or stop_at
+            or "15m" in (event.get("horizon_returns") or {})
+        ):
+            skipped += 1
+            continue
+        won = int(bool(
+            target_at and target_at - created <= TRAIN_HORIZON_MS
+            and (not stop_at or target_at < stop_at)
+        ))
+        pre_signal = {
+            "hazard_score": feat.get("early_hazard_score"),
+            "buy_ratio": feat.get("buy_ratio", 0.5),
+            "relative_volume_10s": feat.get("relative_volume_10s", feat.get("relative_volume_30s")),
+            "relative_volume_30s": feat.get("relative_volume_30s"),
+            "trade_acceleration": feat.get("trade_acceleration"),
+            "cvd_acceleration": feat.get("cvd_accel"),
+            "ofi": feat.get("ofi"),
+            "ofi_acceleration": feat.get("ofi_accel"),
+            "obi": feat.get("obi"),
+            "ask_depletion": feat.get("ask_depletion"),
+            "sequence_score": feat.get("sequence_score"),
+            "spread_bps": feat.get("spread_bps"),
+        }
+        update_model(features(pre_signal), won, created)
+        count += 1
+    _stats["historical_seeded"] = count
+    _stats["historical_seed_skipped"] = skipped
+    print("PSI-V13 HISTORICAL_SEED valid=" + str(count) +
+          " excluded=" + str(skipped) +
+          " train=" + str(_model["trained"]) +
+          " source=RESOLVED_PRE_SIGNAL_OUTCOMES", flush=True)
+    _save()
 
 
 def collect():
@@ -446,6 +514,7 @@ def _inject(response):
         "model": "online_logistic_sgd",
         "training_horizon": "15m +3% before -2.5% stop",
         "sample_count": _model["trained"],
+        "historical_seeded": _stats.get("historical_seeded", 0),
         "model_ready": _model["trained"] >= MIN_TRAIN,
         "validated_test_samples": _model["test_n"],
         "test_win_rate": round(_model["test_wins"] / _model["test_n"], 4) if _model["test_n"] else None,
@@ -479,6 +548,7 @@ async def discovery_worker():
     global _last_diag_ms
     while True:
         try:
+            seed_historical()
             ranked = rank()
             collect()
             at = ts()
@@ -517,12 +587,12 @@ async def learning_worker():
         await asyncio.sleep(10)
 
 
-def install(core, sensor, early):
-    global CORE, SENSOR, EARLY, _ORIGINAL_SCAN, _ORIGINAL_HEALTH
+def install(core, sensor, early, learner=None):
+    global CORE, SENSOR, EARLY, LEARNER, _ORIGINAL_SCAN, _ORIGINAL_HEALTH
     global _ORIGINAL_PROMOTION, _ORIGINAL_PRIORITY
     if CORE is not None:
         return
-    CORE, SENSOR, EARLY = core, sensor, early
+    CORE, SENSOR, EARLY, LEARNER = core, sensor, early, learner
     _ORIGINAL_SCAN, _ORIGINAL_HEALTH = core.v12_scan, core.v12_health
     _ORIGINAL_PROMOTION = sensor._promotion_symbols
     _ORIGINAL_PRIORITY = core._priority_symbols

@@ -29,7 +29,7 @@ async def main():
     upgrade_v127.install(core, hardening, outcome_learning, upgrade, upgrade_v125, upgrade_v126)
     upgrade_v128.install(core, upgrade_v125, upgrade_v127)
     upgrade_v129.install(core, upgrade_v128)
-    upgrade_v13.install(core, upgrade_v125, upgrade_v128)
+    upgrade_v13.install(core, upgrade_v125, upgrade_v128, outcome_learning)
 
     # Bind the existing aiohttp server immediately so Railway's /live probe
     # reflects process liveness, while the inherited scanner bootstraps in

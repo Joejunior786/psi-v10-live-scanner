@@ -14,6 +14,8 @@ class V13Tests(unittest.TestCase):
         self.core, self.sensor = ml.CORE, ml.SENSOR
         self.ranked = list(ml._ranked)
         self.pending = list(ml._pending)
+        self.learner = ml.LEARNER
+        self.stats = dict(ml._stats)
 
     def tearDown(self):
         ml._model.clear()
@@ -21,6 +23,9 @@ class V13Tests(unittest.TestCase):
         ml.CORE, ml.SENSOR = self.core, self.sensor
         ml._ranked[:] = self.ranked
         ml._pending[:] = self.pending
+        ml.LEARNER = self.learner
+        ml._stats.clear()
+        ml._stats.update(self.stats)
 
     def sample(self, sym, now=1_000_000, fresh=True):
         return {
@@ -106,6 +111,28 @@ class V13Tests(unittest.TestCase):
         self.assertEqual(len({r["symbol"] for r in result}), 30)
         from collections import Counter
         self.assertEqual(set(Counter(r["category"] for r in result).values()), {5})
+
+
+    def test_historical_warm_start_uses_resolved_pre_signal_data(self):
+        old = ml._model["trained"]
+        ml._model["trained"] = 0
+        ml._stats.pop("historical_seed_completed", None)
+        created = 86_400_000 * 20
+        event = {
+            "resolved": True, "created_ms": created,
+            "entry_price": 100.0, "stop_price": 97.5,
+            "first_target_ms": {"3": created + 120000},
+            "stop_hit_ms": 0,
+            "features": {"buy_ratio": .75, "ofi": .35, "obi": .2,
+                         "spread_bps": 7, "early_hazard_score": 80,
+                         "relative_volume_30s": 3.1},
+        }
+        ml.LEARNER = types.SimpleNamespace(_bootstrapped=True, _recent=[event])
+        with patch.object(ml, "_save"):
+            ml.seed_historical()
+        self.assertEqual(ml._stats["historical_seeded"], 1)
+        self.assertEqual(ml._model["trained"], 1)
+        self.assertEqual(old >= 0, True)
 
     def test_missing_sensor_data_cannot_make_entry(self):
         ml._model["trained"] = 200
