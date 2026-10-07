@@ -1459,10 +1459,10 @@ async def supervisor_loop():
                 core.REDIS_URL,
                 encoding="utf-8",
                 decode_responses=True,
-                socket_connect_timeout=2.0,
-                socket_timeout=2.0,
+                socket_connect_timeout=5.0,
+                socket_timeout=3.0,
                 health_check_interval=10,
-                retry_on_timeout=True,
+                retry_on_timeout=False,
             )
             await client.ping()
             print(
