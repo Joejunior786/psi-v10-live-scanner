@@ -1,10 +1,11 @@
+import time
 import types
 import unittest
 
 import psi_v13_4_pinpoint as v
 
 
-NOW = 1_000_000
+NOW = int(time.time() * 1000)
 
 
 def structural(setup="COILED_ACCUMULATION", state="ARMED", strength=80.0):
