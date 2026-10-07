@@ -50,6 +50,11 @@ _held_last_symbols = []
 _held_rotation_seen = {}
 _held_rotation_cycle = 0
 _held_last_snapshot = None
+_http_snapshot = None
+_http_snapshot_ms = 0
+HTTP_SNAPSHOT_MAX_AGE_MS = max(
+    5_000, int(os.getenv("PSI_V13_HTTP_SNAPSHOT_MAX_AGE_MS", "30000"))
+)
 _stats = {"captured": 0, "resolved": 0, "invalid": 0, "model_errors": 0,
           "worker_errors": 0, "last_error": "", "promotion_requests": 0}
 
@@ -1076,16 +1081,65 @@ def log_coverage30_audit(report=None, at=None):
           flush=True)
     return snapshot
 
+def _store_http_snapshot(ranked, report, audit, held, at=None):
+    """Cache reporting-only material built by the discovery worker.
+
+    This cache never participates in execution authority. It only prevents
+    /scan and /health from rebuilding the same expensive boards on demand.
+    """
+    global _http_snapshot, _http_snapshot_ms
+    at = ts() if at is None else int(at)
+    try:
+        _http_snapshot = json.loads(json.dumps({
+            "ranked": list(ranked or [])[:5],
+            "report": list(report or [])[:30],
+            "audit": audit or {},
+            "held": held or {},
+            "generated_ms": at,
+        }, separators=(",", ":"), allow_nan=False))
+        _http_snapshot_ms = at
+    except (TypeError, ValueError):
+        _http_snapshot = None
+        _http_snapshot_ms = 0
+
+
+def _get_http_snapshot(at=None):
+    at = ts() if at is None else int(at)
+    if not isinstance(_http_snapshot, dict):
+        return None
+    age = at - int(_http_snapshot_ms or 0)
+    if age < 0 or age > HTTP_SNAPSHOT_MAX_AGE_MS:
+        return None
+    return _http_snapshot
+
+
 def _inject(response):
     try:
         payload = json.loads(response.body.decode("utf-8"))
     except Exception:
         return response
-    ranked = five()
-    report = thirty()
+
+    # Fast reporting path: discovery_worker already builds these exact
+    # reporting artifacts every diagnostic cycle. Reuse that snapshot for HTTP
+    # instead of repeatedly calling five()/thirty()/CORE._board().
+    snap = _get_http_snapshot()
+    if snap is not None:
+        ranked = [dict(x) for x in (snap.get("ranked") or [])]
+        report = [dict(x) for x in (snap.get("report") or [])]
+        audit = snap.get("audit") or {}
+        held = snap.get("held") or {}
+        snapshot_age_ms = max(0, ts() - int(snap.get("generated_ms") or ts()))
+        snapshot_source = "DISCOVERY_WORKER_CACHE"
+    else:
+        ranked = five()
+        report = thirty()
+        audit = coverage30_audit(report)
+        held = held_back_lane()
+        snapshot_age_ms = None
+        snapshot_source = "ON_DEMAND_FALLBACK"
+
     payload["scanner"] = "Psi-V13 Dual Intelligence"
     payload["version"] = REVISION
-    payload["conventional_authority_version"] = str(getattr(CORE, "VERSION", "V12"))
     payload["v13_ml"] = {
         "independent_of_conventional_buy_rules": True,
         "model": "online_logistic_sgd",
@@ -1096,7 +1150,7 @@ def _inject(response):
         "validated_test_samples": _model["test_n"],
         "test_win_rate": round(_model["test_wins"] / _model["test_n"], 4) if _model["test_n"] else None,
         "top_5": ranked,
-        "actionable_count": sum(r["execution_ready"] for r in ranked),
+        "actionable_count": sum(r.get("execution_ready") for r in ranked),
         "selection_count": len(ranked),
         "outcome_stats": dict(_stats),
         "pending_outcomes": len(_pending),
@@ -1107,10 +1161,16 @@ def _inject(response):
         "total": len(report),
         "unique": len({r["symbol"] for r in report}),
         "categories": report,
-        "audit": coverage30_audit(report),
+        "audit": audit,
         "unqualified_are_not_buys": True,
     }
-    payload["v13_held_back"] = held_back_lane()
+    payload["v13_held_back"] = held
+    payload["v13_http_snapshot"] = {
+        "source": snapshot_source,
+        "age_ms": snapshot_age_ms,
+        "max_age_ms": HTTP_SNAPSHOT_MAX_AGE_MS,
+        "execution_authority": False,
+    }
     payload["rotation_layout"] = {"ml": 5, "strongest": 10, "fresh_challenger": 15}
     payload["generated_ms"] = ts()
     return CORE.app.web.json_response(payload, status=response.status)
@@ -1145,8 +1205,9 @@ async def discovery_worker():
                 print("PSI-V13 COVERAGE30 unique=" + str(len({r["symbol"] for r in report})) +
                       " rows=" + str(len(report)) +
                       " categories=5ML+10strongest+15challengers", flush=True)
-                log_coverage30_audit(report, at)
-                log_held_back_lane(at)
+                audit = log_coverage30_audit(report, at)
+                held = log_held_back_lane(at)
+                _store_http_snapshot(ranked[:5], report, audit, held, at)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
