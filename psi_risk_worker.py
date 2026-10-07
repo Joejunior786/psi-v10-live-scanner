@@ -189,6 +189,27 @@ async def main():
     stats: Dict[str, object] = {}
     cursor = 0
     last_hb = 0.0
+    heartbeat_state = {"symbols": [], "error": "starting"}
+
+    async def heartbeat_ticker():
+        while True:
+            try:
+                await publish_heartbeat(
+                    r,
+                    list(heartbeat_state.get("symbols") or []),
+                    stats,
+                    str(heartbeat_state.get("error", "") or ""),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(
+                    f"PSI-RISK-WORKER heartbeat_error shard={SHARD_INDEX} {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            await asyncio.sleep(3.0)
+
+    heartbeat_task = asyncio.create_task(heartbeat_ticker())
 
     print(
         f"PSI-RISK-WORKER START version={WORKER_VERSION} "
@@ -200,10 +221,14 @@ async def main():
         while True:
             symbols = await selected_symbols(r)
             if not symbols:
+                heartbeat_state["symbols"] = []
+                heartbeat_state["error"] = "waiting_for_priority"
                 await publish_heartbeat(r, [], stats, "waiting_for_priority")
                 await asyncio.sleep(CONTROL_POLL_S)
                 continue
 
+            heartbeat_state["symbols"] = list(symbols)
+            heartbeat_state["error"] = ""
             now = time.monotonic()
             due = [s for s in symbols if now - last_fetch.get(s, 0.0) >= PRIORITY_REFRESH_S]
             if not due:
@@ -245,6 +270,11 @@ async def main():
                 )
             await asyncio.sleep(0.05)
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except BaseException:
+            pass
         await session.close()
         await r.aclose()
 

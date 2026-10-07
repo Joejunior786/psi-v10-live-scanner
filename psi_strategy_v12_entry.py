@@ -3392,7 +3392,15 @@ async def redis_control_loop():
     while True:
         client = None
         try:
-            client = redis_async.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            client = redis_async.from_url(
+                REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=2.0,
+                socket_timeout=2.0,
+                health_check_interval=10,
+                retry_on_timeout=True,
+            )
             await client.ping()
             _redis_bridge_stats["control_connects"] += 1
             print("Ψ-V12 REDIS_CONTROL connected", flush=True)
@@ -3486,6 +3494,8 @@ async def redis_control_loop():
                             _redis_worker_health[role] = json.loads(raw)
                         except Exception:
                             _redis_worker_health[role] = {"raw": raw}
+                    else:
+                        _redis_worker_health.pop(role, None)
 
                 tape_up = 0
                 now_ms = int(time.time() * 1000)
@@ -3511,6 +3521,9 @@ async def redis_control_loop():
                             and 0 <= age <= 15000
                         ):
                             tape_up += 1
+
+                    if not raw:
+                        _redis_worker_health.pop(f"tape{idx}", None)
 
                     snap_raw=await client.get(f"{REDIS_TAPE_SNAPSHOT_PREFIX}:{idx}")
                     if not snap_raw:

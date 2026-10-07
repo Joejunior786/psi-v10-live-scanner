@@ -197,6 +197,28 @@ async def main():
     stats: Dict[str, int] = {}
     cursor = 0
     last_hb = 0.0
+    heartbeat_state = {"assigned": 0, "priority": 0, "error": "starting"}
+
+    async def heartbeat_ticker():
+        while True:
+            try:
+                await heartbeat(
+                    r,
+                    int(heartbeat_state.get("assigned", 0)),
+                    int(heartbeat_state.get("priority", 0)),
+                    stats,
+                    str(heartbeat_state.get("error", "") or ""),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(
+                    f"PSI-STRUCTURE-WORKER heartbeat_error shard={SHARD_INDEX} {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            await asyncio.sleep(3.0)
+
+    heartbeat_task = asyncio.create_task(heartbeat_ticker())
 
     print(
         f"PSI-STRUCTURE-WORKER START version={WORKER_VERSION} shard={SHARD_INDEX+1}/{SHARD_COUNT}",
@@ -208,6 +230,9 @@ async def main():
             universe = await read_symbol_list(r, UNIVERSE_KEY)
             priority_all = await read_symbol_list(r, CONTROL_KEY)
             if not universe:
+                heartbeat_state["assigned"] = 0
+                heartbeat_state["priority"] = 0
+                heartbeat_state["error"] = "waiting_for_universe"
                 await heartbeat(r, 0, 0, stats, "waiting_for_universe")
                 await asyncio.sleep(CONTROL_POLL_S)
                 continue
@@ -216,6 +241,9 @@ async def main():
             assigned = ordered[SHARD_INDEX::SHARD_COUNT]
             assigned_set = set(assigned)
             priority = [s for s in priority_all if s in assigned_set]
+            heartbeat_state["assigned"] = len(assigned)
+            heartbeat_state["priority"] = len(priority)
+            heartbeat_state["error"] = ""
             now = time.monotonic()
 
             due_priority = [
@@ -280,6 +308,11 @@ async def main():
                 )
             await asyncio.sleep(0.05)
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except BaseException:
+            pass
         await session.close()
         await r.aclose()
 

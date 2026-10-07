@@ -1456,7 +1456,13 @@ async def supervisor_loop():
         client = None
         try:
             client = redis_async.from_url(
-                core.REDIS_URL, encoding="utf-8", decode_responses=True
+                core.REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=2.0,
+                socket_timeout=2.0,
+                health_check_interval=10,
+                retry_on_timeout=True,
             )
             await client.ping()
             print(
@@ -1486,6 +1492,8 @@ async def supervisor_loop():
                             core._redis_worker_health[f"structure{idx}"] = json.loads(raw)
                         except Exception:
                             core._redis_worker_health[f"structure{idx}"] = {"raw": raw}
+                    else:
+                        core._redis_worker_health.pop(f"structure{idx}", None)
 
                 for idx in range(RISK_WORKERS):
                     raw = await client.get(f"psi:v12:risk-worker:{idx}")
@@ -1494,13 +1502,18 @@ async def supervisor_loop():
                             core._redis_worker_health[f"risk{idx}"] = json.loads(raw)
                         except Exception:
                             core._redis_worker_health[f"risk{idx}"] = {"raw": raw}
+                    else:
+                        core._redis_worker_health.pop(f"risk{idx}", None)
 
                 core._redis_bridge_stats["hardening_last_ms"] = now_ms
 
                 now_mono = time.monotonic()
                 if now_mono - _last_diag_mono >= 30.0:
                     try:
-                        _last_micro_diag = await asyncio.to_thread(micro_gate_diagnostics)
+                        _last_micro_diag = await asyncio.wait_for(
+                            asyncio.to_thread(micro_gate_diagnostics),
+                            timeout=5.0,
+                        )
                         _last_diag_mono = now_mono
                         dc = _last_micro_diag.get("counts", {})
                         top_fail = (_last_micro_diag.get("failure_combinations") or [{}])[0]
