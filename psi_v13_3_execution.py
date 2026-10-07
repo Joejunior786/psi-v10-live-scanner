@@ -18,6 +18,8 @@ _ORIGINAL_SCAN = None
 _ORIGINAL_HEALTH = None
 ACTIVE = {}
 STATS = defaultdict(int)
+_EARLY_CACHE = {}
+_EARLY_CACHE_MS = 0
 
 MIN_STRUCTURAL_STRENGTH = max(70.0, float(os.getenv("PSI_V133_MIN_STRUCTURAL_STRENGTH", "84")))
 MIN_ARMED_STRENGTH = max(MIN_STRUCTURAL_STRENGTH, float(os.getenv("PSI_V133_MIN_ARMED_STRENGTH", "90")))
@@ -43,17 +45,23 @@ def _now_ms():
 
 
 def _early_map():
+    global _EARLY_CACHE, _EARLY_CACHE_MS
+    now = _now_ms()
+    if _EARLY_CACHE and now - _EARLY_CACHE_MS <= 250:
+        return _EARLY_CACHE
     if EARLY is None:
         return {}
     try:
         rows = EARLY.early_candidates(200, actionable_only=False) or []
     except Exception:
         rows = []
-    return {
+    _EARLY_CACHE = {
         str(row.get("symbol") or "").upper(): row
         for row in rows
         if isinstance(row, dict) and row.get("symbol")
     }
+    _EARLY_CACHE_MS = now
+    return _EARLY_CACHE
 
 
 def _risk_plan(structural, entry):
