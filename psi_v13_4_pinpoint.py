@@ -468,7 +468,20 @@ def _setup_decision(structural, early, now_ms=None):
         _breakout_engine(structural, early, now_ms),
     ]
     passed = [row for row in engines if row.get("pass")]
-    chosen = max(passed or engines, key=lambda row: _f(row.get("score")))
+    names = {row["name"] for row in _active_setups(structural)}
+
+    # Prefer the dedicated family when the structure names it explicitly.
+    # This keeps classification interpretable when acceleration evidence makes
+    # a breakout simultaneously look "beast-like".
+    chosen = None
+    if names & EXHAUSTION_SETUPS:
+        chosen = next((row for row in passed if row["engine"] == "EXHAUSTION"), None)
+    if chosen is None and names & {"COMPRESSION_BREAKOUT", "BREAKOUT_RETEST"}:
+        chosen = next((row for row in passed if row["engine"] == "BREAKOUT"), None)
+    if chosen is None and names & {"COILED_ACCUMULATION", "TREND_CONTINUATION"}:
+        chosen = next((row for row in passed if row["engine"] == "BEAST"), None)
+    if chosen is None:
+        chosen = max(passed or engines, key=lambda row: _f(row.get("score")))
     return {
         "pass": bool(passed),
         "chosen": chosen,
