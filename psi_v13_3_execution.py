@@ -4,8 +4,8 @@ import os
 import time
 from collections import defaultdict
 
-REVISION = "13.3.0-evidence-ready-dual-authority"
-AUTHORITY_CHAIN = "V12.3.4_STRICT_OR_V13.3_EVIDENCE_READY->BUY_NOW"
+REVISION = "14.0.0-setup-specific-authority"
+AUTHORITY_CHAIN = "V12.3.4_STRICT_OR_V14_SETUP_SPECIFIC->BUY_NOW"
 
 CORE = None
 EARLY = None
@@ -127,30 +127,63 @@ def _ml_support(symbol):
         return False
 
 
-def _evidence_gate(structural, legacy, micro, integrity, early, now_ms=None):
+
+EXHAUSTION_SETUPS = {
+    "DEEP_PULLBACK_EXHAUSTION", "DAILY_RANGE_BOTTOM_REVERSAL",
+    "FAILED_BREAKDOWN_RECLAIM", "LIQUIDITY_SWEEP_REVERSAL",
+    "VOLUME_CLIMAX_REVERSAL", "HIGHER_LOW_REVERSAL",
+}
+BREAKOUT_SETUPS = {
+    "COMPRESSION_BREAKOUT", "BREAKOUT_RETEST", "TREND_CONTINUATION",
+    "COILED_ACCUMULATION",
+}
+BEAST_SETUPS = {
+    "COILED_ACCUMULATION", "COMPRESSION_BREAKOUT", "TREND_CONTINUATION",
+    "HIGHER_LOW_REVERSAL", "HIGH_CONFLUENCE_BUY",
+}
+
+
+def _active_setups(structural):
     structural = structural if isinstance(structural, dict) else {}
-    legacy = legacy if isinstance(legacy, dict) else {}
-    early = early if isinstance(early, dict) else {}
-    now_ms = _now_ms() if now_ms is None else int(now_ms)
+    out = []
+    primary = str(structural.get("setup") or "")
+    if primary:
+        out.append({
+            "name": primary,
+            "state": str(structural.get("state") or ""),
+            "strength": _f(structural.get("setup_strength")),
+        })
+    for row in list(structural.get("active_setups") or []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "")
+        if name and name not in {x["name"] for x in out}:
+            out.append({
+                "name": name,
+                "state": str(row.get("state") or ""),
+                "strength": _f(row.get("strength")),
+            })
+    return out
+
+
+def _setup_match(structural, names):
+    rows = [x for x in _active_setups(structural) if x["name"] in names]
+    rows.sort(key=lambda x: (x["state"] == "BUY", x["state"] == "ARMED", x["strength"]), reverse=True)
+    return rows[0] if rows else {}
+
+
+def _global_safety(structural, legacy, micro, integrity, early, now_ms):
+    """Only genuine data/execution/risk vetoes are global.
+
+    Strategy confirmation is deliberately excluded here. BEAST, EXHAUSTION,
+    BREAKOUT and STRUCTURAL_CONFIRMATION each own their strategy evidence.
+    """
     blockers = []
+    structural = structural if isinstance(structural, dict) else {}
+    early = early if isinstance(early, dict) else {}
+    micro = micro if isinstance(micro, dict) else {}
+    integrity = integrity if isinstance(integrity, dict) else {}
 
-    symbol = str(
-        structural.get("symbol") or legacy.get("symbol") or early.get("symbol") or ""
-    ).upper()
-    strength = _f(structural.get("setup_strength"))
-    state = str(structural.get("state") or "")
-    if state != "BUY":
-        blockers.append("V12_STRUCTURAL_BUY")
-    if strength < MIN_STRUCTURAL_STRENGTH:
-        blockers.append("STRUCTURAL_STRENGTH")
-    if bool(structural.get("anti_chase")):
-        blockers.append("ANTI_CHASE")
-
-    early_state = str(early.get("state") or "")
-    if early_state not in {"EARLY_PINPOINT", "EARLY_ARMED"}:
-        blockers.append("EARLY_EXECUTION_STATE")
-    if early_state == "EARLY_ARMED" and strength < MIN_ARMED_STRENGTH:
-        blockers.append("ARMED_REQUIRES_STRONG_STRUCTURE")
     if not bool(early.get("hard_sensor_safety")):
         blockers.append("HARD_SENSOR_SAFETY")
 
@@ -169,6 +202,14 @@ def _evidence_gate(structural, legacy, micro, integrity, early, now_ms=None):
     if not bool(early.get("book_sequence_verified")):
         blockers.append("BOOK_SEQUENCE_VALID")
 
+    # When the native live-micro row explicitly says it is invalid, fail closed.
+    if "micro_ready" in micro and not bool(micro.get("micro_ready")):
+        blockers.append("LIVE_MICRO_DATA")
+    if "sequence_verified" in micro and not bool(micro.get("sequence_verified")):
+        blockers.append("TRADE_SEQUENCE_VALID")
+    if "book_sequence_verified" in micro and not bool(micro.get("book_sequence_verified")):
+        blockers.append("BOOK_SEQUENCE_VALID")
+
     spread = _f(early.get("spread_bps"), 999999.0)
     slip = _f(early.get("slippage_bps"), 999999.0)
     if spread < 0 or spread > MAX_SPREAD_BPS:
@@ -176,9 +217,8 @@ def _evidence_gate(structural, legacy, micro, integrity, early, now_ms=None):
     if slip < 0 or slip > MAX_SLIPPAGE_BPS:
         blockers.append("SLIPPAGE_FILTER")
 
-    hard = legacy.get("pinpoint_hard_status") or {}
-    if hard.get("MARKET_REGIME_SAFETY") is False or hard.get("market_regime_safety") is False:
-        blockers.append("MARKET_REGIME_SAFETY")
+    if bool(structural.get("anti_chase")):
+        blockers.append("ANTI_CHASE")
 
     entry = _f(early.get("entry_reference"), _f(structural.get("current")))
     max_chase = _f(structural.get("max_chase"))
@@ -198,43 +238,36 @@ def _evidence_gate(structural, legacy, micro, integrity, early, now_ms=None):
     if not risk["valid"]:
         blockers.append("VALID_RISK_REWARD")
 
-    groups, group_count = _flow_groups(early)
-    if group_count < MIN_FLOW_GROUPS:
-        blockers.append(f"FLOW_GROUPS_{group_count}/{MIN_FLOW_GROUPS}")
-    if not groups["cvd_acceleration"]:
-        blockers.append("POSITIVE_CVD_ACCELERATION")
-    if not (groups["ofi_acceleration"] or groups["book_pressure"]):
-        blockers.append("POSITIVE_ORDER_FLOW_OR_BOOK")
+    hard = (legacy or {}).get("pinpoint_hard_status") or {}
+    for key in ("LIVE_MICRO_DATA", "TRADE_SEQUENCE_VALID", "BOOK_SEQUENCE_VALID",
+                "SPREAD_FILTER", "SLIPPAGE_FILTER", "CUMULATIVE_EXTENSION_GUARD",
+                "QUALIFIED_MICRO_WARMUP", "FRESH_STRUCTURE"):
+        if key in hard and hard.get(key) is False:
+            blockers.append(key)
+        low = key.lower()
+        if low in hard and hard.get(low) is False:
+            blockers.append(key)
 
-    ml_support = _ml_support(symbol)
-    confidence = min(
-        100.0,
-        0.35 * min(100.0, _f(early.get("hazard_score")))
-        + 0.30 * min(100.0, strength)
-        + 0.25 * (group_count / 5.0 * 100.0)
-        + 0.10 * min(100.0, max(0.0, risk.get("rr_tp1", 0.0)) / 3.0 * 100.0)
-        + (3.0 if ml_support else 0.0),
-    )
-    blockers = list(dict.fromkeys(str(x) for x in blockers if str(x)))
+    # Integrity is advisory except for explicit live-data failures. Strategy
+    # blockers inside the legacy integrity chain do not become universal vetoes.
+    for item in list(integrity.get("blockers") or []):
+        name = str(item)
+        if (
+            name.startswith("STALE_")
+            or name in {
+                "LIVE_MICRO_DATA", "LIVE_TAPE", "TRADE_SEQUENCE_VALID",
+                "BOOK_SEQUENCE_VALID", "SPREAD_FILTER", "SLIPPAGE_FILTER",
+                "CUMULATIVE_EXTENSION_GUARD",
+            }
+        ):
+            blockers.append(name)
+
     return {
         "pass": not blockers,
-        "blockers": blockers,
-        "symbol": symbol,
+        "blockers": list(dict.fromkeys(str(x) for x in blockers if str(x))),
         "entry": entry,
-        "stop": risk.get("stop"),
-        "tp1": risk.get("tp1"),
-        "tp2": risk.get("tp2"),
-        "tp3": risk.get("tp3"),
-        "risk_pct": round(_f(risk.get("risk_pct")), 4),
-        "rr_tp1": round(_f(risk.get("rr_tp1")), 3),
-        "entry_distance_pct": round(distance, 3) if distance < 900 else None,
-        "flow_groups": groups,
-        "flow_group_count": group_count,
-        "early_state": early_state,
-        "hazard_score": _f(early.get("hazard_score")),
-        "structural_strength": strength,
-        "ml_support": ml_support,
-        "confidence_score": round(confidence, 2),
+        "risk": risk,
+        "distance": distance,
         "sensor_age_ms": sensor_age,
         "trade_age_ms": trade_age,
         "book_age_ms": book_age,
@@ -242,6 +275,177 @@ def _evidence_gate(structural, legacy, micro, integrity, early, now_ms=None):
         "slippage_bps": slip,
     }
 
+
+def _engine_beast(structural, early):
+    setup = _setup_match(structural, BEAST_SETUPS)
+    early_state = str((early or {}).get("state") or "")
+    hazard = _f((early or {}).get("hazard_score"))
+    groups, _ = _flow_groups(early)
+    evidence = {
+        "buyer": groups["buyer_dominance"],
+        "cvd": groups["cvd_acceleration"],
+        "pressure": groups["ofi_acceleration"] or groups["book_pressure"],
+        "activity": groups["activity_acceleration"],
+    }
+    evidence_count = sum(bool(x) for x in evidence.values())
+    setup_hint = bool(setup) or _f((early or {}).get("v128_probe_score")) >= 70 or _f((early or {}).get("change_point_delta")) >= 8
+    early_ok = early_state in {"EARLY_PINPOINT", "EARLY_ARMED"} or hazard >= 82
+    passed = bool(early_ok and setup_hint and hazard >= 74 and evidence_count >= 3)
+    score = min(100.0, 0.45 * hazard + 12.0 * evidence_count + (12.0 if setup else 0.0))
+    return {
+        "engine": "BEAST", "pass": passed, "score": round(score, 2),
+        "setup": setup.get("name") if setup else "EARLY_ANOMALY",
+        "setup_state": setup.get("state") if setup else early_state,
+        "evidence": evidence,
+        "blockers": [] if passed else [
+            x for x, ok in (
+                ("BEAST_EARLY_STATE", early_ok),
+                ("BEAST_SETUP_OR_PROBE", setup_hint),
+                ("BEAST_HAZARD", hazard >= 74),
+                ("BEAST_FLOW_3_OF_4", evidence_count >= 3),
+            ) if not ok
+        ],
+    }
+
+
+def _engine_exhaustion(structural, early):
+    setup = _setup_match(structural, EXHAUSTION_SETUPS)
+    groups, _ = _flow_groups(early)
+    reversal = {
+        "buyer": _f((early or {}).get("buy_ratio"), 0.5) >= 0.52,
+        "cvd_nonnegative": _f((early or {}).get("cvd_acceleration")) >= 0.0,
+        "order_pressure": groups["ofi_acceleration"] or groups["book_pressure"],
+    }
+    confirmations = sum(bool(x) for x in reversal.values())
+    state = str(setup.get("state") or "")
+    strength = _f(setup.get("strength"))
+    setup_ok = bool(setup and state in {"BUY", "ARMED"} and strength >= 62)
+    required = 1 if state == "BUY" else 2
+    passed = bool(setup_ok and confirmations >= required)
+    score = min(100.0, strength * 0.65 + confirmations * 11.0)
+    return {
+        "engine": "EXHAUSTION", "pass": passed, "score": round(score, 2),
+        "setup": setup.get("name") if setup else None, "setup_state": state,
+        "evidence": reversal,
+        "blockers": [] if passed else [
+            x for x, ok in (
+                ("EXHAUSTION_SETUP", setup_ok),
+                (f"EXHAUSTION_CONFIRMATION_{confirmations}/{required}", confirmations >= required),
+            ) if not ok
+        ],
+    }
+
+
+def _engine_breakout(structural, early):
+    setup = _setup_match(structural, BREAKOUT_SETUPS)
+    groups, _ = _flow_groups(early)
+    checks = {
+        "buyer_dominance": groups["buyer_dominance"],
+        "cvd_acceleration": groups["cvd_acceleration"],
+        "order_pressure": groups["ofi_acceleration"],
+        "book_pressure": groups["book_pressure"],
+        "activity_acceleration": groups["activity_acceleration"],
+    }
+    count = sum(bool(x) for x in checks.values())
+    state = str(setup.get("state") or "")
+    strength = _f(setup.get("strength"))
+    confirmed_break = bool(setup and state == "BUY" and strength >= 78)
+    # Anti-fakeout is intentionally strict, but ONLY for the breakout family.
+    passed = bool(confirmed_break and count >= 4 and checks["activity_acceleration"] and checks["cvd_acceleration"])
+    score = min(100.0, strength * 0.55 + count * 9.0)
+    return {
+        "engine": "BREAKOUT", "pass": passed, "score": round(score, 2),
+        "setup": setup.get("name") if setup else None, "setup_state": state,
+        "evidence": checks,
+        "blockers": [] if passed else [
+            x for x, ok in (
+                ("BREAKOUT_SETUP_CONFIRMED", confirmed_break),
+                (f"ANTI_FAKEOUT_FLOW_{count}/4", count >= 4),
+                ("BREAKOUT_ACTIVITY", checks["activity_acceleration"]),
+                ("BREAKOUT_CVD", checks["cvd_acceleration"]),
+            ) if not ok
+        ],
+    }
+
+
+def _engine_structural(structural, early):
+    groups, count = _flow_groups(early)
+    state = str((structural or {}).get("state") or "")
+    strength = _f((structural or {}).get("setup_strength"))
+    passed = bool(state == "BUY" and strength >= 82 and count >= 2)
+    score = min(100.0, strength * 0.75 + count * 5.0)
+    return {
+        "engine": "STRUCTURAL_CONFIRMATION", "pass": passed,
+        "score": round(score, 2), "setup": str((structural or {}).get("setup") or ""),
+        "setup_state": state, "evidence": groups,
+        "blockers": [] if passed else [
+            x for x, ok in (
+                ("STRUCTURAL_BUY", state == "BUY"),
+                ("STRUCTURAL_STRENGTH_82", strength >= 82),
+                (f"STRUCTURAL_FLOW_{count}/2", count >= 2),
+            ) if not ok
+        ],
+    }
+
+
+def _evidence_gate(structural, legacy, micro, integrity, early, now_ms=None):
+    structural = structural if isinstance(structural, dict) else {}
+    legacy = legacy if isinstance(legacy, dict) else {}
+    early = early if isinstance(early, dict) else {}
+    now_ms = _now_ms() if now_ms is None else int(now_ms)
+    symbol = str(
+        structural.get("symbol") or legacy.get("symbol") or early.get("symbol") or ""
+    ).upper()
+
+    safety = _global_safety(structural, legacy, micro, integrity, early, now_ms)
+    engines = [
+        _engine_beast(structural, early),
+        _engine_exhaustion(structural, early),
+        _engine_breakout(structural, early),
+        _engine_structural(structural, early),
+    ]
+    passing = [x for x in engines if x["pass"]]
+    passing.sort(key=lambda x: x["score"], reverse=True)
+    winner = passing[0] if passing else None
+
+    risk = safety["risk"]
+    blockers = list(safety["blockers"])
+    if not winner:
+        engine_reasons = []
+        for engine in engines:
+            engine_reasons.extend(engine["blockers"])
+        blockers.extend(engine_reasons[:8])
+
+    confidence = winner["score"] if winner else max((x["score"] for x in engines), default=0.0)
+    return {
+        "pass": bool(safety["pass"] and winner),
+        "blockers": list(dict.fromkeys(str(x) for x in blockers if str(x))),
+        "symbol": symbol,
+        "entry": safety["entry"],
+        "stop": risk.get("stop"),
+        "tp1": risk.get("tp1"),
+        "tp2": risk.get("tp2"),
+        "tp3": risk.get("tp3"),
+        "risk_pct": round(_f(risk.get("risk_pct")), 4),
+        "rr_tp1": round(_f(risk.get("rr_tp1")), 3),
+        "entry_distance_pct": round(safety["distance"], 3) if safety["distance"] < 900 else None,
+        "flow_groups": _flow_groups(early)[0],
+        "flow_group_count": _flow_groups(early)[1],
+        "early_state": str(early.get("state") or ""),
+        "hazard_score": _f(early.get("hazard_score")),
+        "structural_strength": _f(structural.get("setup_strength")),
+        "ml_support": _ml_support(symbol),
+        "confidence_score": round(confidence + (3.0 if _ml_support(symbol) else 0.0), 2),
+        "sensor_age_ms": safety["sensor_age_ms"],
+        "trade_age_ms": safety["trade_age_ms"],
+        "book_age_ms": safety["book_age_ms"],
+        "spread_bps": safety["spread_bps"],
+        "slippage_bps": safety["slippage_bps"],
+        "strategy_engine": winner["engine"] if winner else None,
+        "strategy_setup": winner["setup"] if winner else None,
+        "strategy_engines": engines,
+        "global_safety_pass": safety["pass"],
+    }
 
 def _gate_wrapper(structural_row, legacy_row=None, micro_metrics=None, integrity=None):
     result = dict(_ORIGINAL_GATE(structural_row, legacy_row, micro_metrics, integrity))
@@ -270,17 +474,20 @@ def _gate_wrapper(structural_row, legacy_row=None, micro_metrics=None, integrity
         result["authority_chain"] = AUTHORITY_CHAIN
         return result
 
-    ACTIVE[symbol] = {**evidence, "activated_ms": _now_ms(), "route": "EVIDENCE_READY"}
+    ACTIVE[symbol] = {**evidence, "activated_ms": _now_ms(), "route": evidence.get("strategy_engine") or "SETUP_SPECIFIC"}
     STATS["evidence_buy_now"] += 1
     result.update({
         "buy_now": True,
         "execution_state": "BUY NOW",
         "blockers": [],
         "authority_chain": AUTHORITY_CHAIN,
-        "execution_route": "EVIDENCE_READY",
+        "execution_route": evidence.get("strategy_engine") or "SETUP_SPECIFIC",
         "pinpoint_entry_status": "EVIDENCE_TRIGGERED",
         "pinpoint_state": "BUY NOW",
         "evidence_ready_buy": True,
+        "setup_specific_buy": True,
+        "strategy_engine": evidence.get("strategy_engine"),
+        "strategy_setup": evidence.get("strategy_setup"),
         "evidence_ready_confidence": evidence["confidence_score"],
         "evidence_entry": evidence["entry"],
         "evidence_stop": evidence["stop"],
@@ -299,7 +506,7 @@ def _attach_wrapper(symbol, structural_row):
     row = dict(_ORIGINAL_ATTACH(symbol, structural_row))
     active = ACTIVE.get(str(symbol or "").upper())
     if active and row.get("execution_state") == "BUY NOW":
-        row["execution_route"] = "EVIDENCE_READY"
+        row["execution_route"] = active.get("route") or "SETUP_SPECIFIC"
         row["execution_entry"] = active["entry"]
         row["execution_stop"] = active["stop"]
         row["execution_tp1"] = active["tp1"]
@@ -365,12 +572,15 @@ def _augment(response):
     except Exception:
         return response
     data["version"] = REVISION
-    data["execution_authority"] = "PINPOINT_STRICT_OR_EVIDENCE_READY"
+    data["execution_authority"] = "PINPOINT_STRICT_OR_SETUP_SPECIFIC"
     data["authority_chain"] = AUTHORITY_CHAIN
     data["v13_3_execution"] = {
         "revision": REVISION,
         "strict_lane_unchanged": True,
-        "evidence_lane": "ENABLED",
+        "evidence_lane": "SETUP_SPECIFIC",
+        "strategy_engines": ["BEAST", "EXHAUSTION", "BREAKOUT", "STRUCTURAL_CONFIRMATION"],
+        "universal_strategy_gate_removed": True,
+        "global_veto_scope": "DATA_EXECUTION_RISK_ONLY",
         "freshness_max_ms": MAX_SENSOR_AGE_MS,
         "min_structural_strength": MIN_STRUCTURAL_STRENGTH,
         "min_armed_strength": MIN_ARMED_STRENGTH,
@@ -415,8 +625,8 @@ def install(core, early, v124=None, v13=None):
     core.app.health = _health_wrapper
 
     print(
-        "PSI-V13.3 INSTALLED revision=" + REVISION
-        + " authority=STRICT_OR_EVIDENCE_READY strictLane=UNCHANGED"
+        "PSI-V14 INSTALLED revision=" + REVISION
+        + " authority=STRICT_OR_SETUP_SPECIFIC strictLane=UNCHANGED"
         + f" freshness<={MAX_SENSOR_AGE_MS}ms stale/missing=FAIL_CLOSED",
         flush=True,
     )
