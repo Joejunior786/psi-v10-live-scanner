@@ -10,7 +10,7 @@ import os
 import time
 from collections import deque
 
-REVISION = "13.2.1-held-back-rotation"
+REVISION = "14.0.0-independent-ml10-top-pick"
 STATE_PATH = os.getenv("PSI_V13_STATE_PATH", "/data/psi_v13_model.json")
 OUTCOME_PATH = os.getenv("PSI_V13_OUTCOME_PATH", "/data/psi_v13_outcomes.jsonl")
 TRAIN_HORIZON_MS = 15 * 60_000
@@ -50,6 +50,8 @@ _held_last_symbols = []
 _held_rotation_seen = {}
 _held_rotation_cycle = 0
 _held_last_snapshot = None
+_p10_cache = {}
+_p10_cache_ms = 0
 _stats = {"captured": 0, "resolved": 0, "invalid": 0, "model_errors": 0,
           "worker_errors": 0, "last_error": "", "promotion_requests": 0}
 
@@ -144,9 +146,96 @@ def _rows():
     return [r for r in rows if isinstance(r, dict) and r.get("symbol") in universe]
 
 
+
+def _plus10_probability(symbol):
+    """Empirical-Bayes +10% before-stop probability from resolved outcomes.
+
+    Uses the most specific cohort with enough observations, then backs off to
+    setup/class/global calibration. The value is always labelled with sample
+    size/confidence so an untrained prior cannot masquerade as evidence.
+    """
+    global _p10_cache_ms
+    symbol = str(symbol or "").upper()
+    at = ts()
+    cached = _p10_cache.get(symbol)
+    if cached and 0 <= at - int(cached.get("_cached_ms") or 0) <= 5000:
+        return dict(cached)
+
+    result = {
+        "probability": 0.5,
+        "ci95": [0.0, 1.0],
+        "samples": 0,
+        "confidence": "INSUFFICIENT",
+        "source": "BETA_PRIOR_GLOBAL",
+        "calibrated": False,
+    }
+    if LEARNER is None or CORE is None:
+        result["_cached_ms"] = at
+        _p10_cache[symbol] = result
+        return dict(result)
+
+    try:
+        structural = next(
+            (r for r in (CORE._board() or [])
+             if isinstance(r, dict) and _symbol(r) == symbol),
+            {},
+        )
+        legacy = (getattr(CORE.q, "latest", {}) or {}).get(symbol) or {}
+        feat = LEARNER._features(symbol, structural, legacy)
+        signal_class = LEARNER._signal_class(structural, legacy, feat)
+        setup = str(feat.get("setup") or "UNKNOWN")
+        keys = []
+        if signal_class:
+            cohort = LEARNER._cohort(feat, signal_class)
+            keys.append("COHORT::" + cohort)
+            keys.append("CLASS::" + signal_class)
+        if setup:
+            keys.append("SETUP::" + setup)
+        keys.append("GLOBAL")
+
+        options = []
+        for key in keys:
+            cal = LEARNER._calibration(key)
+            metric = ((cal.get("targets") or {}).get("plus_10_before_stop") or {})
+            samples = int(metric.get("samples") or 0)
+            options.append((key, metric, samples))
+
+        minimum = int(getattr(LEARNER, "MIN_CALIBRATION_SAMPLES", 30))
+        chosen = next((x for x in options if x[2] >= minimum), None)
+        if chosen is None and options:
+            chosen = max(options, key=lambda x: x[2])
+        if chosen:
+            key, metric, samples = chosen
+            probability = num(metric.get("probability"), 0.5)
+            ci = list(metric.get("ci95") or [0.0, 1.0])
+            result = {
+                "probability": round(clamp(probability, 0.0, 1.0), 4),
+                "ci95": [round(num(ci[0]), 4), round(num(ci[1], 1.0), 4)] if len(ci) >= 2 else [0.0, 1.0],
+                "samples": samples,
+                "confidence": str(metric.get("confidence") or "INSUFFICIENT"),
+                "source": key,
+                "calibrated": bool(samples >= minimum),
+            }
+    except Exception as exc:
+        _stats["model_errors"] += 1
+        _stats["last_error"] = "p10:" + type(exc).__name__
+
+    result["_cached_ms"] = at
+    _p10_cache[symbol] = result
+    if len(_p10_cache) > 1200:
+        stale = sorted(_p10_cache, key=lambda s: int(_p10_cache[s].get("_cached_ms") or 0))
+        for old in stale[:-900]:
+            _p10_cache.pop(old, None)
+    return dict(result)
+
+
 def _priority_score(row, p):
-    # This score ranks candidates, and is NOT an estimated success probability.
+    # Independent ML rank: short-horizon learned probability plus calibrated
+    # +10% outcome probability when enough resolved samples exist.
+    p10 = _plus10_probability(row.get("symbol"))
     if _model["trained"] >= MIN_TRAIN:
+        if p10.get("calibrated"):
+            return 0.45 * p + 0.55 * num(p10.get("probability"), 0.5)
         return p
     return (
         num(row.get("hazard_score")) / 150
@@ -159,29 +248,55 @@ def _present(row, rank, at):
     sym = row["symbol"]
     x = features(row)
     p = predict(x)
+    p10 = _plus10_probability(sym)
     valid = fresh(row, at)
     entry = num(row.get("entry_reference"))
     trained = _model["trained"] >= MIN_TRAIN
-    # Model has its own expected-value gate; technical V12 conditions are absent.
-    ev = p * 0.03 - (1 - p) * 0.025
-    actionable = bool(trained and valid and p >= 0.5 and ev > 0)
+
+    # Two independent learned views: the original 15m +3% model and an
+    # empirical-Bayes +10% before-stop calibration from resolved outcomes.
+    authority_probability = (
+        0.45 * p + 0.55 * num(p10.get("probability"), 0.5)
+        if p10.get("calibrated") else p
+    )
+    ev15 = p * 0.03 - (1 - p) * 0.025
+    ev10 = num(p10.get("probability"), 0.5) * 0.10 - (
+        1 - num(p10.get("probability"), 0.5)
+    ) * 0.025
+    actionable = bool(
+        trained and valid
+        and authority_probability >= 0.50
+        and (ev10 > 0 if p10.get("calibrated") else ev15 > 0)
+    )
     blockers = []
     if not trained:
         blockers.append("MODEL_MINIMUM_HISTORY")
     if not valid:
         blockers.append("LIVE_SENSOR_OR_EXECUTION_SAFETY")
-    if trained and (p < 0.5 or ev <= 0):
+    if trained and authority_probability < 0.50:
+        blockers.append("ML_AUTHORITY_PROBABILITY")
+    if trained and ((p10.get("calibrated") and ev10 <= 0)
+                    or (not p10.get("calibrated") and ev15 <= 0)):
         blockers.append("NEGATIVE_MODEL_EXPECTED_VALUE")
     return {
         "symbol": sym,
         "rank": rank,
+        "ml_top_pick": rank == 1,
         "signal_ms": at,
         "signal": "ML BUY NOW" if actionable else "ML BUY CANDIDATE",
         "execution_ready": actionable,
         "reason": list(blockers),
         "model_probability": round(p, 4) if trained else None,
+        "probability_plus_10": p10.get("probability"),
+        "probability_plus_10_pct": round(100 * num(p10.get("probability"), 0.5), 2),
+        "probability_plus_10_ci95": p10.get("ci95"),
+        "probability_plus_10_samples": p10.get("samples"),
+        "probability_plus_10_confidence": p10.get("confidence"),
+        "probability_plus_10_source": p10.get("source"),
+        "probability_plus_10_calibrated": bool(p10.get("calibrated")),
+        "ml_authority_probability": round(authority_probability, 4) if trained else None,
         "learning_samples": _model["trained"],
-        "model_type": "online_logistic_sgd",
+        "model_type": "online_logistic_sgd+empirical_bayes_target10",
         "model_version": REVISION,
         "rank_score": round(_priority_score(row, p), 4),
         "observed_price": entry if valid else None,
@@ -194,9 +309,9 @@ def _present(row, rank, at):
         "tp1": round(entry * 1.03, 10) if actionable else None,
         "tp2": round(entry * 1.05, 10) if actionable else None,
         "tp3": round(entry * 1.10, 10) if actionable else None,
-        "timeframe": "15m model / 5m-1h monitoring",
-        "target_definition": "+3% before -2.5% stop within 15m",
-        "model_ev_pct": round(ev * 100, 3) if trained else None,
+        "timeframe": "15m model + 24h target calibration",
+        "target_definition": "+10% before stop probability is calibrated from resolved outcome cohorts",
+        "model_ev_pct": round((ev10 if p10.get("calibrated") else ev15) * 100, 3) if trained else None,
         "evidence": {
             "hazard": row.get("hazard_score"),
             "buy_ratio": row.get("buy_ratio"),
@@ -592,6 +707,12 @@ def thirty(at=None, record=False):
             "recent_trade_observed": ev["priced"],
             "hard_sensor_verified": ev["verified"],
             "rotation_quality": ev["quality"],
+            "probability_plus_10_pct": round(
+                100 * num(_plus10_probability(sym).get("probability"), 0.5), 2),
+            "probability_plus_10_samples": int(
+                _plus10_probability(sym).get("samples") or 0),
+            "probability_plus_10_confidence": str(
+                _plus10_probability(sym).get("confidence") or "INSUFFICIENT"),
         })
         return True
 
@@ -773,6 +894,15 @@ def coverage30_audit(report=None, at=None):
                 if not approved and category != "ml" and strict else None
             ),
             "ml_probability": ml.get("model_probability") if ml else None,
+            "ml_top_pick": bool(ml.get("ml_top_pick")) if ml else False,
+            "probability_plus_10_pct": round(
+                100 * num(_plus10_probability(sym).get("probability"), 0.5), 2),
+            "probability_plus_10_samples": int(
+                _plus10_probability(sym).get("samples") or 0),
+            "probability_plus_10_confidence": str(
+                _plus10_probability(sym).get("confidence") or "INSUFFICIENT"),
+            "probability_plus_10_source": str(
+                _plus10_probability(sym).get("source") or "BETA_PRIOR_GLOBAL"),
             "blockers": [str(x) for x in blockers[:5]],
         })
     return {
@@ -1089,13 +1219,16 @@ def _inject(response):
     payload["v13_ml"] = {
         "independent_of_conventional_buy_rules": True,
         "model": "online_logistic_sgd",
-        "training_horizon": "15m +3% before -2.5% stop",
+        "training_horizon": "15m +3% model; +10% before-stop empirical calibration",
+        "top_pick_policy": "rank by independent ML probability blended with calibrated +10% probability when sufficiently sampled",
         "sample_count": _model["trained"],
         "historical_seeded": _stats.get("historical_seeded", 0),
         "model_ready": _model["trained"] >= MIN_TRAIN,
         "validated_test_samples": _model["test_n"],
         "test_win_rate": round(_model["test_wins"] / _model["test_n"], 4) if _model["test_n"] else None,
         "top_5": ranked,
+        "top_pick": ranked[0] if ranked else None,
+        "plus_10_probability_on_every_coverage_row": True,
         "actionable_count": sum(r["execution_ready"] for r in ranked),
         "selection_count": len(ranked),
         "outcome_stats": dict(_stats),
@@ -1185,5 +1318,5 @@ def install(core, sensor, early, learner=None):
     core.app.scan_endpoint = _scan
     core.app.health = _health
     _restore()
-    print("PSI-V13 INSTALLED revision=" + REVISION +
+    print("PSI-V14 ML_INSTALLED revision=" + REVISION +
           " ml=INDEPENDENT coverage=30 heldBack=REPORTING_ONLY workers=DISCOVERY+LEARNING orders=DISABLED", flush=True)
