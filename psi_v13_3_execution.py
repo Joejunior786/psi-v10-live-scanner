@@ -372,7 +372,11 @@ def _engine_structural(structural, early):
     groups, count = _flow_groups(early)
     state = str((structural or {}).get("state") or "")
     strength = _f((structural or {}).get("setup_strength"))
-    passed = bool(state == "BUY" and strength >= 82 and count >= 2)
+    specialised = any(
+        row.get("name") in (BEAST_SETUPS | EXHAUSTION_SETUPS | BREAKOUT_SETUPS)
+        for row in _active_setups(structural)
+    )
+    passed = bool(not specialised and state == "BUY" and strength >= 82 and count >= 2)
     score = min(100.0, strength * 0.75 + count * 5.0)
     return {
         "engine": "STRUCTURAL_CONFIRMATION", "pass": passed,
@@ -380,6 +384,7 @@ def _engine_structural(structural, early):
         "setup_state": state, "evidence": groups,
         "blockers": [] if passed else [
             x for x, ok in (
+                ("SPECIALISED_SETUP_OWNS_AUTHORITY", not specialised),
                 ("STRUCTURAL_BUY", state == "BUY"),
                 ("STRUCTURAL_STRENGTH_82", strength >= 82),
                 (f"STRUCTURAL_FLOW_{count}/2", count >= 2),
@@ -527,7 +532,7 @@ def _micro_symbols():
 
     try:
         structural = sorted(
-            [r for r in (CORE._board() or []) if isinstance(r, dict) and r.get("state") == "BUY"],
+            [r for r in (CORE._board() or []) if isinstance(r, dict) and r.get("state") in {"BUY", "ARMED"}],
             key=lambda r: (_f(r.get("setup_strength")), _f(r.get("extended_gain_pct"))),
             reverse=True,
         )
