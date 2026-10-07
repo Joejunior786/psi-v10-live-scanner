@@ -3729,7 +3729,11 @@ async def v12_scan(req):
             "error": "SCANNER_VERSION_LOCK_FAILED",
             "version_lock": version_lock,
         }, status=503)
-    rows = _board()
+    # Build the structural/execution board once per request. The previous
+    # implementation rebuilt it again below for counts, duplicating the most
+    # expensive part of /scan without changing the result.
+    all_rows = _board()
+    rows = list(all_rows)
     try:
         limit = max(1, min(int(req.query.get("limit", "60")), 100))
     except Exception:
@@ -3744,7 +3748,6 @@ async def v12_scan(req):
         rows = [r for r in rows if r.get("execution_state") == "EXECUTION_ARMED"]
 
     universe = list(getattr(q, "universe", []) or [])
-    all_rows = _board()
     structural_counts = {
         st: sum(r.get("state") == st for r in all_rows)
         for st in ("BUY", "ARMED", "WATCH")
@@ -3813,6 +3816,9 @@ async def v12_health(req):
         len(((_cache.get(s, {}).get("1w") or {}).get("rows") or [])) >= DEEP_MIN_ROWS
         for s in universe
     )
+    # Health is diagnostic-only; use one coherent board snapshot for all
+    # execution counts instead of rebuilding the board three times.
+    board_rows = _board()
     return app.web.json_response({
         "ok": True,
         "version": VERSION,
@@ -3823,9 +3829,9 @@ async def v12_health(req):
         "execution_authority": "PINPOINT_FAIL_CLOSED",
         "authority_chain": EXECUTION_AUTHORITY_CHAIN,
         "structural_buy_is_executable": False,
-        "structural_buy_count": sum(r.get("state") == "BUY" for r in _board()),
-        "executable_buy_now_count": sum(r.get("execution_state") == "BUY NOW" for r in _board()),
-        "execution_armed_count": sum(r.get("execution_state") == "EXECUTION_ARMED" for r in _board()),
+        "structural_buy_count": sum(r.get("state") == "BUY" for r in board_rows),
+        "executable_buy_now_count": sum(r.get("execution_state") == "BUY NOW" for r in board_rows),
+        "execution_armed_count": sum(r.get("execution_state") == "EXECUTION_ARMED" for r in board_rows),
         "universe": len(universe),
         "mtf_ready": ready,
         "weekly_ready": weekly_ready,
