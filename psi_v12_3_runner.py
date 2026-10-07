@@ -12,10 +12,11 @@ import psi_v12_8_upgrade as upgrade_v128
 import psi_v12_9_upgrade as upgrade_v129
 import psi_v13_upgrade as upgrade_v13
 import psi_v13_perf24 as upgrade_perf24
+import psi_v13_3_execution as upgrade_v133
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
+UPGRADE_RUNTIME = "v13.3-evidence-ready-dual-authority+v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
 
 
 def _start_async_daemon(name, coroutine_factory):
@@ -48,6 +49,7 @@ async def main():
     upgrade_v129.install(core, upgrade_v128)
     upgrade_v13.install(core, upgrade_v125, upgrade_v128, outcome_learning)
     upgrade_perf24.install(core, upgrade_v13)
+    upgrade_v133.install(core, upgrade_v125, upgrade, upgrade_v13)
 
     # Bind the existing aiohttp server immediately so Railway's /live probe
     # reflects process liveness, while the inherited scanner bootstraps in
