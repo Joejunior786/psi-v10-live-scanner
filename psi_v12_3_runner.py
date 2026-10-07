@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import psi_strategy_v12_entry as core
 import psi_v12_3_hardening as hardening
@@ -15,6 +16,21 @@ from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
 UPGRADE_RUNTIME = "v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
+
+
+def _start_async_daemon(name, coroutine_factory):
+    def _thread_main():
+        try:
+            asyncio.run(coroutine_factory())
+        except BaseException as exc:
+            print(
+                f"PSI-CONTROL-THREAD crash name={name} {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    thread = threading.Thread(target=_thread_main, name=name, daemon=True)
+    thread.start()
+    return thread
 
 
 async def main():
@@ -46,9 +62,27 @@ async def main():
     await upgrade.bootstrap()
     await upgrade_v125.bootstrap()
 
+    # Authority/control liveness must not share the scanner's heavy event loop.
+    # Keep the public scan loop fail-closed, but run Redis control + hardening
+    # on independent event loops so long strategy/hydration cycles cannot starve
+    # control-key refresh or worker-heartbeat ingestion.
+    core.REDIS_CONTROL_EXTERNAL = True
+    control_threads = []
+    if core.REDIS_URL:
+        control_threads.append(
+            _start_async_daemon("psi-redis-control", core.redis_control_loop)
+        )
+        control_threads.append(
+            _start_async_daemon("psi-hardening-supervisor", hardening.supervisor_loop)
+        )
+        print(
+            "PSI-CONTROL-PLANE isolated threads="
+            + ",".join(t.name for t in control_threads),
+            flush=True,
+        )
+
     await asyncio.gather(
         core.main(),
-        hardening.supervisor_loop(),
         outcome_learning.supervisor_loop(),
         upgrade.supervisor_loop(),
         upgrade_v125.supervisor_loop(),

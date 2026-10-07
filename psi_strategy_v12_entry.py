@@ -29,6 +29,7 @@ BUILD_COMMIT = (
 ).strip()
 
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_CONTROL_EXTERNAL = False
 REDIS_CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
 REDIS_MICRO_POOL_SIZE = max(10, min(int(os.getenv("PSI_REDIS_MICRO_POOL_SIZE", "40")), 80))
 REDIS_TRADE_CHANNEL = "psi:v12:trade"
@@ -3880,9 +3881,12 @@ async def main():
     hydration_lanes = [v12_ws_rpc_loop(i) for i in range(V12_WS_SHARDS)]
     distributed_lanes = []
     if REDIS_URL:
-        distributed_lanes = [redis_control_loop(), redis_micro_ingest_loop()]
+        distributed_lanes = [redis_micro_ingest_loop()]
+        if not REDIS_CONTROL_EXTERNAL:
+            distributed_lanes.append(redis_control_loop())
         print(
-            f"Ψ-V12 DISTRIBUTED_MICRO enabled poolTarget={REDIS_MICRO_POOL_SIZE}",
+            f"Ψ-V12 DISTRIBUTED_MICRO enabled poolTarget={REDIS_MICRO_POOL_SIZE} "
+            f"controlMode={'EXTERNAL_THREAD' if REDIS_CONTROL_EXTERNAL else 'MAIN_LOOP'}",
             flush=True,
         )
     await asyncio.gather(
