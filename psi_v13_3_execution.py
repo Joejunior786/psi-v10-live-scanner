@@ -290,7 +290,11 @@ def _engine_beast(structural, early):
     evidence_count = sum(bool(x) for x in evidence.values())
     setup_hint = bool(setup) or _f((early or {}).get("v128_probe_score")) >= 70 or _f((early or {}).get("change_point_delta")) >= 8
     early_ok = early_state in {"EARLY_PINPOINT", "EARLY_ARMED"} or hazard >= 82
-    passed = bool(early_ok and setup_hint and hazard >= 74 and evidence_count >= 3)
+    pre_breakout = not (
+        setup and setup.get("name") in BREAKOUT_SETUPS
+        and str(setup.get("state") or "") == "BUY"
+    )
+    passed = bool(early_ok and setup_hint and pre_breakout and hazard >= 74 and evidence_count >= 3)
     score = min(100.0, 0.45 * hazard + 12.0 * evidence_count + (12.0 if setup else 0.0))
     return {
         "engine": "BEAST", "pass": passed, "score": round(score, 2),
@@ -301,6 +305,7 @@ def _engine_beast(structural, early):
             x for x, ok in (
                 ("BEAST_EARLY_STATE", early_ok),
                 ("BEAST_SETUP_OR_PROBE", setup_hint),
+                ("BEAST_PRE_BREAKOUT_PHASE", pre_breakout),
                 ("BEAST_HAZARD", hazard >= 74),
                 ("BEAST_FLOW_3_OF_4", evidence_count >= 3),
             ) if not ok
