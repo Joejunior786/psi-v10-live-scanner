@@ -525,5 +525,22 @@ class V13Tests(unittest.TestCase):
         self.assertEqual(first["execution_ready"], 0)
 
 
+    def test_http_snapshot_cache_reuses_discovery_worker_reporting(self):
+        now = 2_000_000
+        ranked = [{"symbol": "AAAUSDT", "execution_ready": False}]
+        report = [{"symbol": "AAAUSDT", "category": "ml"}]
+        audit = {"rows": [{"symbol": "AAAUSDT"}], "total": 1, "unique": 1}
+        held = {"rows": [], "execution_ready": 0}
+        ml._store_http_snapshot(ranked, report, audit, held, now)
+        snap = ml._get_http_snapshot(now + 1000)
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["ranked"][0]["symbol"], "AAAUSDT")
+        self.assertEqual(snap["audit"]["total"], 1)
+        self.assertEqual(snap["held"]["execution_ready"], 0)
+        self.assertIsNone(
+            ml._get_http_snapshot(now + ml.HTTP_SNAPSHOT_MAX_AGE_MS + 1)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
