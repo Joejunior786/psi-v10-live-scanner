@@ -323,6 +323,39 @@ class SubscriptionAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MicroPriorityHandoffTests(unittest.TestCase):
+    def test_selector_uses_atomic_priority_snapshot_under_midflight_updates(self):
+        # During structural radar enrichment another thread can update ML
+        # priorities; those changes must not change this control transaction.
+        original={k:getattr(core,k,None) for k in (
+            "q","app","_board","_signal_priority_symbols",
+            "_ema_priority_symbols","_distributed_micro_sticky_pool",
+            "REDIS_MICRO_POOL_SIZE","REDIS_MICRO_PRIORITY_SLOTS")}
+        present={k:hasattr(core,k) for k in original}
+        names=[f"ATOM{i}USDT" for i in range(30)]
+        try:
+            core.q=types.SimpleNamespace(universe=names+[f"OTHER{i}USDT" for i in range(55)])
+            core.app=types.SimpleNamespace(selected_micro_symbols=[],symbol_meta={})
+            core._signal_priority_symbols=list(names)
+            core._ema_priority_symbols=[]
+            core.REDIS_MICRO_POOL_SIZE=64
+            core.REDIS_MICRO_PRIORITY_SLOTS=36
+            core._distributed_micro_sticky_pool=["OTHER1USDT"]
+            def structural():
+                # Mutation occurs during the selector after the priorities
+                # were snapshotted by redis_control_loop.
+                core._signal_priority_symbols=["OTHER2USDT"]
+                return []
+            core._board=structural
+            frozen=tuple(names)
+            selected=core._distributed_micro_symbols(priority_snapshot=frozen)
+            self.assertEqual(selected[:30], names)
+            self.assertTrue(set(frozen).issubset(set(selected)))
+            self.assertEqual(core._signal_priority_symbols,["OTHER2USDT"])
+        finally:
+            for k,v in original.items():
+                if present[k]:setattr(core,k,v)
+                elif hasattr(core,k):delattr(core,k)
+
     def test_all_36_specialist_slots_reach_core_control_pool(self):
         # Regression for the 16-of-36 truncation between live signal
         # delivery and the Redis worker-control authority.
