@@ -86,7 +86,9 @@ class ObservationCohort(unittest.TestCase):
         self.assertEqual(b[:2],a)
         self.assertIn("NEWUSDT",b)
         c=feed._stable_market_priorities(["FRESHUSDT"],NOW+120001)
-        self.assertEqual(c,["FRESHUSDT"])
+        self.assertEqual(c,["NEWUSDT","FRESHUSDT"])
+        d=feed._stable_market_priorities(["LATESTUSDT"],NOW+150001)
+        self.assertEqual(d,["FRESHUSDT","LATESTUSDT"])
     def test_missed_move_only_from_observed_fresh_quotes(self):
         measured={"last_price":100.0}
         def check(sym,at):
