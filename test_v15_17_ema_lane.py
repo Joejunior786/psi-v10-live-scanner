@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 import asyncio
+from types import SimpleNamespace
 import psi_v15_17_ema_lane as lane
 
 def snap(**kw):
@@ -76,6 +77,66 @@ class EMATests(unittest.TestCase):
         case=snap(low=96.1,atr=1.0)
         outcome=lane.evaluate(case,"1h",1000,1000,GOOD,FLOW)
         self.assertTrue(all(x["status"]=="BUY NOW — EMA" for x in outcome))
+    def test_independent_buy_with_no_v12_structural_row(self):
+        live = dict(FLOW, last_trade_ms=1000000, last_book_ms=1000000,
+                    last_price=100, spread_bps=5, slippage_bps=12)
+        core=SimpleNamespace(_cache={"TESTUSDT":{"1h":{"snap":snap(),"updated":1000}}},
+                             app=SimpleNamespace(micro_metrics=lambda symbol:live))
+        records, frames, tested = lane.scan_cached_ema(core,now=1000)
+        self.assertEqual(frames,1)
+        self.assertEqual(tested,1)
+        self.assertEqual(len(records),2)
+        self.assertTrue(all(x["status"]=="BUY NOW — EMA" for _,x in records))
+        self.assertTrue(all(x["evidence_status"]=="LIVE_VERIFIED" for _,x in records))
+
+    def test_verified_entry_uses_live_trade_price(self):
+        micro=dict(FLOW,last_trade_ms=1000000,last_book_ms=1000000,
+                   last_price=100.2,spread_bps=5,slippage_bps=10)
+        core=SimpleNamespace(_cache={"TESTUSDT":{"1h":{"snap":snap(),"updated":1000}}},
+                             app=SimpleNamespace(micro_metrics=lambda symbol:micro))
+        rows,_,_=lane.scan_cached_ema(core,now=1000)
+        self.assertTrue(any(x["status"]=="BUY NOW — EMA" for _,x in rows))
+        self.assertTrue(all(x["entry"]==100.2 for _,x in rows))
+
+    def test_missing_spread_never_promotes(self):
+        micro=dict(FLOW, last_trade_ms=1000000, last_book_ms=1000000,
+                   last_price=100, slippage_bps=12)
+        core=SimpleNamespace(_cache={"TESTUSDT":{"1h":{"snap":snap(),"updated":1000}}},
+                             app=SimpleNamespace(micro_metrics=lambda symbol:micro))
+        rows,_,_=lane.scan_cached_ema(core,now=1000)
+        self.assertTrue(all(x["status"]!="BUY NOW — EMA" for _,x in rows))
+        self.assertTrue(all(x["evidence_status"]=="LIVE_BLOCKED" for _,x in rows))
+
+    def test_stale_micro_and_bad_sequence_never_promote(self):
+        micro=dict(FLOW,last_trade_ms=980000,last_book_ms=1000000,last_price=100,
+                   spread_bps=5,slippage_bps=10,sequence_verified=False)
+        core=SimpleNamespace(_cache={"TESTUSDT":{"1h":{"snap":snap(),"updated":1000}}},
+                             app=SimpleNamespace(micro_metrics=lambda symbol:micro))
+        rows,_,_=lane.scan_cached_ema(core,now=1000)
+        self.assertFalse(any(x["status"]=="BUY NOW — EMA" for _,x in rows))
+
+    def test_research_top_ten_does_not_cap_verified_buys(self):
+        micro=dict(FLOW,last_trade_ms=1000000,last_book_ms=1000000,last_price=100,
+                   spread_bps=5,slippage_bps=10)
+        core=SimpleNamespace(_cache={f"T{i}USDT":{"1h":{"snap":snap(),"updated":1000}}
+                                          for i in range(12)},
+                             app=SimpleNamespace(micro_metrics=lambda symbol:micro))
+        old=lane.CORE
+        try:
+            lane.CORE=core
+            with patch.object(lane.time,"time",return_value=1000):
+                board=lane.emit_report()
+            self.assertEqual(len(board["top10_research"]),10)
+            self.assertEqual(len(board["execution_ready_symbols"]),12)
+            self.assertFalse(board["order_placement"])
+        finally:
+            lane.CORE=old
+
+    def test_missing_live_evidence_is_not_negative_evidence(self):
+        rows=lane.evaluate(snap(),"1h",1000,1000,{}, {})
+        self.assertTrue(all("MICRO_NOT_EVALUATED" in x["blockers"] for x in rows))
+        self.assertTrue(all("INVALID_MICRO_SEQUENCE" not in x["blockers"] for x in rows))
+        self.assertFalse(any(x["status"]=="BUY NOW — EMA" for x in rows))
     def test_missing_data_rejected(self):
         self.assertFalse(any(v["status"]=="BUY NOW — EMA" for v in lane.evaluate(snap(),"1h",1000,1000,{},FLOW)))
     def test_seller_not_exhausted(self):

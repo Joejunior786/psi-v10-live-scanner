@@ -2,6 +2,7 @@
 import time
 import math
 import asyncio
+import threading
 
 CORE = None
 PREVIOUS_ATTACH = None
@@ -9,6 +10,9 @@ PREVIOUS_PRINT = None
 EMA_REPORT_HISTORY = {}
 EMA_REPORT_TICK = 0
 EMA_DISPLAY_LIMIT = 30
+EMA_REPORT_LOCK = threading.Lock()
+EMA_REVISION = "15.20-independent-evidence"
+EMA_PRIORITY_LIMIT = 12
 FRAMES = (("1h", "1H", 180), ("4h", "4H", 420), ("1d", "DAILY", 1200))
 
 def num(x, default=0):
@@ -48,9 +52,12 @@ def evaluate(snap, tf, updated, now, integrity, micro):
         if not touch: blockers.append("NO_EMA_TOUCH")
         if not exhausted: blockers.append("SELLER_EXHAUSTION_UNCONFIRMED")
         if not reclaim: blockers.append("EMA_RECLAIM_MISSING")
-        if not flow_ok: blockers.append("INVALID_MICRO_SEQUENCE")
-        if not positive_flow: blockers.append("CVD_OFI_NOT_POSITIVE")
-        if not live_ok: blockers.append("LIVE_INTEGRITY_INVALID")
+        if not micro: blockers.append("MICRO_NOT_EVALUATED")
+        elif not flow_ok: blockers.append("INVALID_MICRO_SEQUENCE")
+        if not micro: pass
+        elif not positive_flow: blockers.append("CVD_OFI_NOT_POSITIVE")
+        if not integrity: blockers.append("LIVE_INTEGRITY_NOT_EVALUATED")
+        elif not live_ok: blockers.append("LIVE_INTEGRITY_INVALID")
         if not 0 < risk_pct <= 5.5: blockers.append("INVALID_EMA_RISK")
         state = ("BUY NOW — EMA" if not blockers else
                  "PRE-IGNITION" if touch and (sell_fade or absorption) else
@@ -66,24 +73,141 @@ def evaluate(snap, tf, updated, now, integrity, micro):
                     "risk_pct":round(risk_pct,3) if 0<risk_pct<=5.5 else None})
     return out
 
+def standalone_live_evidence(core, symbol, snap, now=None):
+    """EMA-specific execution integrity, without an unrelated Pinpoint risk plan.
+
+    Never infer readiness from discovery. Require real trade/book timestamps,
+    verified sequencing, spread, slippage and price agreement. The EMA risk
+    plan is checked independently by evaluate().
+    """
+    now = time.time() if now is None else float(now)
+    blockers = []
+    try:
+        micro = core.app.micro_metrics(symbol) or {}
+    except Exception:
+        micro = {}
+        blockers.append("MICRO_READ_ERROR")
+    if not isinstance(micro, dict):
+        micro = {}
+        blockers.append("MICRO_INVALID")
+
+    trade_ms = num(micro.get("last_trade_ms"))
+    book_ms = num(micro.get("last_book_ms"))
+    trade_age = now * 1000 - trade_ms if trade_ms > 0 else float("inf")
+    book_age = now * 1000 - book_ms if book_ms > 0 else float("inf")
+    if not -2000 <= trade_age <= 15000:
+        blockers.append("STALE_OR_MISSING_TRADES")
+    if not -2000 <= book_age <= 5000:
+        blockers.append("STALE_OR_MISSING_BOOK")
+    if micro.get("micro_ready") is not True:
+        blockers.append("MICRO_NOT_READY")
+    if micro.get("sequence_verified") is not True:
+        blockers.append("TRADE_SEQUENCE_INVALID")
+    if micro.get("book_sequence_verified") is not True:
+        blockers.append("BOOK_SEQUENCE_INVALID")
+
+    spread, slippage = micro.get("spread_bps"), micro.get("slippage_bps")
+    if spread is None or not 0 <= num(spread, -1) <= 40:
+        blockers.append("SPREAD_UNVERIFIED_OR_EXCESSIVE")
+    if slippage is None or not 0 <= num(slippage, -1) <= 80:
+        blockers.append("SLIPPAGE_UNVERIFIED_OR_EXCESSIVE")
+
+    live_price = num(micro.get("last_price"))
+    candle_price = num(snap.get("current"))
+    if (live_price <= 0 or candle_price <= 0
+            or abs(live_price / candle_price - 1) > 0.015):
+        blockers.append("LIVE_PRICE_NOT_CONFIRMED")
+
+    return {"verified": not blockers, "blockers": blockers,
+            "trade_age_ms": trade_age, "book_age_ms": book_age}, micro
+
+
+def _technical_complete(item):
+    """Signal evidence only; NEVER an executable trade by itself."""
+    return (bool(item.get("touch")) and bool(item.get("seller_exhaustion"))
+            and bool(item.get("buyer_reclaim")) and item.get("stop") is not None)
+
+
+def scan_cached_ema(core, now=None):
+    """Scan each fresh frame independently of V12's structural result map."""
+    now = time.time() if now is None else float(now)
+    records = []
+    frames_covered = 0
+    full_evidence_symbols = set()
+    for symbol, frames in list(core._cache.items()):
+        if not isinstance(frames, dict):
+            continue
+        snapshots = []
+        for tf, _, _ in FRAMES:
+            frame = frames.get(tf) or {}
+            snap = frame.get("snap")
+            updated = num(frame.get("updated"))
+            if isinstance(snap, dict) and updated > 0:
+                frames_covered += 1
+                previews = evaluate(snap, tf, updated, now, {}, {})
+                if previews:
+                    snapshots.append((tf, snap, updated, previews))
+        if not snapshots:
+            continue
+        qualifying = [(tf, snap, updated) for tf, snap, updated, items in snapshots
+                      if any(_technical_complete(item) for item in items)]
+        live_by_symbol = None
+        if qualifying:
+            # Technical screening FIRST. Only then spend live-data budget.
+            live_by_symbol = standalone_live_evidence(core, symbol, qualifying[0][1], now)
+            full_evidence_symbols.add(symbol)
+        for tf, snap, updated, previews in snapshots:
+            if live_by_symbol:
+                integrity, micro = live_by_symbol
+                # Each timeframe's candle must agree independently with trade price.
+                live_price = num(micro.get("last_price"))
+                cand_price = num(snap.get("current"))
+                if not cand_price or not live_price or abs(live_price / cand_price - 1) > 0.015:
+                    integrity = dict(integrity, verified=False,
+                                     blockers=list(integrity["blockers"])+["LIVE_PRICE_NOT_CONFIRMED"])
+                # Use the verified recent trade price for entry/risk geometry,
+                # never the potentially older last forming-candle price.
+                evaluated_snap = dict(snap, current=live_price) if integrity["verified"] else snap
+                items = evaluate(evaluated_snap, tf, updated, now, integrity, micro)
+                evidence_status = "LIVE_VERIFIED" if integrity["verified"] else "LIVE_BLOCKED"
+            else:
+                items = previews
+                evidence_status = "DISCOVERY_ONLY"
+            for item in items:
+                item["evidence_status"] = evidence_status
+                records.append((symbol, item))
+    return records, frames_covered, len(full_evidence_symbols)
+
+
 def attach(symbol, structural_row):
     row = dict(PREVIOUS_ATTACH(symbol, structural_row))
-    try:
-        original = CORE.q.latest.get(symbol) or {}
-        integrity = CORE.legacy._integrity_status(symbol, original, require_risk=True, require_event_tape=True)
-        micro = CORE.app.micro_metrics(symbol)
-    except Exception:
-        integrity, micro = {}, {}
     data = CORE._cache.get(symbol) or {}
     now = time.time()
+    snapshots = [(tf, (data.get(tf) or {}).get("snap"), num((data.get(tf) or {}).get("updated")))
+                 for tf, _, _ in FRAMES]
+    previews = [(tf, snap, updated, evaluate(snap, tf, updated, now, {}, {}))
+                for tf, snap, updated in snapshots]
+    qualified = next((snap for tf, snap, _, items in previews
+                      if any(_technical_complete(i) for i in items)), None)
+    integrity, micro = (standalone_live_evidence(CORE, symbol, qualified, now)
+                        if qualified else ({}, {}))
     candidates = []
-    for tf, _, _ in FRAMES:
-        item = data.get(tf) or {}
-        candidates.extend(evaluate(item.get("snap"),tf,num(item.get("updated")),now,integrity,micro))
+    for tf, snap, updated, _ in previews:
+        if qualified and integrity.get("verified") and isinstance(snap, dict):
+            latest = num(micro.get("last_price"))
+            candle = num(snap.get("current"))
+            tf_ok = candle > 0 and latest > 0 and abs(latest / candle - 1) <= .015
+            effective = dict(snap, current=latest) if tf_ok else snap
+            tf_integrity = (integrity if tf_ok else
+                            {"verified":False,"blockers":["LIVE_PRICE_NOT_CONFIRMED"]})
+            candidates.extend(evaluate(effective, tf, updated, now, tf_integrity, micro))
+        else:
+            candidates.extend(evaluate(snap, tf, updated, now, integrity, micro))
     row["ema_signal_lane"] = candidates
     eligible = [r for r in candidates if r["status"] == "BUY NOW — EMA"]
     if eligible:
-        best = sorted(eligible,key=lambda r:({"1h":1,"4h":2,"1d":3}[r["timeframe"]],-r["risk_pct"]),reverse=True)[0]
+        best = sorted(eligible, key=lambda r: ({"1h":1,"4h":2,"1d":3}[r["timeframe"]],
+                                                  -r["risk_pct"]), reverse=True)[0]
         row.update({"buy_now":True,"execution_state":"BUY NOW",
                     "execution_route":"INDEPENDENT_EMA_EXHAUSTION",
                     "execution_entry":best["entry"],"execution_stop":best["stop"],
@@ -91,6 +215,7 @@ def attach(symbol, structural_row):
                     "execution_tp3":best["tp3"],"execution_risk_pct":best["risk_pct"],
                     "execution_blockers":[],"ema_buy_signal":best})
     return row
+
 
 def _ema_rank(item):
     states = {"BUY NOW — EMA": 5, "PRE-IGNITION": 4, "ARMED": 3, "WATCH": 1}
@@ -150,55 +275,60 @@ def select_ema_report(records, history, tick, limit=EMA_DISPLAY_LIMIT):
 
 def emit_report():
     global EMA_REPORT_HISTORY, EMA_REPORT_TICK
-    if CORE is None:
+    if CORE is None or not EMA_REPORT_LOCK.acquire(blocking=False):
         return None
-    records = []
-    covered = 0
-    now = time.time()
-    # Discovery is independent: use every fresh cached Binance candle snapshot,
-    # including symbols excluded from the normal structural top list.
-    for symbol, frames in list(CORE._cache.items()):
-        if not isinstance(frames, dict):
-            continue
-        for tf, _, _ in FRAMES:
-            frame = frames.get(tf) or {}
-            snap = frame.get("snap")
-            if isinstance(snap, dict) and num(frame.get("updated")) > 0:
-                covered += 1
-                # Discovery-only telemetry does not grant execution authority.
-                for item in evaluate(snap, tf, num(frame.get("updated")), now, {}, {}):
-                    records.append((symbol, item))
-    # Overlay exact execution-grade decisions when their safety evidence exists.
-    evidence = {(symbol, item["timeframe"], item["ema_period"]): item
-                for symbol, row in list(CORE._results.items())
-                for item in row.get("ema_signal_lane") or []}
-    records = [(symbol, evidence.get((symbol, item["timeframe"], item["ema_period"]), item))
-               for symbol, item in records]
-    touches = [r for r in records if r[1]["touch"]]
-    buys = [r for r in touches if r[1]["status"] == "BUY NOW — EMA"]
-    print(
-        f"Ψ-V15.17 EMA_SIGNAL_LANE candleFrames={covered} evaluated={len(records)} "
-        f"touches={len(touches)} buys={len(buys)} "
-        f"approaching={len(records)-len(touches)}",
-        flush=True,
-    )
-    EMA_REPORT_TICK += 1
-    shown, EMA_REPORT_HISTORY, unique_symbols = select_ema_report(
-        records, EMA_REPORT_HISTORY, EMA_REPORT_TICK)
-    print(f"Ψ-V15.17 EMA_ROTATION unique={unique_symbols} displayed={len(shown)} "
-          f"new={sum(row[2] == 'NEW' for row in shown)} "
-          f"improving={sum(row[2] == 'IMPROVING' for row in shown)} "
-          f"buy={sum(row[1]['status'] == 'BUY NOW — EMA' for row in shown)}", flush=True)
-    for symbol, item, change, signals in shown:
-        print(
-            f"EMA {symbol} tf={item['timeframe']} ema={item['ema_period']} "
-            f"dist={item['distance_pct']:+.3f}% exhausted={item['seller_exhaustion']} "
-            f"reclaim={item['buyer_reclaim']} status={item['status']} "
-            f"change={change} signals={signals} "
-            f"blockers={','.join(item['blockers']) or '-'}",
-            flush=True,
-        )
-    return None
+    try:
+        records, covered, live_checked = scan_cached_ema(CORE)
+        touches = [r for r in records if r[1]["touch"]]
+        buys = [r for r in records if r[1]["status"] == "BUY NOW — EMA"]
+        technical = [(sym, item) for sym, item in records if _technical_complete(item)]
+        technical_symbols = list(dict.fromkeys(sym for sym, _ in technical))
+        ranked = sorted(records, key=lambda r: _ema_rank(r[1]), reverse=True)
+        research = list(dict.fromkeys(sym for sym, item in ranked
+                                     if item["touch"] and abs(item["distance_pct"]) <= 1.0
+                                     and sym not in {"XUSDUSDT", "BFUSDUSDT", "USDCUSDT", "USD1USDT", "FDUSDUSDT", "TUSDUSDT"}))[:10]
+        priority = list(dict.fromkeys([sym for sym in technical_symbols if sym not in {"XUSDUSDT", "BFUSDUSDT", "USDCUSDT", "USD1USDT", "FDUSDUSDT", "TUSDUSDT"}] + research))[:EMA_PRIORITY_LIMIT]
+        snapshot = {
+            "revision": EMA_REVISION, "generated_ms": int(time.time() * 1000),
+            "candle_frames": covered, "interactions": len(records),
+            "unique_symbols": len(set(sym for sym, _ in records)),
+            "live_evidence_symbols": live_checked,
+            "technical_qualified_symbols": technical_symbols,
+            "execution_ready_symbols": list(dict.fromkeys(sym for sym, _ in buys)),
+            "execution_ready_signals": [dict(symbol=sym, **item) for sym, item in buys],
+            "top10_research": research,
+            "order_placement": False,
+        }
+        # Atomic snapshot for API/report consumers; no mutation of legacy authority.
+        CORE._independent_ema_board = snapshot
+        CORE._ema_priority_symbols = priority
+        print(f"Ψ-V15.20 EMA_INDEPENDENT candleFrames={covered} "
+              f"interactions={len(records)} unique={snapshot['unique_symbols']} "
+              f"touches={len(touches)} technical={len(technical_symbols)} "
+              f"liveChecked={live_checked} verifiedBuys={len(buys)} "
+              f"research={len(research)}", flush=True)
+        print("Ψ-V15.20 EMA_RESEARCH_TOP10 " + ",".join(research or ["NONE"]), flush=True)
+        for sym, item in buys:
+            print(f"Ψ-V15.20 EMA_VERIFIED_BUY {sym} tf={item['timeframe']} "
+                  f"ema={item['ema_period']} entry={item['entry']:.10g} "
+                  f"stop={item['stop']:.10g} tp1={item['tp1']:.10g} "
+                  f"risk={item['risk_pct']:.2f}% evidence=LIVE_VERIFIED", flush=True)
+        EMA_REPORT_TICK += 1
+        shown, EMA_REPORT_HISTORY, unique_symbols = select_ema_report(
+            records, EMA_REPORT_HISTORY, EMA_REPORT_TICK)
+        print(f"Ψ-V15.20 EMA_ROTATION unique={unique_symbols} displayed={len(shown)} "
+              f"new={sum(row[2] == 'NEW' for row in shown)} "
+              f"improving={sum(row[2] == 'IMPROVING' for row in shown)} "
+              f"buy={sum(row[1]['status'] == 'BUY NOW — EMA' for row in shown)}", flush=True)
+        for symbol, item, change, signals in shown:
+            print(f"EMA {symbol} tf={item['timeframe']} ema={item['ema_period']} "
+                  f"dist={item['distance_pct']:+.3f}% exhausted={item['seller_exhaustion']} "
+                  f"reclaim={item['buyer_reclaim']} status={item['status']} "
+                  f"change={change} signals={signals} evidence={item.get('evidence_status','LEGACY')} "
+                  f"blockers={','.join(item['blockers']) or '-'}", flush=True)
+        return snapshot
+    finally:
+        EMA_REPORT_LOCK.release()
 
 
 def print_board(*args, **kwargs):
