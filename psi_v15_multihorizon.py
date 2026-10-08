@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.13.0-broad-discovery-rotation"
+REVISION = "15.14.0-setup-intelligence-shadow"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -535,6 +535,54 @@ def _safety(sensor, at=None):
     if _f(sensor.get("entry_reference")) <= 0:
         blockers.append("PRICE")
     return not blockers, blockers
+
+
+def _setup_evidence(sensor, structural=None):
+    """Conservative multi-lane setup probes: observed fields only, never inferred candles."""
+    sensor = sensor or {}
+    structural = structural or {}
+    evidence = {lane: [] for lane in LANES}
+    def positive(key, threshold=0.0):
+        return key in sensor and _f(sensor.get(key)) > threshold
+    def flag(key):
+        return structural.get(key) is True or sensor.get(key) is True
+
+    if positive("relative_volume_10s", 2.0) and positive("trade_acceleration", 1.0):
+        evidence["BEAST"].append("VOLUME_AND_TRADE_ACCELERATION")
+    if positive("cvd_acceleration") and positive("ofi_acceleration"):
+        evidence["BEAST"].append("CVD_AND_OFI_ACCELERATION")
+    if positive("obi", 0.15) and positive("ask_depletion", 0.1):
+        evidence["BEAST"].append("BUY_BOOK_AND_ASK_DEPLETION")
+
+    if flag("seller_exhaustion") or flag("exhaustion"):
+        evidence["EXHAUSTION"].append("SELLER_EXHAUSTION_FLAG")
+    if flag("structural_support") or flag("range_bottom_touch") or flag("liquidity_sweep"):
+        evidence["EXHAUSTION"].append("SUPPORT_OR_SWEEP")
+    if positive("cvd_acceleration") and positive("buy_ratio", 0.55):
+        evidence["EXHAUSTION"].append("BUY_ABSORPTION")
+
+    if flag("compression") or flag("volatility_squeeze"):
+        evidence["BREAKOUT"].append("COMPRESSION")
+    if flag("breakout_near") or flag("breakout") or flag("resistance_retest"):
+        evidence["BREAKOUT"].append("RESISTANCE_OR_RETEST")
+    if positive("relative_volume_30s", 3.0) and positive("buy_ratio", 0.55):
+        evidence["BREAKOUT"].append("VOLUME_BUY_CONFIRMATION")
+
+    if flag("weekly_touch") or flag("daily_touch"):
+        evidence["HTF_SWING"].append("HTF_MA_TOUCH")
+    if flag("ema50_reclaim") or flag("ema200_reclaim") or flag("weekly_rejection"):
+        evidence["HTF_SWING"].append("MA_RECLAIM_OR_REJECTION")
+    if flag("daily_confirmation") or flag("higher_timeframe_confirmation"):
+        evidence["HTF_SWING"].append("DAILY_CONFIRMATION")
+
+    # Two independent observations required for provisional setup discovery.
+    best = max(LANES, key=lambda lane: (len(evidence[lane]), -LANES.index(lane)))
+    return {
+        "lane": best if len(evidence[best]) >= 2 else None,
+        "evidence": evidence[best] if len(evidence[best]) >= 2 else [],
+        "all_counts": {lane: len(evidence[lane]) for lane in LANES},
+        "verified": False,
+    }
 
 
 def _structural_map():
@@ -1409,8 +1457,15 @@ def _build_board(at=None):
         sym = str(sensor.get("symbol") or "").upper()
         if not sym:
             continue
-        srow = structural.get(sym) or {}
-        lane = _classify_lane(srow, sensor)
+        srow = dict(structural.get(sym) or {})
+        evidence = _setup_evidence(sensor, srow)
+        # Broad-market observations are provisional. A shadow setup cannot
+        # overrule a verified upstream structural setup or authorise a BUY.
+        is_shadow = bool(not srow and evidence["lane"])
+        if is_shadow:
+            srow = {"setup": evidence["lane"] + "_PROBE", "state": "WATCH",
+                    "setup_source": "SENSOR_SHADOW"}
+        lane = evidence["lane"] if is_shadow else _classify_lane(srow, sensor)
         x = _features_from_sensor(sensor, srow)
         opp = _opportunity(lane, x)
         safe, safety_blockers = _safety(sensor, at)
@@ -1418,6 +1473,9 @@ def _build_board(at=None):
         action, executable, action_blockers = _entry_action(
             sensor, srow, opp, safe, safety_blockers, entry_plan
         )
+        if is_shadow:
+            action, executable = "SETUP SHADOW", False
+            action_blockers = ["AWAIT_INDEPENDENT_STRUCTURE_CONFIRMATION"] + list(action_blockers)
 
         price = _f(sensor.get("entry_reference"))
         loss_pct = max(0.75, opp["expected_loss_pct"])
@@ -1450,6 +1508,9 @@ def _build_board(at=None):
         out.append({
             "symbol": sym,
             "lane": lane,
+            "setup_evidence": evidence["evidence"],
+            "setup_evidence_counts": evidence["all_counts"],
+            "setup_verification": "PROVISIONAL_SENSOR" if is_shadow else ("UPSTREAM_STRUCTURAL" if srow else "NONE"),
             "action": action,
             "execution_ready": executable,
             "authority": AUTHORITY,
@@ -1559,7 +1620,9 @@ def report():
         "targets_pct": list(TARGETS),
         "minimum_ml_trade_target_pct": MIN_TRADE_TARGET_PCT,
         "ranking_policy": "calibrated EV, broad cached-sensor discovery, research rotation, approved picks never displaced",
-        "candidate_source": "V13 plus all eligible cached sensor records; safety fail-closed",
+        "candidate_source": "V13 plus eligible cached sensors; 4-lane setup probes shadow only pending structural verification",
+        "setup_probe_policy": "Two observed corroborating factors, independent structure confirmation required for BUY",
+        "daily_trade_limit": None,
         "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
         "horizons": list(HORIZON_ORDER),
         "decision_rule": "10%+ selected target + positive empirical EV + out-of-sample validation + hard live-data safety",
@@ -1786,7 +1849,7 @@ def install(core, v13, outcome=None, v14=None):
         "PSI-V15 INSTALLED revision=" + REVISION
         + " specialists=BEAST/EXHAUSTION/BREAKOUT/HTF_SWING"
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
-        + " trainedTargets=3,5,10,20 selectionTargets=10,20 discovery=SENSOR_CACHE_PLUS_V13"
+        + " trainedTargets=3,5,10,20 selectionTargets=10,20 discovery=SENSOR_CACHE_PLUS_V13 setupProbes=SHADOW_NO_DAILY_CAP"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
         + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 bootstrapSafeHoldout=ENABLED knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY trainedModelPriority=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
