@@ -3533,7 +3533,7 @@ async def redis_control_loop():
             last_priority_diag = 0.0
             while True:
                 priority_snapshot=tuple(globals().get("_signal_priority_symbols",[]) or [])
-                symbols = _distributed_micro_symbols(priority_snapshot=priority_snapshot)
+                symbols = _distributed_micro_symbols()
                 now_mono = time.monotonic()
                 if now_mono - last_priority_diag >= 10:
                     monitored=list(priority_snapshot)
