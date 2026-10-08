@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.26.0-live-evidence-recheck-qualification"
+REVISION = "15.27.0-synchronised-market-evidence"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -554,7 +554,7 @@ def _synchronise_priority_sensor(sensor, at=None):
         _LIVE_DECISION_DIAG["price_or_liquidity_rejected"] += 1
         return row
     row.update({
-        "generated_ms": at,
+        "generated_ms": min(trade_ms, book_ms),
         "trade_age_ms": age_t,
         "book_age_ms": age_b,
         "hard_sensor_safety": True,
@@ -581,7 +581,7 @@ def _synchronise_priority_sensor(sensor, at=None):
 
 def _decision_priority_symbols(structural):
     wanted = []
-    for sym in list(getattr(CORE, "_signal_priority_symbols", []) or [])[:12]:
+    for sym in list(getattr(CORE, "_signal_priority_symbols", []) or [])[:16]:
         if sym not in wanted:
             wanted.append(sym)
     for sym in list(getattr(CORE, "_ema_priority_symbols", []) or [])[:6]:
@@ -1635,6 +1635,7 @@ def _action_priority(action):
 
 def _build_board(at=None):
     global _board, _last_board_ms
+    explicit_time = at is not None
     at = _now_ms() if at is None else int(at)
     structural = _structural_map()
     rows = _sensor_rows()
@@ -1644,7 +1645,7 @@ def _build_board(at=None):
         sym = str(raw_sensor.get("symbol") or "").upper()
         if not sym:
             continue
-        sensor = (_synchronise_priority_sensor(raw_sensor, at)
+        sensor = (_synchronise_priority_sensor(raw_sensor, at if explicit_time else None)
                   if sym in priority else raw_sensor)
         srow = dict(structural.get(sym) or {})
         daily_levels = _daily_candle_evidence(sym, at)
@@ -1659,7 +1660,7 @@ def _build_board(at=None):
         lane = evidence["lane"] if is_shadow else _classify_lane(srow, sensor)
         x = _features_from_sensor(sensor, srow)
         opp = _opportunity(lane, x)
-        safe, safety_blockers = _safety(sensor, at)
+        safe, safety_blockers = _safety(sensor, at if explicit_time else None)
         entry_plan = _entry_plan(sensor, srow, lane, opp)
         action, executable, action_blockers = _entry_action(
             sensor, srow, opp, safe, safety_blockers, entry_plan
