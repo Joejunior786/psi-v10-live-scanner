@@ -14,9 +14,9 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.0.1-multihorizon-daily-cap-audit"
+REVISION = "15.1.0-oos-promotion-gate"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
-STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_multihorizon.json")
+STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_1_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
 HORIZONS_MS = {
     "15m": 15 * 60_000,
@@ -36,6 +36,9 @@ MIN_MODEL_SAMPLES = max(15, int(os.getenv("PSI_V15_MIN_MODEL_SAMPLES", "30")))
 MIN_SPECIALIST_SAMPLES = max(10, int(os.getenv("PSI_V15_MIN_SPECIALIST_SAMPLES", "20")))
 MIN_BUY_PROBABILITY = max(0.20, min(0.75, float(os.getenv("PSI_V15_MIN_BUY_PROBABILITY", "0.34"))))
 MIN_EXPECTED_VALUE_PCT = max(0.0, float(os.getenv("PSI_V15_MIN_EV_PCT", "0.30")))
+MIN_PROMOTION_TEST_SAMPLES = max(10, int(os.getenv("PSI_V15_MIN_PROMOTION_TEST_SAMPLES", "30")))
+MIN_PROMOTION_TEST_WINS = max(2, int(os.getenv("PSI_V15_MIN_PROMOTION_TEST_WINS", "5")))
+MIN_PROMOTION_TEST_EV_PCT = max(0.0, float(os.getenv("PSI_V15_MIN_PROMOTION_TEST_EV_PCT", "0.10")))
 ROUND_TRIP_FEE_PCT = max(0.0, min(1.0, float(os.getenv("PSI_V15_FEE_PCT", "0.20"))))
 SIGNAL_COOLDOWN_MS = max(30 * 60_000, int(os.getenv("PSI_V15_SIGNAL_COOLDOWN_MS", str(6 * 60 * 60_000))))
 MAX_PENDING = max(200, int(os.getenv("PSI_V15_MAX_PENDING", "1800")))
@@ -103,7 +106,14 @@ def _new_model():
         "wins": 0,
         "losses": 0,
         "test_n": 0,
+        "test_wins": 0,
+        "test_losses": 0,
         "test_correct": 0,
+        "test_brier_sum": 0.0,
+        "test_payoff_win_sum": 0.0,
+        "test_payoff_win_n": 0,
+        "test_payoff_loss_sum": 0.0,
+        "test_payoff_loss_n": 0,
         "brier_sum": 0.0,
         "payoff_win_sum": 0.0,
         "payoff_win_n": 0,
@@ -155,7 +165,30 @@ def _probability(model, x):
 
 
 def _update_model(model, x, outcome, stamp, realised_return=None):
+    """Train without leaking untouched TEST outcomes into prediction/calibration."""
     p = _raw_probability(model, x)
+    split = _split(stamp)
+    realised = _f(realised_return)
+
+    if split == "TEST":
+        model["test_n"] = int(model.get("test_n") or 0) + 1
+        model["test_wins"] = int(model.get("test_wins") or 0) + int(bool(outcome))
+        model["test_losses"] = int(model.get("test_losses") or 0) + int(not bool(outcome))
+        model["test_correct"] = int(model.get("test_correct") or 0) + int((p >= 0.5) == bool(outcome))
+        model["test_brier_sum"] = _f(model.get("test_brier_sum")) + (p - int(bool(outcome))) ** 2
+        if outcome:
+            payoff = max(0.0, realised)
+            if payoff > 0:
+                model["test_payoff_win_sum"] = _f(model.get("test_payoff_win_sum")) + min(100.0, payoff)
+                model["test_payoff_win_n"] = int(model.get("test_payoff_win_n") or 0) + 1
+        else:
+            payoff = abs(min(0.0, realised))
+            if payoff > 0:
+                model["test_payoff_loss_sum"] = _f(model.get("test_payoff_loss_sum")) + min(50.0, payoff)
+                model["test_payoff_loss_n"] = int(model.get("test_payoff_loss_n") or 0) + 1
+        return
+
+    # TRAIN + VALIDATION may contribute to calibration/payoff estimates.
     bucket = str(min(9, max(0, int(p * 10))))
     cb = model.setdefault("cal_bins", {}).setdefault(bucket, {"n": 0, "wins": 0})
     cb["n"] += 1
@@ -164,22 +197,17 @@ def _update_model(model, x, outcome, stamp, realised_return=None):
 
     if outcome:
         model["wins"] = int(model.get("wins") or 0) + 1
-        payoff = max(0.0, _f(realised_return))
+        payoff = max(0.0, realised)
         if payoff > 0:
             model["payoff_win_sum"] = _f(model.get("payoff_win_sum")) + min(100.0, payoff)
             model["payoff_win_n"] = int(model.get("payoff_win_n") or 0) + 1
     else:
         model["losses"] = int(model.get("losses") or 0) + 1
-        payoff = abs(min(0.0, _f(realised_return)))
+        payoff = abs(min(0.0, realised))
         if payoff > 0:
             model["payoff_loss_sum"] = _f(model.get("payoff_loss_sum")) + min(50.0, payoff)
             model["payoff_loss_n"] = int(model.get("payoff_loss_n") or 0) + 1
 
-    split = _split(stamp)
-    if split == "TEST":
-        model["test_n"] = int(model.get("test_n") or 0) + 1
-        model["test_correct"] = int(model.get("test_correct") or 0) + int((p >= 0.5) == bool(outcome))
-        return
     if split == "VALIDATION":
         return
 
@@ -580,6 +608,47 @@ def _payoffs(model, target, lane):
     return avg_win, avg_loss
 
 
+def _promotion_validation(model, lane, target):
+    """Prospective holdout gate; TEST outcomes never train or calibrate the model."""
+    n = int(model.get("test_n") or 0)
+    wins = int(model.get("test_wins") or 0)
+    losses = int(model.get("test_losses") or 0)
+    if wins + losses < n:
+        losses = max(losses, n - wins)
+
+    default_loss = 2.5 if lane in {"BEAST", "BREAKOUT"} else 3.5
+    wn = int(model.get("test_payoff_win_n") or 0)
+    ln = int(model.get("test_payoff_loss_n") or 0)
+    avg_win = (_f(model.get("test_payoff_win_sum")) / wn) if wn else target
+    avg_loss = (_f(model.get("test_payoff_loss_sum")) / ln) if ln else default_loss
+    avg_win = max(target * 0.75, min(max(target, 35.0), avg_win))
+    avg_loss = max(0.75, min(15.0, avg_loss))
+    win_rate = (wins / n) if n else None
+    test_ev = (
+        win_rate * avg_win - (1.0 - win_rate) * avg_loss - ROUND_TRIP_FEE_PCT
+        if win_rate is not None else None
+    )
+    brier = (_f(model.get("test_brier_sum")) / n) if n else None
+    ready = bool(
+        n >= MIN_PROMOTION_TEST_SAMPLES
+        and wins >= MIN_PROMOTION_TEST_WINS
+        and test_ev is not None
+        and test_ev >= MIN_PROMOTION_TEST_EV_PCT
+    )
+    return {
+        "ready": ready,
+        "samples": n,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate, 4) if win_rate is not None else None,
+        "expected_value_pct": round(test_ev, 3) if test_ev is not None else None,
+        "brier": round(brier, 5) if brier is not None else None,
+        "minimum_samples": MIN_PROMOTION_TEST_SAMPLES,
+        "minimum_wins": MIN_PROMOTION_TEST_WINS,
+        "minimum_ev_pct": MIN_PROMOTION_TEST_EV_PCT,
+    }
+
+
 def _opportunity(lane, x):
     choices = []
     probabilities = {}
@@ -590,6 +659,7 @@ def _opportunity(lane, x):
             p, raw, calibration = _probability(model, x)
             avg_win, avg_loss = _payoffs(model, target, lane)
             ev = p * avg_win - (1.0 - p) * avg_loss - ROUND_TRIP_FEE_PCT
+            promotion = _promotion_validation(model, lane, target)
             probabilities[horizon][str(int(target))] = {
                 "probability": round(p, 4),
                 "raw_probability": round(raw, 4),
@@ -597,6 +667,7 @@ def _opportunity(lane, x):
                 "model_source": source,
                 "calibration": calibration,
                 "expected_value_pct": round(ev, 3),
+                "promotion_validation": promotion,
             }
             horizon_minutes = HORIZONS_MS[horizon] / 60_000
             plausibility = 1.0
@@ -605,10 +676,11 @@ def _opportunity(lane, x):
             elif target >= 10 and horizon_minutes < 60 and samples < 100:
                 plausibility = 0.70
             score = ev * plausibility + 0.25 * p + 0.03 * math.log1p(samples)
-            choices.append((score, ev, p, target, horizon, model, source, samples, calibration))
+            score += 0.15 if promotion["ready"] else 0.0
+            choices.append((score, ev, p, target, horizon, model, source, samples, calibration, promotion))
     choices.sort(key=lambda z: z[0], reverse=True)
     best = choices[0]
-    _, ev, p, target, horizon, model, source, samples, calibration = best
+    _, ev, p, target, horizon, model, source, samples, calibration, promotion = best
     avg_win, avg_loss = _payoffs(model, target, lane)
     med, lo, hi, time_source = _target_time(lane, target, HORIZONS_MS[horizon])
     lane_stat = _lane_stat(lane, target)
@@ -625,6 +697,7 @@ def _opportunity(lane, x):
         "samples": samples,
         "model_source": source,
         "calibration": calibration,
+        "promotion_validation": promotion,
         "expected_time_ms": med,
         "time_low_ms": lo,
         "time_high_ms": hi,
@@ -666,6 +739,9 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers):
         )
         if not support and _f(structural.get("setup_strength")) < 65:
             return "BUY PULLBACK", False, ["PREFER_BETTER_LOCATION"]
+
+    if not bool((opp.get("promotion_validation") or {}).get("ready")):
+        return "ML SHADOW BUY", False, ["OUT_OF_SAMPLE_VALIDATION_PENDING"]
 
     return "ML BUY NOW", True, []
 
@@ -760,6 +836,11 @@ def _build_board(at=None):
             "model_samples": opp["samples"],
             "model_source": opp["model_source"],
             "probability_calibration": opp["calibration"],
+            "promotion_ready": bool((opp.get("promotion_validation") or {}).get("ready")),
+            "promotion_test_samples": int((opp.get("promotion_validation") or {}).get("samples") or 0),
+            "promotion_test_wins": int((opp.get("promotion_validation") or {}).get("wins") or 0),
+            "promotion_test_ev_pct": (opp.get("promotion_validation") or {}).get("expected_value_pct"),
+            "promotion_test_brier": (opp.get("promotion_validation") or {}).get("brier"),
             "multi_horizon_probabilities": opp["probabilities"],
             "hard_safety_verified": safe,
             "blockers": list(dict.fromkeys(action_blockers + ([] if safe else safety_blockers)))[:10],
@@ -803,6 +884,13 @@ def report():
         "fixed_50pct_gate_removed": True,
         "forced_top_five": True,
         "max_ml_trades_per_day": MAX_ML_BUYS_PER_DAY,
+        "promotion_policy": {
+            "out_of_sample_required": True,
+            "minimum_test_samples": MIN_PROMOTION_TEST_SAMPLES,
+            "minimum_test_wins": MIN_PROMOTION_TEST_WINS,
+            "minimum_test_ev_pct": MIN_PROMOTION_TEST_EV_PCT,
+            "unvalidated_signal": "ML SHADOW BUY",
+        },
         "daily_buy_day_utc": _daily_buy_day or _utc_day(_now_ms()),
         "daily_buy_symbols": sorted(_daily_buy_symbols),
         "execution_ready": sum(bool(r.get("execution_ready")) for r in rows),
@@ -940,6 +1028,9 @@ async def supervisor_loop():
                                 "time_model_source", "probability", "expected_value_pct",
                                 "expected_mfe_pct", "expected_mae_pct", "model_samples",
                                 "model_source", "probability_calibration",
+                                "promotion_ready", "promotion_test_samples",
+                                "promotion_test_wins", "promotion_test_ev_pct",
+                                "promotion_test_brier",
                                 "hard_safety_verified", "blockers",
                             )
                         } for r in rows
@@ -980,6 +1071,8 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
+        + " oosPromotion=REQUIRED"
+        + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" maxBuysPerDay={MAX_ML_BUYS_PER_DAY}"
         + " orders=DISABLED",
         flush=True,
