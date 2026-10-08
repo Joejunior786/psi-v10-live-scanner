@@ -1057,8 +1057,8 @@ code{word-break:break-word}
  <div id="moverNote" class="note">Waiting for verified tracking observations…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead><tbody id="moverRows"></tbody></table></div>
 </section>
-<section class="panel" id="research-section">
- <div class="section-header"><h2>Developing setups</h2><span class="section-tag">Ranked research</span></div>
+<section class="panel">
+ <div class="section-header"><h2 id="research-section">Developing setups</h2><span class="section-tag">Ranked research</span></div>
  <p>Highest-ranked near-EMA setups based on cached 1H/4H/daily candles, not live execution quotes. Unchanged snapshots can repeat.</p>
  <div id="researchNote" class="note" role="status">Checking source updates…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead><tbody id="research"></tbody></table></div>
