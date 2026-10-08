@@ -25,6 +25,13 @@ RESEARCH_ROTATE_COUNT = 10
 SOURCE_DECISION_MAX_AGE_MS = 20000
 MICRO_QUOTE_MAX_AGE_MS = 1200
 ML_PRIORITY_COUNT = 12
+MICRO_PRIORITY_SLOTS = 8
+PRIORITY_HOLD_MS = 120000
+MOVER_WINDOW_MS = 24 * 60 * 60 * 1000
+MOVER_THRESHOLD_PCT = 10.0
+_PRIORITY_LEASES = {}
+_OBSERVED_QUOTES = {}
+_MISSED_MOVES = deque(maxlen=80)
 _RESEARCH_PREVIOUS = {}
 _LOCK = Lock()
 _PUBLISH_LOCK = Lock()
@@ -259,6 +266,93 @@ def _candidate_authorities(now_ms):
     return approved, inspected, wanted
 
 
+
+def _stable_market_priorities(candidates, at):
+    """Hold real worker subscriptions for 120s instead of churning each tick."""
+    for symbol, expires in list(_PRIORITY_LEASES.items()):
+        if expires <= at:
+            del _PRIORITY_LEASES[symbol]
+    for symbol in candidates or []:
+        symbol = str(symbol or "").upper()
+        if len(_PRIORITY_LEASES) >= MICRO_PRIORITY_SLOTS:
+            break
+        if (re.fullmatch(r"[A-Z0-9]{2,24}USDT",symbol)
+                and symbol not in _PRIORITY_LEASES):
+            _PRIORITY_LEASES[symbol] = at + PRIORITY_HOLD_MS
+    return list(_PRIORITY_LEASES)
+
+
+def _qualification_report(at):
+    if ML is None or not 0 <= at-EMA.num(getattr(ML,"_last_board_ms",0)) <= SOURCE_DECISION_MAX_AGE_MS:
+        return [],{}
+    rows,counts=[],{}
+    for item in list(getattr(ML,"_board",[]) or [])[:30]:
+        state=item.get("qualification_state") or "WATCH"
+        counts[state]=counts.get(state,0)+1
+        if len(rows)>=15:
+            continue
+        rows.append({
+            "symbol":item.get("symbol"),"lane":item.get("lane"),
+            "state":state,"action":item.get("action"),
+            "probability":item.get("probability"),
+            "target_pct":item.get("selected_target_pct"),
+            "live_source":item.get("live_evidence_source") or "SENSOR_CACHE",
+            "blockers":list(item.get("blockers") or [])[:4],
+            "decision_ms":int(EMA.num(getattr(ML,"_last_board_ms",0)))
+        })
+    return rows,counts
+
+
+def _observe_missed_rallies(now_ms, chosen, accepted):
+    """Observed window only: verified trade/book quotes, never cached closes."""
+    active=set(accepted or [])
+    for sym in chosen[:MICRO_PRIORITY_SLOTS]:
+        mm, errors=_micro_authority_check(sym,now_ms)
+        if errors:
+            continue
+        price=EMA.num(mm.get("last_price"))
+        if price<=0:
+            continue
+        previous=_OBSERVED_QUOTES.get(sym)
+        if previous is None or now_ms-previous["first_ms"]>MOVER_WINDOW_MS:
+            reason="UNCLASSIFIED"
+            if ML is not None:
+                candidate=next((r for r in list(getattr(ML,"_board",[]) or [])
+                                if r.get("symbol")==sym),None)
+                if candidate:
+                    reason=(candidate.get("qualification_state") or
+                            candidate.get("action") or "WATCH")
+            _OBSERVED_QUOTES[sym]={
+                "first_ms":now_ms,"low_ms":now_ms,"low":price,
+                "first_price":price,"previous_state":reason,
+                "had_approved_buy":sym in active,"reported":False
+            }
+            continue
+        previous["had_approved_buy"] |= sym in active
+        baseline=previous["low"]
+        change=100*(price/baseline-1) if baseline else 0
+        if (change>=MOVER_THRESHOLD_PCT and not previous["reported"]
+                and now_ms-previous["low_ms"]>=60000):
+            _MISSED_MOVES.append({
+                "symbol":sym,"observed_gain_pct":round(change,2),
+                "from_price":baseline,"to_price":price,
+                "start_ms":previous["low_ms"],"end_ms":now_ms,
+                "prior_status":previous["previous_state"],
+                "had_approved_buy":previous["had_approved_buy"],
+                "scope":"OBSERVED_QUOTES_ONLY"
+            })
+            previous["reported"]=True
+        if price<previous["low"]:
+            previous["low"]=price
+            previous["low_ms"]=now_ms
+            previous["reported"]=False
+            previous["previous_state"]="WATCH"
+    if len(_OBSERVED_QUOTES)>250:
+        for sym,item in list(_OBSERVED_QUOTES.items()):
+            if now_ms-item["first_ms"]>MOVER_WINDOW_MS:
+                del _OBSERVED_QUOTES[sym]
+
+
 def _publish_once_unlocked(now_ms=None):
     """Refresh entire cached EMA opportunity set; no 45s reporting dependency."""
     global _SNAPSHOT, _ACTIVE, _NEXT_ID
@@ -353,12 +447,16 @@ def _publish_once_unlocked(now_ms=None):
         else:
             # Retain the underlying strategy approval for read-time rechecks.
             foreign_approved.append(candidate)
+    priorities=_stable_market_priorities(wanted_ml,now_ms)
     try:
-        # Preserve a bounded ML warm-up slice; core's existing worker control
-        # still enforces capacity, rotation, dwell and real Binance subscriptions.
-        CORE._signal_priority_symbols = wanted_ml[:ML_PRIORITY_COUNT]
+        CORE._signal_priority_symbols=list(priorities)
     except (AttributeError, TypeError):
         pass
+    approved_symbols={key[0] for key in buys} | {
+        row["symbol"] for row in foreign_approved
+    }
+    _observe_missed_rallies(now_ms,priorities,approved_symbols)
+    qualification_rows,qualification_counts=_qualification_report(now_ms)
     new_active = set(buys) | {
         (v["symbol"],v["authority"],v.get("lane")) for v in foreign_approved
     }
@@ -390,7 +488,7 @@ def _publish_once_unlocked(now_ms=None):
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.25-unified-verified-authorities",
+            "revision": "15.26-timed-qualification-and-rally-audit",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
@@ -409,7 +507,11 @@ def _publish_once_unlocked(now_ms=None):
             "foreign_screened_count": len(foreign),
             "foreign_rejected_at_gate": foreign_rejections,
             "authority_diagnostics": inspected,
-            "ml_priority_symbols": list(wanted_ml),
+            "ml_priority_symbols": list(priorities),
+            "qualification_rows": qualification_rows,
+            "qualification_counts": qualification_counts,
+            "missed_rallies": list(_MISSED_MOVES)[-10:][::-1],
+            "missed_rally_count": sum(not x["had_approved_buy"] for x in _MISSED_MOVES),
             "live_evidence_checked": live_checked,
             "last_event_id": _NEXT_ID,
             "order_placement": False,
@@ -457,7 +559,7 @@ def read_live(now_ms=None):
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     return {
-        "ok": True, "revision": "15.25-unified-verified-authorities",
+        "ok": True, "revision": "15.26-timed-qualification-and-rally-audit",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -471,6 +573,10 @@ def read_live(now_ms=None):
         "foreign_screened_count": snap.get("foreign_screened_count", 0) if current else 0,
         "foreign_rejected_at_gate": snap.get("foreign_rejected_at_gate", 0) if current else 0,
         "ml_priority_symbols": snap.get("ml_priority_symbols", []) if current else [],
+        "qualification_rows": snap.get("qualification_rows", []) if current else [],
+        "qualification_counts": snap.get("qualification_counts", {}) if current else {},
+        "missed_rallies": snap.get("missed_rallies", []) if current else [],
+        "missed_rally_count": snap.get("missed_rally_count", 0) if current else 0,
         "research_top10": snap.get("research_top10", []) if current else [],
         "research_rows": snap.get("research_rows", []) if current else [],
         "rotating_research_rows": snap.get("rotating_research_rows", []) if current else [],
@@ -563,7 +669,7 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>PSI Live Scanner · V15.25</h1>
+<h1>PSI Live Scanner · V15.26</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
@@ -573,6 +679,17 @@ Every entry requires a new server-side integrity check; this page never submits 
 <table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>Target 1</th><th>Action</th></tr></thead>
 <tbody id="signals"><tr><td colspan="6">Fetching live market checks…</td></tr></tbody></table>
 <h2>On-demand quote check</h2><div id="quote" aria-live="polite">Select Verify on an active signal.</div>
+<h2>ML qualification — current decision, not buy instructions</h2>
+<p>NEAR BUY, DATA BLOCKED and MODEL REJECTED are diagnostic states, never execution approvals.</p>
+<div id="qualNote" class="warn">Checking qualification evidence…</div>
+<table><thead><tr><th>Pair</th><th>Engine</th><th>Status</th><th>Target</th><th>Primary blocker</th></tr></thead>
+<tbody id="qualRows"></tbody></table>
+<h2>Observed 10%+ rallies without prior approval</h2>
+<p>Only prices observed with verified live trade and book evidence while monitored;
+not all exchange gainers or a claim of a missed trade. Resets on scanner restart.</p>
+<div id="moverNote" class="warn">Waiting for verified tracking observations…</div>
+<table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead>
+<tbody id="moverRows"></tbody></table>
 <h2>Developing setups — highest-ranked</h2>
 <p>Based on cached 1H/4H/daily candles, not live quotes. Stable readings
 may repeat until Binance supplies a changed candle snapshot.</p>
@@ -593,6 +710,10 @@ const signals=document.getElementById("signals");
 const research=document.getElementById("research");
 const rotating=document.getElementById("rotating");
 const researchNote=document.getElementById("researchNote");
+const qualRows=document.getElementById("qualRows");
+const qualNote=document.getElementById("qualNote");
+const moverRows=document.getElementById("moverRows");
+const moverNote=document.getElementById("moverNote");
 const quote=document.getElementById("quote");
 let aliveUntil=0, token=0, requestPending=false;
 function cell(row,value){const td=document.createElement("td");
@@ -662,6 +783,30 @@ async function refresh(){
     }else{let row=signals.insertRow();
       cell(row,valid?"No BUY NOW signal qualified":"Snapshot expired — waiting for refresh");
       row.firstChild.colSpan=6;}
+    clear(qualRows);clear(moverRows);
+    if(valid){
+      const counts=d.qualification_counts||{};
+      qualNote.textContent=Object.entries(counts).map(([k,v])=>k+": "+v).join(" | ")
+        ||"No current ML decisions";
+      for(const q of (d.qualification_rows||[])){
+        const r=qualRows.insertRow();
+        cell(r,q.symbol);cell(r,q.lane);cell(r,q.state);
+        cell(r,(q.target_pct==null?"—":q.target_pct+"%"));
+        cell(r,(q.blockers||[]).slice(0,2).join(", ")||"—");
+      }
+      const events=(d.missed_rallies||[]).filter(e=>!e.had_approved_buy);
+      moverNote.textContent=events.length
+        +" tracked 10%+ observed moves without an approved BUY";
+      for(const m of events){
+        const r=moverRows.insertRow();
+        cell(r,m.symbol);cell(r,"+"+m.observed_gain_pct+"%");
+        cell(r,new Date(m.start_ms).toLocaleTimeString());
+        cell(r,m.prior_status);
+      }
+    }else{
+      qualNote.textContent="Evidence unavailable";
+      moverNote.textContent="Tracking unavailable";
+    }
     clear(research);clear(rotating);
     if(valid){
       const count=d.research_eligible_count||0;
@@ -689,7 +834,9 @@ async function refresh(){
       researchNote.textContent="Candle evidence unavailable — no current research results";
     }
   }catch(e){status.className="bad";status.textContent="CONNECTION UNAVAILABLE: "+e.message;
-    invalidate();clear(research);clear(rotating);researchNote.textContent="Connection lost — no fresh research";}
+    invalidate();clear(research);clear(rotating);clear(qualRows);clear(moverRows);
+    qualNote.textContent="Disconnected";moverNote.textContent="Disconnected";
+    researchNote.textContent="Connection lost — no fresh research";}
   finally{requestPending=false;setTimeout(refresh,850);}
 }
 setInterval(()=>{if(aliveUntil&&performance.now()>=aliveUntil){
@@ -789,6 +936,8 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "authority_diagnostics": live.get("authority_diagnostics", {}),
         "foreign_rejected_at_gate": live.get("foreign_rejected_at_gate", 0),
         "ml_priority_symbols": live.get("ml_priority_symbols", []),
+        "qualification_counts": live.get("qualification_counts", {}),
+        "missed_rally_count": live.get("missed_rally_count", 0),
         "technical_ready": live.get("technical_ready_symbols", []),
         "research": live.get("research_top10", []),
         "research_rows": live.get("research_rows", [])[:10],
@@ -799,7 +948,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "worker_errors": live.get("errors", 0),
         "read_only": True,
     }
-    return "PSI-V15.25 SIGNAL_TICK " + json.dumps(
+    return "PSI-V15.26 SIGNAL_TICK " + json.dumps(
         report, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
 
@@ -825,7 +974,7 @@ async def supervisor_loop():
             with _LOCK:
                 _STATUS["errors"] += 1
                 _STATUS["last_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
-            print(f"PSI-V15.25 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
+            print(f"PSI-V15.26 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(INTERVAL_SECONDS)
 
 
@@ -836,4 +985,4 @@ def install(core, ema, ml=None):
     core.app.fast_events_handler = http_events
     core.app.fast_quote_handler = http_quote
     core.app.fast_dashboard_handler = http_dashboard
-    print("PSI-V15.25 LIVE_SIGNAL_DELIVERY unified EMA+ML+V12 verification and market-priority bridge", flush=True)
+    print("PSI-V15.26 LIVE_SIGNAL_DELIVERY timed decision evidence, watch dwell and rally audit", flush=True)
