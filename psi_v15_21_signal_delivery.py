@@ -25,7 +25,7 @@ RESEARCH_ROTATE_COUNT = 10
 SOURCE_DECISION_MAX_AGE_MS = 20000
 MICRO_QUOTE_MAX_AGE_MS = 1200
 ML_PRIORITY_COUNT = 12
-MICRO_PRIORITY_SLOTS = 8
+MICRO_PRIORITY_SLOTS = 16
 PRIORITY_HOLD_MS = 120000
 MOVER_WINDOW_MS = 24 * 60 * 60 * 1000
 MOVER_THRESHOLD_PCT = 10.0
@@ -256,13 +256,32 @@ def _candidate_authorities(now_ms):
     except (AttributeError, TypeError):
         pass
 
-    # Scheduling only. Stable top-ranked candidates get an opportunity to
-    # warm both WebSocket sources, rather than being persistently skipped.
+    # Subscriptions follow verified structure before unverified model ranks.
+    # This is telemetry scheduling, NEVER a BUY authorisation.
     wanted = []
-    for row in ml_rows[:ML_PRIORITY_COUNT]:
-        symbol = str(row.get("symbol") or "").upper()
-        if re.fullmatch(r"[A-Z0-9]{2,24}USDT", symbol) and symbol not in wanted:
-            wanted.append(symbol)
+    def add(sym):
+        sym = str(sym or "").upper()
+        if re.fullmatch(r"[A-Z0-9]{2,24}USDT",sym) and sym not in wanted:
+            wanted.append(sym)
+    structural = sorted(locals().get("structural_rows", []),
+        key=lambda r: (r.get("execution_state") == "BUY NOW",
+            r.get("state") == "BUY",r.get("state") == "ARMED",
+            EMA.num(r.get("setup_strength"))),reverse=True)
+    for row in structural[:6]:
+        add(row.get("symbol"))
+    for row in sorted(ml_rows,key=lambda r: (
+        r.get("setup_verification") == "UPSTREAM_STRUCTURAL",
+        r.get("qualification_state") == "NEAR BUY",
+        EMA.num(r.get("setup_strength")),
+        EMA.num(r.get("probability"))),reverse=True):
+        if row.get("setup_verification") == "UPSTREAM_STRUCTURAL":
+            add(row.get("symbol"))
+        if len(wanted) >= 12:
+            break
+    for row in ml_rows:
+        add(row.get("symbol"))
+        if len(wanted) >= MICRO_PRIORITY_SLOTS:
+            break
     return approved, inspected, wanted
 
 
@@ -294,6 +313,8 @@ def _qualification_report(at):
         rows.append({
             "symbol":item.get("symbol"),"lane":item.get("lane"),
             "state":state,"action":item.get("action"),
+            "setup_confirmation":item.get("setup_verification") or "NONE",
+            "setup_not_confirmed":item.get("setup_verification") != "UPSTREAM_STRUCTURAL",
             "probability":item.get("probability"),
             "target_pct":item.get("selected_target_pct"),
             "live_source":item.get("live_evidence_source") or "SENSOR_CACHE",
@@ -488,7 +509,7 @@ def _publish_once_unlocked(now_ms=None):
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.26-timed-qualification-and-rally-audit",
+            "revision": "15.27-synchronised-observation-data",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
@@ -559,7 +580,7 @@ def read_live(now_ms=None):
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     return {
-        "ok": True, "revision": "15.26-timed-qualification-and-rally-audit",
+        "ok": True, "revision": "15.27-synchronised-observation-data",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -669,7 +690,7 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>PSI Live Scanner · V15.26</h1>
+<h1>PSI Live Scanner · V15.27</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
@@ -792,7 +813,8 @@ async function refresh(){
         const r=qualRows.insertRow();
         cell(r,q.symbol);cell(r,q.lane);cell(r,q.state);
         cell(r,(q.target_pct==null?"—":q.target_pct+"%"));
-        cell(r,(q.blockers||[]).slice(0,2).join(", ")||"—");
+        const b=(q.blockers||[]).slice(0,2).join(", ");
+        cell(r,(q.setup_not_confirmed?"SETUP NOT CONFIRMED; ":"")+(b||"—"));
       }
       const events=(d.missed_rallies||[]).filter(e=>!e.had_approved_buy);
       moverNote.textContent=events.length
@@ -948,7 +970,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "worker_errors": live.get("errors", 0),
         "read_only": True,
     }
-    return "PSI-V15.26 SIGNAL_TICK " + json.dumps(
+    return "PSI-V15.27 SIGNAL_TICK " + json.dumps(
         report, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
 
@@ -974,7 +996,7 @@ async def supervisor_loop():
             with _LOCK:
                 _STATUS["errors"] += 1
                 _STATUS["last_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
-            print(f"PSI-V15.26 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
+            print(f"PSI-V15.27 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(INTERVAL_SECONDS)
 
 
@@ -985,4 +1007,4 @@ def install(core, ema, ml=None):
     core.app.fast_events_handler = http_events
     core.app.fast_quote_handler = http_quote
     core.app.fast_dashboard_handler = http_dashboard
-    print("PSI-V15.26 LIVE_SIGNAL_DELIVERY timed decision evidence, watch dwell and rally audit", flush=True)
+    print("PSI-V15.27 LIVE_SIGNAL_DELIVERY timed decision evidence, watch dwell and rally audit", flush=True)
