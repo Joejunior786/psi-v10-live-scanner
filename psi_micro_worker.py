@@ -8,7 +8,7 @@ from typing import List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.5-distributed-micro-liveness"
+WORKER_VERSION = "15.28-subscription-ack-observability"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -370,7 +370,7 @@ def _book_metrics(state, now):
     }
 
 
-async def publish_snapshot(r, symbols, states, events, host):
+async def publish_snapshot(r, symbols, states, events, host, acknowledged=None):
     now=now_ms()
     metrics={}
     if ROLE=="TRADE":
@@ -392,6 +392,8 @@ async def publish_snapshot(r, symbols, states, events, host):
         "events":events,
         "host":host,
         "publish_raw":PUBLISH_RAW,
+        "requested_symbols":sorted(symbols),
+        "subscription_acknowledged_symbols":sorted(acknowledged or []),
         "metrics":metrics,
     }
     await r.set(SNAPSHOT_KEY,json.dumps(payload,separators=(",",":")),ex=SNAPSHOT_TTL_SECONDS)
@@ -524,6 +526,8 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     activated_at = {sym: time.monotonic() for sym in active}
     inactive_since = {}
     request_id = 1
+    subscription_confirmed = set()
+    pending_subscriptions = {}
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=12, sock_read=30)
 
     async with session.ws_connect(
@@ -544,6 +548,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             "id":request_id,
         })
         request_id+=1
+        pending_subscriptions[request_id] = ("SUBSCRIBE",set(active))
         request_id=await _subscription_change(ws,"SUBSCRIBE",active,request_id)
         print(
             f"PSI-DISTRIBUTED-MICRO connected role={ROLE} symbols={len(active)} "
@@ -570,7 +575,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             if now - last_inbound_at > 45.0:
                 raise RuntimeError(f"silent websocket role={ROLE} age={now-last_inbound_at:.1f}s")
             if now - last_snapshot >= SNAPSHOT_INTERVAL:
-                await publish_snapshot(r, sorted(active), states, events, host)
+                await publish_snapshot(r, sorted(active), states, events, host, subscription_confirmed)
                 last_snapshot = now
             if now - last_hb >= 3.0:
                 await publish_heartbeat(r, sorted(active), events, host)
@@ -590,10 +595,12 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                             now,
                         )
                         if removed:
+                            pending_subscriptions[request_id]=("UNSUBSCRIBE",set(removed))
                             request_id=await _subscription_change(
                                 ws,"UNSUBSCRIBE",removed,request_id
                             )
                         if added:
+                            pending_subscriptions[request_id]=("SUBSCRIBE",set(added))
                             request_id=await _subscription_change(
                                 ws,"SUBSCRIBE",added,request_id
                             )
@@ -638,7 +645,19 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     envelope = json.loads(msg.data)
-                    if isinstance(envelope,dict) and envelope.get("id") is not None and "result" in envelope:
+                    if isinstance(envelope,dict) and envelope.get("id") is not None:
+                        cmd=pending_subscriptions.pop(envelope.get("id"),None)
+                        if cmd:
+                            method,names=cmd
+                            if "result" in envelope and envelope.get("result") is None:
+                                if method=="SUBSCRIBE":
+                                    subscription_confirmed.update(names)
+                                else:
+                                    subscription_confirmed.difference_update(names)
+                            else:
+                                print(f"PSI-MICRO SUBSCRIPTION_REJECTED role={ROLE} "
+                                      f"operation={method} size={len(names)}",
+                                      flush=True)
                         continue
                     data = envelope.get("data") if isinstance(envelope, dict) and isinstance(envelope.get("data"),dict) else envelope
                     if not isinstance(data, dict):
@@ -667,7 +686,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                         await r.publish(CHANNEL, payload)
                     events += 1
                     if now - last_snapshot >= SNAPSHOT_INTERVAL:
-                        await publish_snapshot(r, sorted(active), states, events, host)
+                        await publish_snapshot(r, sorted(active), states, events, host, subscription_confirmed)
                         last_snapshot = now
                     if now - last_hb >= 3.0:
                         await publish_heartbeat(r, sorted(active), events, host)
