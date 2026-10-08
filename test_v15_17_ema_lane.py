@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+import asyncio
 import psi_v15_17_ema_lane as lane
 
 def snap(**kw):
@@ -15,6 +17,24 @@ class EMATests(unittest.TestCase):
         for tf in ("1h","4h","1d"):
             x=lane.evaluate(snap(),tf,1000,1000,GOOD,FLOW)
             self.assertEqual([v["status"] for v in x],["BUY NOW — EMA"]*2)
+    def test_report_without_core_is_safe(self):
+        old = lane.CORE
+        try:
+            lane.CORE = None
+            self.assertIsNone(lane.emit_report())
+        finally:
+            lane.CORE = old
+    def test_report_supervisor_runs_independently(self):
+        calls = []
+        async def once(_):
+            raise asyncio.CancelledError()
+        async def run():
+            with patch.object(lane,"emit_report",side_effect=lambda:calls.append(1)):
+                with patch.object(lane.asyncio,"sleep",side_effect=once):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await lane.reporting_supervisor()
+        asyncio.run(run())
+        self.assertEqual(len(calls),1)
     def test_missing_data_rejected(self):
         self.assertFalse(any(v["status"]=="BUY NOW — EMA" for v in lane.evaluate(snap(),"1h",1000,1000,{},FLOW)))
     def test_seller_not_exhausted(self):
