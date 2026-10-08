@@ -14,7 +14,7 @@ import qualifier_app as qualifier_core
 base=rescue.base
 tape=rescue.tape
 app,q,scanner=base.app,base.q,base.scanner
-VERSION="11.0.5.105-structure-latency-margin"
+VERSION="11.0.5.106-subscription-task-reap"
 
 # Discovery-breadth controls. These change research coverage/visibility only;
 # Pinpoint and every mandatory BUY/risk gate remain fail-closed.
@@ -5904,14 +5904,23 @@ async def strict_raw_ws_backbone_lane(lane_idx):
             host_cursor=(host_cursor+1)%len(hosts)
             await asyncio.sleep(1.0)
         finally:
-            if sub_task is not None and not sub_task.done():
-                sub_task.cancel()
+            if sub_task is not None:
+                if not sub_task.done():
+                    sub_task.cancel()
                 try:
+                    # Always await the subscription task, even when it already
+                    # finished with an exception. Otherwise asyncio reports
+                    # "Task exception was never retrieved" during reconnects.
                     await sub_task
                 except asyncio.CancelledError:
                     pass
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _strict_raw_stats["subscription_task_errors"] = (
+                        _strict_raw_stats.get("subscription_task_errors", 0) + 1
+                    )
+                    _strict_raw_stats["last_subscription_task_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )[:160]
             if session is not None and not session.closed:
                 try:
                     await session.close()
