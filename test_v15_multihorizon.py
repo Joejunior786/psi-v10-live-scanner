@@ -13,6 +13,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.last_signal = dict(v15._last_signal)
         self.seen_seed = set(v15._seen_seed)
         self.seed_buckets = set(v15._seed_buckets)
+        self.entry_seed_seen = set(v15._entry_seed_seen)
+        self.entry_excursion_stats = dict(v15._entry_excursion_stats)
         self.lane_stats = dict(v15._lane_stats)
         self.board = list(v15._board)
         self.signal_journal = list(v15._signal_journal)
@@ -24,6 +26,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._last_signal.clear()
         v15._seen_seed.clear()
         v15._seed_buckets.clear()
+        v15._entry_seed_seen.clear()
+        v15._entry_excursion_stats.clear()
         v15._lane_stats.clear()
         v15._board.clear()
         v15._signal_journal.clear()
@@ -36,6 +40,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._last_signal.clear(); v15._last_signal.update(self.last_signal)
         v15._seen_seed.clear(); v15._seen_seed.update(self.seen_seed)
         v15._seed_buckets.clear(); v15._seed_buckets.update(self.seed_buckets)
+        v15._entry_seed_seen.clear(); v15._entry_seed_seen.update(self.entry_seed_seen)
+        v15._entry_excursion_stats.clear(); v15._entry_excursion_stats.update(self.entry_excursion_stats)
         v15._lane_stats.clear(); v15._lane_stats.update(self.lane_stats)
         v15._board[:] = self.board
         v15._signal_journal[:] = self.signal_journal
@@ -355,6 +361,42 @@ class V15MultiHorizonTests(unittest.TestCase):
             self.assertGreaterEqual(
                 v15.HORIZONS_MS[opp["horizon"]], v15.HORIZONS_MS["4h"]
             )
+
+
+    def test_learned_entry_zone_uses_historical_winner_dips(self):
+        for _ in range(12):
+            v15._record_entry_excursion("BEAST", 10, -2.0)
+        offset, samples, source = v15._learned_entry_offset("BEAST", 10)
+        self.assertEqual(samples, 12)
+        self.assertEqual(source, "EMPIRICAL_WINNER_MAE")
+        self.assertAlmostEqual(offset, -1.0, places=6)
+        plan = v15._entry_plan(
+            dict(self.sensor(), entry_reference=100.0),
+            {}, "BEAST", {"target_pct": 10, "expected_loss_pct": 3.0}
+        )
+        self.assertEqual(plan["entry_zone_source"], "EMPIRICAL_WINNER_MAE")
+        self.assertLess(plan["entry_center"], 100.0)
+        self.assertEqual(plan["entry_model_samples"], 12)
+
+    def test_entry_excursion_seed_reads_mae_at_target_without_model_training(self):
+        base = 4_000_000_000_000
+        events = []
+        for i in range(12):
+            created = base + i * 7 * 60 * 60_000
+            events.append({
+                "id": f"entry{i}", "symbol": f"E{i}USDT", "created_ms": created,
+                "setup": "micro ignition", "features": {"setup": "micro ignition"},
+                "first_target_ms": {"10": created + 2 * 60 * 60_000},
+                "mae_at_target": {"10": -1.6}, "stop_hit_ms": 0, "mae_pct": -4.0,
+            })
+        before_models = len(v15._models)
+        v15.OUTCOME = types.SimpleNamespace(_recent=events)
+        self.assertEqual(v15._seed_entry_excursions(), 12)
+        offset, n, source = v15._learned_entry_offset("BEAST", 10)
+        self.assertEqual(n, 12)
+        self.assertEqual(source, "EMPIRICAL_WINNER_MAE")
+        self.assertAlmostEqual(offset, -0.8, places=6)
+        self.assertEqual(len(v15._models), before_models)
 
 
 if __name__ == "__main__":
