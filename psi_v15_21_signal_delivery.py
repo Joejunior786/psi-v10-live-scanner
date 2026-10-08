@@ -890,19 +890,33 @@ async function refresh(){
         +" V12 approved; "+(d.foreign_rejected_at_gate||0)
         +" rejected at fresh trade/book check"
       :"Authority status unavailable — market verification is stale";
-    clear(signals);
-    if(valid&&d.buy_signals&&d.buy_signals.length){
-      for(const q of d.buy_signals){
-        const row=signals.insertRow();
-        cell(row,q.symbol);cell(row,(q.authority||"EMA")+" · "+(q.lane||"EMA")+" · "+q.timeframe+(q.ema_period?" EMA"+q.ema_period:""));
-        cell(row,money(q.entry));cell(row,money(q.stop));cell(row,money(q.tp1));
-        const c=row.insertCell(), b=document.createElement("button");
-        b.textContent="Verify quote";b.onclick=()=>verify(q.symbol);
-        c.appendChild(b);
+    let visible=0;
+    for(const [engine,group] of Object.entries(laneGroups)){
+      clear(group.body);
+      const lane=(d.verified_lanes||{})[engine];
+      const rows=valid&&Array.isArray(lane)?lane:[];
+      group.count.textContent=String(rows.length);
+      visible+=rows.length;
+      if(!rows.length){
+        const empty=group.body.insertRow();
+        cell(empty,valid?"No verified BUY NOW":"Verification expired").colSpan=8;
       }
-    }else{let row=signals.insertRow();
-      cell(row,valid?"No BUY NOW signal qualified":"Snapshot expired — waiting for refresh");
-      row.firstChild.colSpan=6;}
+      for(const q of rows){
+        const r=group.body.insertRow();
+        cell(r,q.symbol);
+        cell(r,(q.lane||engine)+" / "+(q.timeframe||"-")
+          +(q.ema_period?" EMA"+q.ema_period:"")
+          +(q.expected_time_to_target?" / "+q.expected_time_to_target:""));
+        cell(r,money(q.entry));cell(r,money(q.stop));
+        cell(r,money(q.tp1));cell(r,money(q.tp2));cell(r,money(q.tp3));
+        const td=r.insertCell(),b=document.createElement("button");
+        b.textContent="Verify quote";b.onclick=()=>verify(q.symbol);td.appendChild(b);
+      }
+    }
+    verifiedCount.textContent=String(visible);
+    verifiedSummary.textContent=valid?
+      visible+" read-time verified signals across EMA, ML and V12 lanes":
+      "No current live quote; verification has expired";
     clear(subRows);clear(qualRows);clear(moverRows);
     if(valid){
       const summary=d.subscription_summary||{};
