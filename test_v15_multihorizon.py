@@ -206,6 +206,25 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertTrue(all("expected_time_to_target" in r for r in board))
 
 
+    def test_daily_ma_top10_requires_actual_ma_and_seller_exhaustion(self):
+        row = self.sensor()
+        row["entry_reference"] = 99.5
+        row["buy_ratio"] = .65
+        row["cvd_acceleration"] = .4
+        self.assertIsNone(v15._daily_ma_exhaustion_filter(row, {"daily_touch": True}))
+        self.assertIsNone(v15._daily_ma_exhaustion_filter(row, {"daily_ema200": 100.0}))
+        result = v15._daily_ma_exhaustion_filter(
+            row, {"daily_ema200": 100.0, "seller_exhaustion": True})
+        self.assertEqual(result["price_relation"], "TOUCH")
+        self.assertEqual(result["ma_type"], "daily_ema200")
+        below = v15._daily_ma_exhaustion_filter(
+            dict(row, entry_reference=92.0),
+            {"daily_ema200": 100.0, "seller_exhaustion": True})
+        self.assertEqual(below["price_relation"], "BELOW")
+        self.assertIsNone(v15._daily_ma_exhaustion_filter(
+            dict(row, entry_reference=70.0),
+            {"daily_ema200": 100.0, "seller_exhaustion": True}))
+
     def test_shadow_setup_requires_independent_confirmation(self):
         now = v15._now_ms()
         sensor = self.sensor(now)
