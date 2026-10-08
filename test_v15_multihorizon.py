@@ -200,7 +200,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._entry_action_original_for_test = getattr(v15, "_entry_action_original_for_test", None)
         original = v15._entry_action
         try:
-            v15._entry_action = lambda sensor, structural, opp, safe, blockers: ("ML BUY NOW", True, [])
+            v15._entry_action = lambda sensor, structural, opp, safe, blockers, entry_plan=None: ("ML BUY NOW", True, [])
             board = v15._build_board(now)
             self.assertEqual(v15._qualified_total, 12)
             self.assertEqual(len(v15._qualified_symbols), 12)
