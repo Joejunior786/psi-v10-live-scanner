@@ -206,6 +206,25 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertTrue(all("expected_time_to_target" in r for r in board))
 
 
+    def test_warmed_shortlist_is_retained_instead_of_rotating_away(self):
+        now=v15._now_ms()
+        rows=[]
+        for i in range(v15.BOARD_LIMIT+12):
+            item=self.sensor(now)
+            item["symbol"]=f"TRACK{i}USDT"
+            item["entry_reference"]=100+i
+            rows.append(item)
+        watched=[x["symbol"] for x in rows[-6:]]
+        v15.V13=types.SimpleNamespace(_rows=lambda: rows)
+        v15.CORE=types.SimpleNamespace(_board=lambda: [],
+                                        _signal_priority_symbols=watched)
+        first=v15._build_board(now)
+        second=v15._build_board(now+9000)
+        self.assertTrue(set(watched).issubset({r["symbol"] for r in first}))
+        self.assertTrue(set(watched).issubset({r["symbol"] for r in second}))
+        self.assertTrue(all(r["execution_ready"] is False
+                            for r in second if r["symbol"] in watched))
+
     def test_daily_ema_uses_only_complete_fresh_candles(self):
         stamp = 2_000_000_000_000
         day = 86_400_000
