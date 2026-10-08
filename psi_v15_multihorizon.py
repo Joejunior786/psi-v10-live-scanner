@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.14.0-setup-intelligence-shadow"
+REVISION = "15.15.0-daily-ma-exhaustion-top10"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -582,6 +582,45 @@ def _setup_evidence(sensor, structural=None):
         "evidence": evidence[best] if len(evidence[best]) >= 2 else [],
         "all_counts": {lane: len(evidence[lane]) for lane in LANES},
         "verified": False,
+    }
+
+
+def _daily_ma_exhaustion_filter(sensor, structural):
+    """Return evidence only for observed daily MA contact/breakdown AND exhaustion."""
+    sensor = sensor or {}
+    structural = structural or {}
+    px = _f(sensor.get("entry_reference"), _f(structural.get("current")))
+    if px <= 0:
+        return None
+    ema_keys = ("daily_ema200", "daily_ema_200", "ema200_daily", "ema_200_daily",
+                "daily_ma200", "daily_ma_200", "daily_sma200", "daily_sma_200",
+                "daily_ema50", "daily_ema_50", "ema50_daily", "ema_50_daily",
+                "daily_ma50", "daily_ma_50")
+    ma_points = [(k, _f(structural.get(k), _f(sensor.get(k)))) for k in ema_keys]
+    ma_points = [(k, v) for k, v in ma_points if v > 0]
+    # A daily-touch flag alone is insufficient without an actual MA level.
+    touch = [(k, v) for k, v in ma_points if abs(px / v - 1) <= 0.015]
+    below = [(k, v) for k, v in ma_points if px < v and 0 < (v - px) / v <= 0.12]
+    matches = touch or below
+    if not matches:
+        return None
+    explicit = (structural.get("seller_exhaustion") is True
+                or sensor.get("seller_exhaustion") is True
+                or structural.get("exhaustion") is True)
+    # Proxy exhaustion must have *both* weakening sellers and buyer absorption.
+    seller_decline = (_f(sensor.get("sell_volume_deceleration")) > 0
+                      or _f(sensor.get("selling_pressure_decline")) > 0)
+    absorption = (_f(sensor.get("cvd_acceleration")) > 0
+                  and _f(sensor.get("buy_ratio")) > 0.53)
+    if not (explicit or (seller_decline and absorption)):
+        return None
+    key, level = min(matches, key=lambda x: (0 if "200" in x[0] else 1, abs(px / x[1] - 1)))
+    return {
+        "ma_type": key,
+        "ma_level": level,
+        "price_relation": "TOUCH" if (key, level) in touch else "BELOW",
+        "distance_pct": round((px / level - 1) * 100, 3),
+        "exhaustion_evidence": "EXPLICIT" if explicit else "SELLER_DECELERATION_PLUS_ABSORPTION",
     }
 
 
@@ -1460,6 +1499,7 @@ def _build_board(at=None):
         if not sym:
             continue
         srow = dict(structural.get(sym) or {})
+        daily_exhaustion = _daily_ma_exhaustion_filter(sensor, srow)
         evidence = _setup_evidence(sensor, srow)
         # Broad-market observations are provisional. A shadow setup cannot
         # overrule a verified upstream structural setup or authorise a BUY.
@@ -1507,6 +1547,7 @@ def _build_board(at=None):
         out.append({
             "symbol": sym,
             "lane": lane,
+            "daily_ma_exhaustion": daily_exhaustion,
             "setup_evidence": evidence["evidence"],
             "setup_evidence_counts": evidence["all_counts"],
             "setup_verification": "PROVISIONAL_SENSOR" if is_shadow else ("UPSTREAM_STRUCTURAL" if srow else "NONE"),
@@ -1622,6 +1663,8 @@ def report():
         "candidate_source": "V13 plus eligible cached sensors; 4-lane setup probes shadow only pending structural verification",
         "setup_probe_policy": "Two observed corroborating factors, independent structure confirmation required for BUY",
         "daily_trade_limit": None,
+        "daily_ma_exhaustion_top10": [r for r in rows if r.get("daily_ma_exhaustion") and _f(r.get("selected_target_pct")) >= 10][:10],
+        "daily_ma_exhaustion_rule": "requires numeric DAILY 50/200 MA within 1.5% or no more than 12% beneath, plus confirmed seller exhaustion; no forced picks",
         "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
         "horizons": list(HORIZON_ORDER),
         "decision_rule": "10%+ selected target + positive empirical EV + out-of-sample validation + hard live-data safety",
