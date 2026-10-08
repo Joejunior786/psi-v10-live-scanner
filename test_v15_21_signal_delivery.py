@@ -1,5 +1,6 @@
 import unittest
 import json
+import re
 import asyncio
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -53,6 +54,21 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(live["buy_count"], 2)
         self.assertEqual(len(feed._EVENTS), 2)
         self.assertFalse(live["order_placement"])
+
+    def test_dashboard_has_unique_DOM_ids_and_valid_research_table(self):
+        html=feed._DASHBOARD
+        ids=re.findall(r'\\bid="([^"]+)"',html)
+        self.assertEqual(len(ids),len(set(ids)),"Duplicate HTML element IDs can break dashboard JS")
+        self.assertIn('<tbody id="research">',html)
+        self.assertIn('<h2 id="research-section">',html)
+        self.assertIn('getElementById("research")',html)
+        self.assertIn('href="#research-section"',html)
+
+    def test_network_and_dashboard_render_errors_are_distinguished(self):
+        html=feed._DASHBOARD
+        self.assertIn('DASHBOARD DISPLAY ERROR: ',html)
+        self.assertIn('CONNECTION UNAVAILABLE: ',html)
+        self.assertIn('responseOk=true;',html)
 
     def test_verified_ema_signals_have_an_independent_lane(self):
         feed.publish_once(1000000)
