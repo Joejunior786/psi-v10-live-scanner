@@ -14,9 +14,9 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.3.0-context-entry-time-unlimited"
+REVISION = "15.4.0-plausible-horizon-grid"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
-STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_3_multihorizon.json")
+STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_4_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
 HORIZONS_MS = {
     "15m": 15 * 60_000,
@@ -825,12 +825,29 @@ def _promotion_validation(model, lane, target):
     }
 
 
+HORIZON_MIN_BY_LANE_TARGET = {
+    "BEAST": {3: "15m", 5: "30m", 10: "1h", 20: "4h"},
+    "BREAKOUT": {3: "30m", 5: "1h", 10: "4h", 20: "12h"},
+    "EXHAUSTION": {3: "1h", 5: "4h", 10: "12h", 20: "24h"},
+    "HTF_SWING": {3: "4h", 5: "12h", 10: "24h", 20: "2d"},
+}
+
+
+def _combo_allowed(lane, target, horizon):
+    required = (HORIZON_MIN_BY_LANE_TARGET.get(str(lane)) or {}).get(int(target))
+    if not required:
+        return True
+    return int(HORIZONS_MS.get(str(horizon)) or 0) >= int(HORIZONS_MS.get(required) or 0)
+
+
 def _opportunity(lane, x):
     choices = []
     probabilities = {}
     for horizon in HORIZON_ORDER:
         probabilities[horizon] = {}
         for target in TARGETS:
+            if not _combo_allowed(lane, target, horizon):
+                continue
             model, source, samples = _model_for(lane, horizon, target)
             p, raw, calibration = _probability(model, x)
             avg_win, avg_loss = _payoffs(model, target, lane)
@@ -845,13 +862,7 @@ def _opportunity(lane, x):
                 "expected_value_pct": round(ev, 3),
                 "promotion_validation": promotion,
             }
-            horizon_minutes = HORIZONS_MS[horizon] / 60_000
-            plausibility = 1.0
-            if target >= 20 and horizon_minutes < 240 and samples < 100:
-                plausibility = 0.55
-            elif target >= 10 and horizon_minutes < 60 and samples < 100:
-                plausibility = 0.70
-            score = ev * plausibility + 0.25 * p + 0.03 * math.log1p(samples)
+            score = ev + 0.25 * p + 0.03 * math.log1p(samples)
             score += 0.15 if promotion["ready"] else 0.0
             choices.append((score, ev, p, target, horizon, model, source, samples, calibration, promotion))
     choices.sort(key=lambda z: z[0], reverse=True)
@@ -862,8 +873,12 @@ def _opportunity(lane, x):
     stop_med, stop_lo, stop_hi, stop_time_source = _invalidation_time(lane, HORIZONS_MS[horizon])
     lane_stat = _lane_stat(lane, target)
     nstat = int(lane_stat.get("n") or 0)
-    mfe = _f(lane_stat.get("mfe_sum")) / nstat if nstat else avg_win
-    mae = _f(lane_stat.get("mae_sum")) / nstat if nstat else -avg_loss
+    raw_mfe = _f(lane_stat.get("mfe_sum")) / nstat if nstat else avg_win
+    raw_mae = _f(lane_stat.get("mae_sum")) / nstat if nstat else -avg_loss
+    # Lane aggregates can contain extreme movers. Keep the display estimate
+    # anchored to the selected target/payoff until target+horizon cohorts mature.
+    mfe = min(raw_mfe, max(target * 2.0, avg_win * 1.5))
+    mae = max(raw_mae, -max(avg_loss * 2.0, 15.0))
     return {
         "target_pct": target,
         "horizon": horizon,
@@ -1301,8 +1316,9 @@ def report():
         "decision_rule": "positive empirical EV + setup-specific model + hard live-data safety",
         "fixed_50pct_gate_removed": True,
         "forced_top_five": True,
-        "feature_schema_version": 3,
+        "feature_schema_version": 4,
         "feature_count": FEATURE_COUNT,
+        "setup_specific_horizon_grid": HORIZON_MIN_BY_LANE_TARGET,
         "historical_seed_dedup_window": _duration(SEED_DEDUP_MS),
         "entry_actions": ["ML BUY NOW", "ML SHADOW BUY", "BUY PULLBACK", "BUY RECLAIM", "BUY BREAKOUT/RETEST", "WAIT", "REJECT", "DO NOT CHASE"],
         "time_to_invalidation_enabled": True,
@@ -1351,7 +1367,7 @@ def _save(force=False):
             "last_signal": _last_signal,
             "seen_seed": list(_seen_seed)[-5000:],
             "seed_buckets": list(_seed_buckets)[-5000:],
-            "feature_schema_version": 3,
+            "feature_schema_version": 4,
             "lane_stats": _lane_stats,
             "stats": dict(_stats),
             "signal_journal": _signal_journal[-MAX_SIGNAL_JOURNAL:],
@@ -1506,7 +1522,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H"
+        + " oosPromotion=REQUIRED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"
