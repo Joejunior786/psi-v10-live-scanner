@@ -14,6 +14,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.seen_seed = set(v15._seen_seed)
         self.lane_stats = dict(v15._lane_stats)
         self.board = list(v15._board)
+        self.daily_buy_day = v15._daily_buy_day
+        self.daily_buy_symbols = set(v15._daily_buy_symbols)
         self.core, self.v13, self.outcome, self.v14 = v15.CORE, v15.V13, v15.OUTCOME, v15.V14
         v15._models.clear()
         v15._pending.clear()
@@ -22,6 +24,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._seen_seed.clear()
         v15._lane_stats.clear()
         v15._board.clear()
+        v15._daily_buy_day = ""
+        v15._daily_buy_symbols.clear()
 
     def tearDown(self):
         v15._models.clear(); v15._models.update(self.models)
@@ -31,6 +35,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._seen_seed.clear(); v15._seen_seed.update(self.seen_seed)
         v15._lane_stats.clear(); v15._lane_stats.update(self.lane_stats)
         v15._board[:] = self.board
+        v15._daily_buy_day = self.daily_buy_day
+        v15._daily_buy_symbols.clear(); v15._daily_buy_symbols.update(self.daily_buy_symbols)
         v15.CORE, v15.V13, v15.OUTCOME, v15.V14 = self.core, self.v13, self.outcome, self.v14
 
     def sensor(self, now=1_000_000):
@@ -125,6 +131,19 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertEqual(len(board), 5)
         self.assertEqual([r["rank"] for r in board], [1, 2, 3, 4, 5])
         self.assertTrue(all("expected_time_to_target" in r for r in board))
+
+
+    def test_daily_buy_cap_keeps_only_three_new_signals(self):
+        at = 1_800_000_000_000
+        rows = [
+            {"symbol": f"B{i}USDT", "execution_ready": True, "action": "ML BUY NOW", "blockers": []}
+            for i in range(5)
+        ]
+        v15._apply_daily_buy_cap(rows, at)
+        self.assertEqual(sum(bool(r["execution_ready"]) for r in rows), 3)
+        self.assertEqual(len(v15._daily_buy_symbols), 3)
+        self.assertTrue(all(r["action"] == "WAIT DAILY LIMIT" for r in rows[3:]))
+        self.assertTrue(all("MAX_3_ML_TRADES_PER_DAY" in r["blockers"] for r in rows[3:]))
 
 
 if __name__ == "__main__":
