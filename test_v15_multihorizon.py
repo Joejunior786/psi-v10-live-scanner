@@ -123,6 +123,50 @@ class V15MultiHorizonTests(unittest.TestCase):
         rows=v15._structural_map()
         self.assertEqual(list(rows),["REALUSDT"])
 
+    def test_fresh_core_candles_can_confirm_formal_setup_during_restart(self):
+        at=1_000_000
+        def candles(updated):
+            return {tf:{"snap":{"close":100},"updated":updated}
+                    for tf in ("1h","4h","1d")}
+        calls=[]
+        def evaluate(sym):
+            calls.append(sym)
+            return {"setup":"4H_EMA200_REJECTION","state":"BUY",
+                    "symbol":sym,"timeframe":"4H"}
+        v15.CORE=types.SimpleNamespace(
+            _board=lambda:[],
+            _cache={
+                "FRESHUSDT":candles(at/1000-10),
+                "STALEUSDT":candles(at/1000-999),
+                "MISSINGUSDT":{"1h":{"snap":{"close":100},
+                                      "updated":at/1000}},
+            },
+            TF_TTL={"1h":120,"4h":180,"1d":400},
+            evaluate_symbol=evaluate,
+        )
+        result=v15._structural_map(
+            ["FRESHUSDT","STALEUSDT","MISSINGUSDT"],at)
+        self.assertEqual(calls,["FRESHUSDT"])
+        self.assertEqual(list(result),["FRESHUSDT"])
+        self.assertEqual(result["FRESHUSDT"]["setup_origin"],
+                         "FRESH_V12_MULTITIMEFRAME_EVALUATION")
+        self.assertEqual(v15._stats["structure_refresh_confirmed"],1)
+        self.assertEqual(v15._stats["structure_refresh_missing_snapshots"],2)
+
+    def test_on_demand_v12_evaluator_must_return_formal_setup(self):
+        at=2_000_000
+        valid={tf:{"snap":{"close":1},"updated":at/1000-5}
+               for tf in ("1h","4h","1d")}
+        v15.CORE=types.SimpleNamespace(
+            _board=lambda:[],
+            _cache={"FAKEUSDT":valid},
+            TF_TTL={"1h":60,"4h":60,"1d":60},
+            evaluate_symbol=lambda s:{"symbol":s,"setup":"BREAKOUT_PROBE",
+                   "state":"WATCH","setup_source":"SENSOR_SHADOW"},
+        )
+        self.assertEqual(v15._structural_map(["FAKEUSDT"],at),{})
+        self.assertEqual(v15._stats["structure_refresh_confirmed"],0)
+
     def test_setup_specialists_are_distinct(self):
         self.assertEqual(v15._classify_lane({"setup": "seller exhaustion pullback"}), "EXHAUSTION")
         self.assertEqual(v15._classify_lane({"setup": "compression breakout retest"}), "BREAKOUT")
