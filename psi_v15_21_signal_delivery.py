@@ -320,7 +320,7 @@ async def http_quote(request):
 _DASHBOARD = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PSI Live Signal Board</title>
+<title>PSI Live Scanner</title>
 <style>
 :root{color-scheme:dark;font-family:system-ui,sans-serif}
 body{background:#0e1620;color:#e9f1f5;margin:auto;max-width:1100px;padding:22px}
@@ -332,7 +332,7 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>Ψ Live Signal Board · V15.24</h1>
+<h1>PSI Live Scanner · V15.24</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
