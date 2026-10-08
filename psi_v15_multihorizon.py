@@ -701,7 +701,7 @@ def _seed_from_outcome_memory():
     return added
 
 
-def _collect_candidates(def _collect_candidates(at=None):
+def _collect_candidates(at=None):
     at = _now_ms() if at is None else int(at)
     structural = _structural_map()
     rows = _sensor_rows()
