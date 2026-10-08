@@ -3338,16 +3338,13 @@ def _distributed_micro_symbols():
             seen.add(sym)
             desired.append(sym)
 
-    # Current execution/promoted symbols are highest priority.
+    # Reserve real micro priority slots for ML and EMA before the inherited
+    # structural pool. These affect subscriptions, NEVER buy authority.
+    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:8]:
+        add_desired(sym)
+    for sym in list(globals().get("_ema_priority_symbols", []) or [])[:6]:
+        add_desired(sym)
     for sym in list(getattr(app, "selected_micro_symbols", []) or []):
-        add_desired(sym)
-
-    # V15.25: reserve bounded warm-up attention for genuine independent
-    # ML/BEAST/EXHAUSTION/BREAKOUT and EMA candidates, not just legacy V12.
-    # These are subscription priorities ONLY, never an execution authority.
-    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:12]:
-        add_desired(sym)
-    for sym in list(globals().get("_ema_priority_symbols", []) or [])[:8]:
         add_desired(sym)
 
     # Then current V12 structural/radar board.

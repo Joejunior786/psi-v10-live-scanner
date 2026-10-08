@@ -351,7 +351,8 @@ def _publish_once_unlocked(now_ms=None):
         if verified is None:
             foreign_rejections += 1
         else:
-            foreign_approved.append(verified)
+            # Retain the underlying strategy approval for read-time rechecks.
+            foreign_approved.append(candidate)
     try:
         # Preserve a bounded ML warm-up slice; core's existing worker control
         # still enforces capacity, rotation, dwell and real Binance subscriptions.
@@ -362,23 +363,34 @@ def _publish_once_unlocked(now_ms=None):
         (v["symbol"],v["authority"],v.get("lane")) for v in foreign_approved
     }
     with _LOCK:
-        for key in sorted(set(buys) - _ACTIVE):
+        for key in sorted(new_active - _ACTIVE):
+            if key in buys:
+                normalized = dict(buys[key], authority="EMA", lane="EMA")
+            else:
+                candidate = next((v for v in foreign_approved if
+                    (v["symbol"], v["authority"],v.get("lane")) == key),None)
+                normalized = _foreign_signal_verified(candidate,now_ms) if candidate else None
+            if not normalized:
+                continue
             _NEXT_ID += 1
-            row = buys[key]
             _EVENTS.append({
-                "id": _NEXT_ID, "type": "BUY_NOW_VERIFIED",
-                "symbol": row["symbol"], "timeframe": row["timeframe"],
-                "ema_period": row["ema_period"],
-                "entry": row["entry"], "stop": row["stop"],
-                "tp1": row["tp1"], "tp2": row["tp2"], "tp3": row["tp3"],
-                "risk_pct": row["risk_pct"],
-                "generated_ms": now_ms,
-                "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
-                "order_placement": False,
+                "id":_NEXT_ID,"type":"BUY_NOW_VERIFIED",
+                "symbol":normalized["symbol"],
+                "authority":normalized.get("authority","EMA"),
+                "lane":normalized.get("lane","EMA"),
+                "timeframe":normalized.get("timeframe"),
+                "ema_period":normalized.get("ema_period",0),
+                "entry":normalized["entry"],"stop":normalized["stop"],
+                "tp1":normalized["tp1"],"tp2":normalized.get("tp2"),
+                "tp3":normalized.get("tp3"),"risk_pct":normalized["risk_pct"],
+                "generated_ms":now_ms,
+                "expires_ms":min(now_ms+SIGNAL_LIFETIME_MS,
+                                 normalized.get("quote_expires_ms",now_ms+SIGNAL_LIFETIME_MS)),
+                "order_placement":False,
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.24-live-signal-feed",
+            "revision": "15.25-unified-verified-authorities",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
@@ -723,11 +735,13 @@ async def http_events(request):
             if new:
                 # Do not stream events that lost their live verification.
                 live = read_live()
-                live_keys = {(x["symbol"], x["timeframe"], x["ema_period"])
+                live_keys = {(x["symbol"], x.get("authority","EMA"),
+                              x.get("lane","EMA"),x.get("ema_period",0))
                              for x in live["buy_signals"]}
                 for event in new:
                     last_id = max(last_id, event["id"])
-                    if (event["symbol"], event["timeframe"], event["ema_period"]) not in live_keys:
+                    if (event["symbol"],event.get("authority","EMA"),
+                            event.get("lane","EMA"),event.get("ema_period",0)) not in live_keys:
                         continue
                     raw = json.dumps(event, separators=(",", ":"), allow_nan=False)
                     await response.write(f"id: {event['id']}\nevent: buy\ndata: {raw}\n\n".encode())
@@ -752,7 +766,8 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
     """
     if live.get("buy_count"):
         verified = [{
-            "symbol": row.get("symbol"),
+            "symbol": row.get("symbol"),"authority":row.get("authority","EMA"),
+            "lane":row.get("lane","EMA"),
             "timeframe": row.get("timeframe"),
             "ema_period": row.get("ema_period"),
             "entry": row.get("entry"), "stop": row.get("stop"),
@@ -771,6 +786,9 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "candle_frames": snapshot.get("candle_frames", 0),
         "interactions": snapshot.get("interactions", 0),
         "live_evidence_checked": live.get("live_evidence_checked", 0),
+        "authority_diagnostics": live.get("authority_diagnostics", {}),
+        "foreign_rejected_at_gate": live.get("foreign_rejected_at_gate", 0),
+        "ml_priority_symbols": live.get("ml_priority_symbols", []),
         "technical_ready": live.get("technical_ready_symbols", []),
         "research": live.get("research_top10", []),
         "research_rows": live.get("research_rows", [])[:10],
@@ -793,7 +811,7 @@ async def supervisor_loop():
             start = time.monotonic()
             snap = await asyncio.to_thread(publish_once)
             completed = time.monotonic()
-            if completed - last_log >= LOG_INTERVAL_SECONDS or snap.get("buy_signals"):
+            if completed - last_log >= LOG_INTERVAL_SECONDS or snap.get("buy_signals") or snap.get("foreign_buy_signals"):
                 # Re-validate right before emitting; no BUY may survive lost
                 # book/trade evidence merely because a prior tick approved it.
                 live = await asyncio.to_thread(read_live)
