@@ -1217,6 +1217,8 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers, entry_plan=Non
     entry_plan = entry_plan or _entry_plan(
         sensor, structural, _classify_lane(structural, sensor), opp
     )
+    if structural.get("setup_source") == "SENSOR_SHADOW":
+        return "SETUP SHADOW", False, ["AWAIT_INDEPENDENT_STRUCTURE_CONFIRMATION"]
     location = str(entry_plan.get("entry_location") or "")
     if location == "INVALIDATED":
         return "REJECT", False, ["ENTRY_STRUCTURE_INVALIDATED"]
@@ -1473,9 +1475,6 @@ def _build_board(at=None):
         action, executable, action_blockers = _entry_action(
             sensor, srow, opp, safe, safety_blockers, entry_plan
         )
-        if is_shadow:
-            action, executable = "SETUP SHADOW", False
-            action_blockers = ["AWAIT_INDEPENDENT_STRUCTURE_CONFIRMATION"] + list(action_blockers)
 
         price = _f(sensor.get("entry_reference"))
         loss_pct = max(0.75, opp["expected_loss_pct"])
