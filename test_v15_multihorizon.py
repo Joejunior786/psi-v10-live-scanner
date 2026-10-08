@@ -460,5 +460,33 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertGreater(model["test_wins"], 0)
 
 
+
+    def test_historical_warm_start_does_not_train_censored_long_horizons(self):
+        created = 6_000_000_000_000
+        events = []
+        for i in range(40):
+            stamp = created + i * 60_000
+            events.append({
+                "id": f"censor{i}",
+                "symbol": f"CZ{i}USDT",
+                "created_ms": stamp,
+                "setup": "micro ignition",
+                "features": {"setup": "micro ignition", "buy_ratio": .62},
+                "first_target_ms": {"20": stamp + 8 * 60 * 60_000},
+                "stop_hit_ms": 0,
+                "horizon_returns": {"12h": 20.5, "24h": 18.0},
+                "entry_price": 100.0,
+                "observed_price_at_signal": 100.0,
+                "mfe_pct": 22.0,
+                "mae_pct": -0.5,
+            })
+        v15.OUTCOME = types.SimpleNamespace(_recent=events)
+        self.assertEqual(v15._seed_from_outcome_memory(), 40)
+        m24 = v15._model("BEAST", "24h", 20)
+        m2d = v15._model("BEAST", "2d", 20)
+        self.assertGreater(m24["wins"] + m24["losses"] + m24["test_n"], 0)
+        self.assertEqual(m2d["wins"] + m2d["losses"] + m2d["test_n"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

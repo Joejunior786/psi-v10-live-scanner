@@ -14,9 +14,9 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.7.0-known-target-oos-labels"
+REVISION = "15.8.0-censor-safe-warm-start"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
-STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_7_multihorizon.json")
+STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_8_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
 HORIZONS_MS = {
     "15m": 15 * 60_000,
@@ -52,6 +52,7 @@ MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200"))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SPREAD_BPS", "20")))
 MAX_SLIPPAGE_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SLIPPAGE_BPS", "35")))
 DAY_MS = 24 * 60 * 60_000
+HISTORICAL_WARM_START_MAX_HORIZON_MS = HORIZONS_MS["24h"]
 
 CORE = None
 V13 = None
@@ -665,6 +666,13 @@ def _seed_from_outcome_memory():
         recorded_targets = set()
         for horizon in HORIZON_ORDER:
             hms = HORIZONS_MS[horizon]
+            # The inherited outcome-memory source has complete follow-up only
+            # through 24h. Do not warm-start 2d/3d/7d models from selectively
+            # observed early hits/stops because that would censor neutral/loss
+            # cases and inflate long-horizon probabilities. Those horizons
+            # learn prospectively from V15's own pending events.
+            if hms > HISTORICAL_WARM_START_MAX_HORIZON_MS:
+                continue
             has_close = horizon in hret
             stop_observed_inside_horizon = bool(
                 stop_at and 0 <= stop_at - created <= hms
@@ -1468,6 +1476,8 @@ def report():
         "setup_specific_horizon_grid": HORIZON_MIN_BY_LANE_TARGET,
         "historical_seed_dedup_window": _duration(SEED_DEDUP_MS),
         "initial_holdout_policy": "CHRONOLOGICAL_PER_LANE_65_TRAIN_10_VALIDATION_25_TEST",
+        "historical_warm_start_max_horizon": "24h",
+        "long_horizons_2d_3d_7d": "PROSPECTIVE_V15_ONLY",
         "entry_actions": ["ML BUY NOW", "ML SHADOW BUY", "BUY PULLBACK", "BUY RECLAIM", "BUY BREAKOUT/RETEST", "WAIT", "REJECT", "DO NOT CHASE"],
         "time_to_invalidation_enabled": True,
         "learned_entry_zone_enabled": True,
@@ -1684,7 +1694,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 knownTargetLabels=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
+        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"
