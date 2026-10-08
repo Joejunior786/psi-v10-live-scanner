@@ -968,7 +968,7 @@ async def _v12_fast_rest_klines(sym, tf, limit):
     try:
         offset = (sum(ord(ch) for ch in str(sym)) + sum(ord(ch) for ch in str(tf))) % len(V12_FAST_REST_HOSTS)
         hosts = list(V12_FAST_REST_HOSTS[offset:]) + list(V12_FAST_REST_HOSTS[:offset])
-        hosts = hosts[:2]
+        hosts = hosts[:3]
 
         async def one(host, endpoint):
             try:
@@ -978,18 +978,18 @@ async def _v12_fast_rest_klines(sym, tf, limit):
                     timeout=legacy.aiohttp.ClientTimeout(total=2.4, connect=0.8),
                 ) as resp:
                     if resp.status != 200:
+                        _stats[f"fast_rest_http_{resp.status}"] += 1
                         return None
                     payload = await resp.json()
                     return payload if isinstance(payload, list) and payload else None
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                _stats["fast_rest_transport_errors"] += 1
+                _stats["fast_rest_last_error"] = f"{type(exc).__name__}: {str(exc)[:100]}"
                 return None
 
-        tasks = {
-            asyncio.create_task(one(hosts[0], "/api/v3/klines")),
-            asyncio.create_task(one(hosts[1], "/api/v3/uiKlines")),
-        }
+        tasks = {asyncio.create_task(one(host, "/api/v3/klines")) for host in hosts}
         winner = None
         deadline = asyncio.get_running_loop().time() + 2.6
         try:
@@ -2472,7 +2472,12 @@ async def _fetch_tf(sym, tf, deep=False):
     # 1) Isolated multi-shard V12 Binance WS is the normal transport.
     # Claim the least-loaded healthy lane first so one deterministic hash bucket
     # cannot queue while another reserved websocket is idle.
-    if not isinstance(rows, list) or not rows:
+    ws_ready = any(
+        event is not None and event.is_set()
+        and conn is not None and not conn.closed
+        for event, conn in zip(_v12_ws_ready, _v12_ws_conns)
+    )
+    if (not isinstance(rows, list) or not rows) and ws_ready:
         ws_shard = _v12_ws_claim(sym, tf)
         try:
             if not _ws_circuit_open(ws_shard):
@@ -2500,6 +2505,10 @@ async def _fetch_tf(sym, tf, deep=False):
                 _stats["dedicated_circuit_skip"] += 1
         finally:
             _v12_ws_release(ws_shard)
+    elif not isinstance(rows, list) or not rows:
+        # No V12 candle shard is connected: do not spend 14-20 seconds
+        # queueing an RPC. Use the official REST fallback immediately.
+        _stats["dedicated_offline_skipped"] += 1
 
     # 2) FAST fallback after ANY dedicated miss: race the proven shared WS
     # against bounded Binance REST. The race is hard-bounded, so a temporarily
@@ -2706,6 +2715,11 @@ def _priority_symbols(universe):
         if s and s in universe_set and s not in seen:
             seen.add(s)
             out.append(s)
+
+    # Reserve up to six refresh slots for independently confirmed EMA research.
+    # The other strategy lanes keep the remaining slots and their normal ranking.
+    for sym in list(globals().get("_ema_priority_symbols", []) or [])[:6]:
+        add(sym)
 
     legacy_rows = list(base.latest.get("_all_candidates") or [])
     legacy_rows.sort(key=lambda r: (
@@ -3291,6 +3305,11 @@ def _distributed_micro_symbols():
 
     # Current execution/promoted symbols are highest priority.
     for sym in list(getattr(app, "selected_micro_symbols", []) or []):
+        add_desired(sym)
+
+    # Independently verified EMA technical opportunities earn a bounded
+    # priority slice, without displacing the entire existing execution pool.
+    for sym in list(globals().get("_ema_priority_symbols", []) or [])[:8]:
         add_desired(sym)
 
     # Then current V12 structural/radar board.
