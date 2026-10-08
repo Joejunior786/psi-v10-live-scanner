@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.12.0-calibrated-target-ranking"
+REVISION = "15.13.0-broad-discovery-rotation"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -548,6 +548,17 @@ def _structural_map():
         return {}
 
 
+def _eligible_spot_symbol(sym):
+    sym = str(sym or "").upper()
+    if not sym.endswith("USDT") or len(sym) <= 4:
+        return False
+    base = sym[:-4]
+    return base not in {
+        "BFUSD", "FDUSD", "USDC", "USDP", "TUSD", "USDE", "USD1",
+        "DAI", "XUSD", "RLUSD", "PYUSD", "EUR", "EURC", "WBTC", "WBETH",
+    }
+
+
 def _sensor_rows():
     try:
         rows = V13._rows() or []
@@ -558,16 +569,24 @@ def _sensor_rows():
         raw_cache = getattr(sensor_module, "_sensor_cache", {}) or {}
     except Exception:
         raw_cache = {}
-    enriched = []
+    # Combine all available sensor records, rather than limiting ML to V13's
+    # already-ranked _latest_candidates. Missing data must never be fabricated.
+    universe = set(str(x).upper() for x in (getattr(getattr(CORE, "q", None), "universe", []) or []))
+    merged = {}
+    for sym, raw in raw_cache.items():
+        sym = str(sym).upper()
+        if isinstance(raw, dict) and _eligible_spot_symbol(sym) and (not universe or sym in universe):
+            merged[sym] = dict(raw, symbol=sym)
     for row in rows:
-        if not isinstance(row, dict) or not row.get("symbol"):
+        if not isinstance(row, dict):
             continue
-        x = dict(row)
-        raw = raw_cache.get(str(x.get("symbol") or "").upper()) or {}
-        x["flow_persistence"] = _f(
-            raw.get("flow_persistence"),
-            _f(x.get("buy_ratio"), 0.5),
-        )
+        sym = str(row.get("symbol") or "").upper()
+        if _eligible_spot_symbol(sym) and (not universe or sym in universe):
+            merged[sym] = dict(merged.get(sym) or {}, **row, symbol=sym)
+    enriched = []
+    for sym, x in merged.items():
+        raw = raw_cache.get(sym) or {}
+        x["flow_persistence"] = _f(raw.get("flow_persistence"), _f(x.get("buy_ratio"), 0.5))
         enriched.append(x)
     return enriched
 
@@ -1390,6 +1409,9 @@ def _build_board(at=None):
         action, executable, action_blockers = _entry_action(
             sensor, srow, opp, safe, safety_blockers, entry_plan
         )
+        # An unclassified, purely generic BEAST fallback is research only.
+        if lane == "BEAST" and not srow and executable:
+            action, executable, action_blockers = "WAIT", False, ["NO_VERIFIED_SETUP"]
         price = _f(sensor.get("entry_reference"))
         loss_pct = max(0.75, opp["expected_loss_pct"])
         learned_stop = price * (1.0 - loss_pct / 100.0) if price > 0 else None
@@ -1493,7 +1515,23 @@ def _build_board(at=None):
     _record_trade_signals(out, at)
     for idx, row in enumerate(out, 1):
         row["rank"] = idx
-    _board = out[:BOARD_LIMIT]
+    # Preserve all qualified trade signals; rotate the research-only section
+    # deterministically to surface unfamiliar names on successive snapshots.
+    approved = [r for r in out if r["execution_ready"]]
+    remaining = [r for r in out if not r["execution_ready"]]
+    slots = max(0, BOARD_LIMIT - len(approved))
+    if len(remaining) > slots and slots >= 5:
+        core_slots = max(1, slots // 2)
+        research_top = remaining[:core_slots]
+        pool = remaining[core_slots:]
+        rotation = (at // max(1, int(POLL_SECONDS * 1000))) % len(pool)
+        research_rotated = (pool[rotation:] + pool[:rotation])[:slots-core_slots]
+        selected = approved + research_top + research_rotated
+    else:
+        selected = approved + remaining[:slots]
+    for idx, row in enumerate(selected, 1):
+        row["rank"] = idx
+    _board = selected[:BOARD_LIMIT]
     _last_board_ms = at
     return list(_board)
 
@@ -1513,7 +1551,8 @@ def report():
         "specialists": list(LANES),
         "targets_pct": list(TARGETS),
         "minimum_ml_trade_target_pct": MIN_TRADE_TARGET_PCT,
-        "ranking_policy": "calibrated probability and conservative risk-adjusted EV; model-sample shrinkage, duration cost and prospective holdout promotion gate",
+        "ranking_policy": "calibrated EV, broad cached-sensor discovery, research rotation, approved picks never displaced",
+        "candidate_source": "V13 plus all eligible cached sensor records; safety fail-closed",
         "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
         "horizons": list(HORIZON_ORDER),
         "decision_rule": "10%+ selected target + positive empirical EV + out-of-sample validation + hard live-data safety",
@@ -1740,7 +1779,7 @@ def install(core, v13, outcome=None, v14=None):
         "PSI-V15 INSTALLED revision=" + REVISION
         + " specialists=BEAST/EXHAUSTION/BREAKOUT/HTF_SWING"
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
-        + " trainedTargets=3,5,10,20 selectionTargets=10,20 ranking=CONSERVATIVE_EV_HOLDOUT_GATE"
+        + " trainedTargets=3,5,10,20 selectionTargets=10,20 discovery=SENSOR_CACHE_PLUS_V13"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
         + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 bootstrapSafeHoldout=ENABLED knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY trainedModelPriority=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
