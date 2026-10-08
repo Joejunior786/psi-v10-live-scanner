@@ -14,10 +14,12 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.10.0-bootstrap-safe-oos"
+REVISION = "15.11.0-target10-validated"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
+# Preserve smaller targets for training, but never select them as ML trade targets.
+MIN_TRADE_TARGET_PCT = 10.0
 HORIZONS_MS = {
     "15m": 15 * 60_000,
     "30m": 30 * 60_000,
@@ -945,6 +947,8 @@ def _opportunity(lane, x):
             score = ev + 0.25 * p + 0.03 * math.log1p(samples)
             score += 0.15 if promotion["ready"] else 0.0
             choice = (score, ev, p, target, horizon, model, source, samples, calibration, promotion)
+            if target < MIN_TRADE_TARGET_PCT:
+                continue
             choices.append(choice)
             if _selection_model_ready(source, samples):
                 ready_choices.append(choice)
@@ -1126,6 +1130,8 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers, entry_plan=Non
     if bool(structural.get("anti_chase")) or location == "CHASING":
         return "DO NOT CHASE", False, ["ANTI_CHASE"]
 
+    if opp["target_pct"] < MIN_TRADE_TARGET_PCT:
+        return "REJECT", False, ["TARGET_BELOW_10_PERCENT"]
     ready_model = opp["samples"] >= MIN_MODEL_SAMPLES or (
         opp["model_source"] not in {"LEARNING"} and opp["samples"] >= MIN_SPECIALIST_SAMPLES
     )
@@ -1487,8 +1493,10 @@ def report():
         "order_placement": False,
         "specialists": list(LANES),
         "targets_pct": list(TARGETS),
+        "minimum_ml_trade_target_pct": MIN_TRADE_TARGET_PCT,
+        "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
         "horizons": list(HORIZON_ORDER),
-        "decision_rule": "positive empirical EV + setup-specific model + hard live-data safety",
+        "decision_rule": "10%+ selected target + positive empirical EV + out-of-sample validation + hard live-data safety",
         "fixed_50pct_gate_removed": True,
         "forced_top_five": True,
         "feature_schema_version": 4,
@@ -1712,7 +1720,7 @@ def install(core, v13, outcome=None, v14=None):
         "PSI-V15 INSTALLED revision=" + REVISION
         + " specialists=BEAST/EXHAUSTION/BREAKOUT/HTF_SWING"
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
-        + " targets=3,5,10,20"
+        + " trainedTargets=3,5,10,20 selectionTargets=10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
         + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 bootstrapSafeHoldout=ENABLED knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY trainedModelPriority=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
