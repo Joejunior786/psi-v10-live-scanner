@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.15.0-daily-ma-exhaustion-top10"
+REVISION = "15.16.0-daily-ema-candle-coverage"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -584,6 +584,38 @@ def _setup_evidence(sensor, structural=None):
         "all_counts": {lane: len(evidence[lane]) for lane in LANES},
         "verified": False,
     }
+
+
+def _daily_candle_evidence(symbol, at=None):
+    """Compute daily EMAs from recent complete candles, never inferred levels."""
+    at = _now_ms() if at is None else int(at)
+    try:
+        item = ((getattr(CORE, "_cache", {}) or {}).get(symbol) or {}).get("1d") or {}
+        rows = item.get("rows") or []
+        updated = float(item.get("updated") or 0)
+        if not updated or abs(at / 1000 - updated) > 14400 or len(rows) < 200:
+            return {}
+        closes = []
+        for candle in rows:
+            if not isinstance(candle, (tuple, list)) or len(candle) < 7:
+                return {}
+            if int(candle[6]) > at:
+                continue
+            price = float(candle[4])
+            if not math.isfinite(price) or price <= 0:
+                return {}
+            closes.append(price)
+        if len(closes) < 200:
+            return {}
+        def ema(n):
+            value = sum(closes[:n]) / n
+            k = 2.0 / (n + 1)
+            for price in closes[n:]:
+                value += k * (price - value)
+            return value
+        return {"daily_ema50": ema(50), "daily_ema200": ema(200)}
+    except (TypeError, ValueError, OverflowError):
+        return {}
 
 
 def _daily_ma_exhaustion_filter(sensor, structural):
@@ -1500,7 +1532,8 @@ def _build_board(at=None):
         if not sym:
             continue
         srow = dict(structural.get(sym) or {})
-        daily_exhaustion = _daily_ma_exhaustion_filter(sensor, srow)
+        daily_levels = _daily_candle_evidence(sym, at)
+        daily_exhaustion = _daily_ma_exhaustion_filter(sensor, {**daily_levels, **srow})
         evidence = _setup_evidence(sensor, srow)
         # Broad-market observations are provisional. A shadow setup cannot
         # overrule a verified upstream structural setup or authorise a BUY.
@@ -1549,6 +1582,7 @@ def _build_board(at=None):
             "symbol": sym,
             "lane": lane,
             "daily_ma_exhaustion": daily_exhaustion,
+            "daily_ema_levels_verified": daily_levels,
             "setup_evidence": evidence["evidence"],
             "setup_evidence_counts": evidence["all_counts"],
             "setup_verification": "PROVISIONAL_SENSOR" if is_shadow else ("UPSTREAM_STRUCTURAL" if srow else "NONE"),
@@ -1665,6 +1699,7 @@ def report():
         "candidate_source": "V13 plus eligible cached sensors; 4-lane setup probes shadow only pending structural verification",
         "setup_probe_policy": "Two observed corroborating factors, independent structure confirmation required for BUY",
         "daily_trade_limit": None,
+        "daily_ema_source": "recent complete 1d Binance CORE candle cache",
         "daily_ma_exhaustion_top10": list(_daily_ma_top10),
         "daily_ma_exhaustion_rule": "requires numeric DAILY 50/200 MA within 1.5% or no more than 12% beneath, plus confirmed seller exhaustion; no forced picks",
         "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
