@@ -14,9 +14,9 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.6.0-chronological-oos-ranked-30"
+REVISION = "15.7.0-known-target-oos-labels"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
-STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_6_multihorizon.json")
+STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_7_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
 HORIZONS_MS = {
     "15m": 15 * 60_000,
@@ -669,12 +669,24 @@ def _seed_from_outcome_memory():
             stop_observed_inside_horizon = bool(
                 stop_at and 0 <= stop_at - created <= hms
             )
-            if not has_close and not stop_observed_inside_horizon:
-                continue
-            realised = _f(hret.get(horizon), stop_return)
             for target in TARGETS:
                 hit = int(_f(first.get(str(int(target))), 0))
-                win = bool(hit and hit - created <= hms and (not stop_at or hit <= stop_at))
+                win = bool(
+                    hit
+                    and 0 <= hit - created <= hms
+                    and (not stop_at or hit <= stop_at)
+                )
+                # A target hit before the horizon is already a known positive
+                # outcome even when the source event resolved early and never
+                # recorded that horizon's closing return. Likewise, a stop
+                # before the horizon is a known loss. Unknown censored cases
+                # remain excluded instead of being mislabeled.
+                if not has_close and not stop_observed_inside_horizon and not win:
+                    continue
+                realised = _f(
+                    hret.get(horizon),
+                    float(target) if win else stop_return,
+                )
                 for specialist in (lane, "ALL"):
                     _update_model(
                         _model(specialist, horizon, target),
@@ -1672,7 +1684,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
+        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 knownTargetLabels=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"

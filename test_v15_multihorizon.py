@@ -431,5 +431,34 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertGreater(v15._action_priority("ML SHADOW BUY"), v15._action_priority("REJECT"))
 
 
+
+    def test_seed_labels_early_target_win_without_horizon_close(self):
+        created = 5_000_000_000_000
+        events = []
+        for i in range(40):
+            stamp = created + i * 60_000
+            events.append({
+                "id": f"early{i}",
+                "symbol": f"E{i}USDT",
+                "created_ms": stamp,
+                "setup": "micro ignition",
+                "features": {"setup": "micro ignition", "buy_ratio": .62},
+                "first_target_ms": {"20": stamp + 2 * 60 * 60_000},
+                "stop_hit_ms": 0,
+                # Intentionally no 12h close: the +20% result was already
+                # known from the timestamped target hit.
+                "horizon_returns": {"1h": 8.0},
+                "entry_price": 100.0,
+                "observed_price_at_signal": 100.0,
+                "mfe_pct": 22.0,
+                "mae_pct": -0.6,
+            })
+        v15.OUTCOME = types.SimpleNamespace(_recent=events)
+        self.assertEqual(v15._seed_from_outcome_memory(), 40)
+        model = v15._model("BEAST", "12h", 20)
+        self.assertGreater(model["test_n"], 0)
+        self.assertGreater(model["test_wins"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
