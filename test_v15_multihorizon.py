@@ -69,6 +69,16 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertEqual(v15._classify_lane({"setup": "daily 200 EMA reclaim"}), "HTF_SWING")
         self.assertEqual(v15._classify_lane({"setup": "micro ignition"}), "BEAST")
 
+    def test_ml_trade_selection_targets_at_least_ten_percent(self):
+        self._positive_ev_models(validated=True)
+        opp = v15._opportunity("BEAST", [0.0] * v15.FEATURE_COUNT)
+        self.assertGreaterEqual(opp["target_pct"], 10.0)
+        self.assertIn(opp["target_pct"], (10.0, 20.0))
+        self.assertEqual(v15.MIN_TRADE_TARGET_PCT, 10.0)
+        # Historical 3%/5% observations remain part of model training.
+        self.assertIn(3.0, v15.TARGETS)
+        self.assertIn(5.0, v15.TARGETS)
+
     def test_hard_live_safety_stays_fail_closed(self):
         ok, blockers = v15._safety(self.sensor(), at=1_000_500)
         self.assertTrue(ok)
