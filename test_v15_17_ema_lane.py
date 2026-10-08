@@ -9,7 +9,7 @@ def snap(**kw):
     d.update(kw)
     return d
 GOOD={"verified":True,"blockers":[]}
-FLOW={"micro_ready":True,"sequence_verified":True,"book_sequence_verified":True}
+FLOW={"micro_ready":True,"sequence_verified":True,"book_sequence_verified":True,"cvd_acceleration":1.0,"ofi_acceleration":.1}
 class EMATests(unittest.TestCase):
     def test_all_six_independent(self):
         for tf in ("1h","4h","1d"):
@@ -20,6 +20,9 @@ class EMATests(unittest.TestCase):
     def test_seller_not_exhausted(self):
         x=lane.evaluate(snap(falling_volume=False),"4h",1000,1000,GOOD,FLOW)
         self.assertTrue(all(v["status"]!="BUY NOW — EMA" for v in x))
+    def test_negative_cvd_blocks_execution(self):
+        bad = dict(FLOW, cvd_acceleration=-1)
+        self.assertTrue(all(x["status"]!="BUY NOW — EMA" for x in lane.evaluate(snap(),"1h",1000,1000,GOOD,bad)))
     def test_stale_candle_rejected(self):
         self.assertEqual(lane.evaluate(snap(),"1h",700,1000,GOOD,FLOW),[])
     def test_no_reclaim_rejected(self):
