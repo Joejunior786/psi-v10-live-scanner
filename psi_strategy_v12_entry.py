@@ -2119,8 +2119,35 @@ def _v12_ws_fail_pending(shard, reason):
     _v12_ws_meta[shard].clear()
 
 
+def _merge_authoritative_klines(previous, latest):
+    """Reconcile a shorter Binance refresh without discarding 200-period history.
+
+    Timestamps are Binance candle open times; overlap is mandatory. A delayed
+    reply must not replace newer data or make stale features look refreshed.
+    """
+    if not isinstance(previous, list) or not isinstance(latest, list):
+        return None
+    if not previous or not latest:
+        return None
+    try:
+        old_keys = [int(r[0]) for r in previous]
+        new_keys = [int(r[0]) for r in latest]
+    except (IndexError, TypeError, ValueError, OverflowError):
+        return None
+    if (len(set(old_keys)) != len(old_keys) or
+            len(set(new_keys)) != len(new_keys) or
+            old_keys != sorted(old_keys) or new_keys != sorted(new_keys)):
+        return None
+    if new_keys[-1] < old_keys[-1] or not set(new_keys).intersection(old_keys):
+        return None
+    by_open = {k: row for k, row in zip(old_keys, previous)}
+    by_open.update(zip(new_keys, latest))  # authoritative overlap always wins
+    n = max(len(previous), len(latest))
+    return [by_open[k] for k in sorted(by_open)[-n:]]
+
+
 def _commit_authoritative_rows(sym, tf, rows, requested_limit, source="WS"):
-    """Store official Binance kline rows immediately, including late WS replies."""
+    """Preserve deep history but ALWAYS recalculate it from fresh overlapping candles."""
     if not isinstance(rows, list) or not rows:
         return False
     sym = str(sym or "").upper()
@@ -2129,28 +2156,36 @@ def _commit_authoritative_rows(sym, tf, rows, requested_limit, source="WS"):
         return False
 
     requested_limit = max(1, int(requested_limit or len(rows)))
-    snapshot = snap(rows)
-    capped = len(rows) < requested_limit
     current = _cache.get(sym, {}).get(tf) or {}
     current_rows = current.get("rows") or []
+    if current_rows:
+        if len(rows) < len(current_rows):
+            merged = _merge_authoritative_klines(current_rows, rows)
+            if merged is None:
+                _stats["authoritative_stale_or_nonoverlap_rejected"] += 1
+                return False
+            rows = merged
+            _stats["authoritative_short_refresh_merged"] += 1
+        else:
+            try:
+                if int(rows[-1][0]) < int(current_rows[-1][0]):
+                    _stats["authoritative_stale_or_nonoverlap_rejected"] += 1
+                    return False
+            except (IndexError, TypeError, ValueError, OverflowError):
+                return False
+    snapshot = snap(rows)
+    if snapshot is None:
+        _stats["authoritative_snapshot_unavailable"] += 1
+        return False
     now = time.time()
-
-    if len(rows) >= len(current_rows):
-        _cache[sym][tf] = {
-            "rows": rows,
-            "snap": snapshot,
-            "updated": now,
-            "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
-            "history_capped": capped,
-            "max_history_rows": len(rows),
-        }
-    else:
-        current["updated"] = now
-        current["history_capped"] = bool(current.get("history_capped")) or capped
-        current["max_history_rows"] = max(int(current.get("max_history_rows") or 0), len(rows))
-        if current.get("snap") is None:
-            current["snap"] = snap(current_rows)
-        _cache[sym][tf] = current
+    _cache[sym][tf] = {
+        "rows": rows,
+        "snap": snapshot,
+        "updated": now,
+        "depth": "DEEP" if len(rows) >= DEEP_MIN_ROWS else "FAST",
+        "history_capped": bool(current.get("history_capped")) and len(rows) < DEEP_MIN_ROWS,
+        "max_history_rows": max(len(rows), int(current.get("max_history_rows") or 0)),
+    }
 
     deep = requested_limit >= DEEP_MIN_ROWS
     _tf_mark_success(sym, tf, deep)

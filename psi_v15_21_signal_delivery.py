@@ -19,6 +19,9 @@ LOG_INTERVAL_SECONDS = max(2.0, float(os.environ.get("PSI_SIGNAL_LOG_INTERVAL_SE
 MAX_AGE_MS = 3500
 SIGNAL_LIFETIME_MS = 3000
 MAX_HISTORY = 100
+RESEARCH_ROTATE_MS = 20000
+RESEARCH_ROTATE_COUNT = 10
+_RESEARCH_PREVIOUS = {}
 _LOCK = Lock()
 _PUBLISH_LOCK = Lock()
 _SNAPSHOT = {}
@@ -91,23 +94,72 @@ def _publish_once_unlocked(now_ms=None):
             key = (symbol, item["timeframe"], item["ema_period"])
             buys[key] = dict(symbol=symbol, **item)
     ranked = sorted(records, key=lambda pair: EMA._ema_rank(pair[1]), reverse=True)
-    research = []
-    research_rows = []
+    # Top-ranked entries can legitimately persist across many 1H/4H candles.
+    # Keep them separate from a rotation of additional evidence-backed WATCHes.
+    eligible = []
+    seen = set()
     for symbol, item in ranked:
-        if (symbol not in research and not symbol.startswith(
+        if (symbol in seen or symbol.startswith(
                 ("XUSD", "BFUSD", "USDC", "USD1", "FDUSD", "TUSD"))
-                and item["touch"] and abs(item["distance_pct"]) <= 1):
-            research.append(symbol)
-            research_rows.append({
-                "symbol": symbol, "timeframe": item["timeframe"],
-                "ema_period": item["ema_period"],
-                "distance_pct": item["distance_pct"],
-                "status": item["status"],
-                "seller_exhaustion": item["seller_exhaustion"],
-                "buyer_reclaim": item["buyer_reclaim"],
-            })
-        if len(research) >= 10:
-            break
+                or abs(item.get("distance_pct", 999)) > 1):
+            continue
+        seen.add(symbol)
+        tf = item["timeframe"]
+        frame = ((getattr(CORE, "_cache", {}) or {}).get(symbol) or {}).get(tf) or {}
+        updated_ms = int(EMA.num(frame.get("updated")) * 1000)
+        key = (symbol, tf, item["ema_period"])
+        signature = (
+            item.get("status"), item.get("distance_pct"),
+            item.get("seller_exhaustion"), item.get("buyer_reclaim"),
+            item.get("touch"),
+        )
+        previous = _RESEARCH_PREVIOUS.get(key)
+        if previous is None:
+            change = "NEW"
+            changed_ms = now_ms
+        elif previous["signature"] != signature:
+            change = "CHANGED"
+            changed_ms = now_ms
+        else:
+            change = "UNCHANGED"
+            changed_ms = previous["changed_ms"]
+        _RESEARCH_PREVIOUS[key] = {
+            "signature": signature, "changed_ms": changed_ms, "last_seen_ms": now_ms
+        }
+        eligible.append({
+            "symbol": symbol, "timeframe": tf,
+            "ema_period": item["ema_period"],
+            "distance_pct": item["distance_pct"],
+            "status": item["status"],
+            "touch": bool(item["touch"]),
+            "seller_exhaustion": item["seller_exhaustion"],
+            "buyer_reclaim": item["buyer_reclaim"],
+            "source": "CACHED_CANDLE",
+            "source_updated_ms": updated_ms,
+            "source_age_s": round(max(0, now_ms - updated_ms) / 1000, 1)
+                if updated_ms > 0 else None,
+            "change": change, "last_change_ms": changed_ms,
+        })
+    # Limit history for symbols which no longer meet the criteria.
+    if len(_RESEARCH_PREVIOUS) > 2000:
+        cutoff = now_ms - 3600000
+        for key, record in list(_RESEARCH_PREVIOUS.items()):
+            if record["last_seen_ms"] < cutoff:
+                del _RESEARCH_PREVIOUS[key]
+    primary = [r for r in eligible if r["touch"]][:10]
+    research = [r["symbol"] for r in primary]
+    research_rows = primary
+    primary_symbols = set(research)
+    alternatives = [r for r in eligible if r["symbol"] not in primary_symbols]
+    rotation_tick = now_ms // RESEARCH_ROTATE_MS
+    rotating = []
+    if alternatives:
+        start = (rotation_tick * RESEARCH_ROTATE_COUNT) % len(alternatives)
+        rotating = [
+            alternatives[(start + i) % len(alternatives)]
+            for i in range(min(RESEARCH_ROTATE_COUNT, len(alternatives)))
+        ]
+    recent_changes = sum(r["change"] != "UNCHANGED" for r in eligible)
     new_active = set(buys)
     with _LOCK:
         for key in sorted(new_active - _ACTIVE):
@@ -126,13 +178,18 @@ def _publish_once_unlocked(now_ms=None):
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.23-live-signal-feed",
+            "revision": "15.24-live-signal-feed",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
             "interactions": len(records),
             "research_top10": research,
             "research_rows": research_rows,
+            "rotating_research_rows": rotating,
+            "research_eligible_count": len(eligible),
+            "research_alternative_count": len(alternatives),
+            "research_source_changes": recent_changes,
+            "research_rotation_tick": rotation_tick,
             "technical_ready_symbols": sorted(technical),
             "buy_signals": list(buys.values()),
             "live_evidence_checked": live_checked,
@@ -175,7 +232,7 @@ def read_live(now_ms=None):
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     return {
-        "ok": True, "revision": "15.23-live-signal-feed",
+        "ok": True, "revision": "15.24-live-signal-feed",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -187,6 +244,11 @@ def read_live(now_ms=None):
         "buy_signals": approved,
         "research_top10": snap.get("research_top10", []) if current else [],
         "research_rows": snap.get("research_rows", []) if current else [],
+        "rotating_research_rows": snap.get("rotating_research_rows", []) if current else [],
+        "research_eligible_count": snap.get("research_eligible_count", 0) if current else 0,
+        "research_alternative_count": snap.get("research_alternative_count", 0) if current else 0,
+        "research_source_changes": snap.get("research_source_changes", 0) if current else 0,
+        "research_rotation_tick": snap.get("research_rotation_tick") if current else None,
         "technical_ready_symbols": snap.get("technical_ready_symbols", []) if current else [],
         "live_evidence_checked": snap.get("live_evidence_checked", 0) if current else 0,
         "cycles": status["cycles"], "errors": status["errors"],
@@ -270,7 +332,7 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>Ψ Live Signal Board · V15.23</h1>
+<h1>Ψ Live Signal Board · V15.24</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
@@ -278,14 +340,25 @@ Every entry requires a new server-side integrity check; this page never submits 
 <table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>Target 1</th><th>Action</th></tr></thead>
 <tbody id="signals"><tr><td colspan="6">Fetching live market checks…</td></tr></tbody></table>
 <h2>On-demand quote check</h2><div id="quote" aria-live="polite">Select Verify on an active signal.</div>
-<h2>Developing setups (not buy instructions)</h2>
-<table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th></tr></thead>
+<h2>Developing setups — highest-ranked</h2>
+<p>Based on cached 1H/4H/daily candles, not live quotes. Stable readings
+may repeat until Binance supplies a changed candle snapshot.</p>
+<div id="researchNote" class="warn" role="status">Checking source updates…</div>
+<table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead>
 <tbody id="research"></tbody></table>
+<h2>Additional near-EMA setups — rotating watch</h2>
+<p>Up to 10 different eligible near-EMA candidates rotate every 20 seconds.
+WATCH means not yet touching; repeated names are possible when the eligible pool is small.
+Research only — not BUY signals.</p>
+<table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead>
+<tbody id="rotating"></tbody></table>
 <script>
 "use strict";
 const status=document.getElementById("status");
 const signals=document.getElementById("signals");
 const research=document.getElementById("research");
+const rotating=document.getElementById("rotating");
+const researchNote=document.getElementById("researchNote");
 const quote=document.getElementById("quote");
 let aliveUntil=0, token=0, requestPending=false;
 function cell(row,value){const td=document.createElement("td");
@@ -348,14 +421,34 @@ async function refresh(){
     }else{let row=signals.insertRow();
       cell(row,valid?"No BUY NOW signal qualified":"Snapshot expired — waiting for refresh");
       row.firstChild.colSpan=6;}
-    clear(research);
-    if(valid)for(const q of d.research_rows||[]){
-      const row=research.insertRow();cell(row,q.symbol);cell(row,q.status);
-      cell(row,q.timeframe);cell(row,"EMA"+q.ema_period);
-      cell(row,q.distance_pct+"%");
+    clear(research);clear(rotating);
+    if(valid){
+      const count=d.research_eligible_count||0;
+      researchNote.textContent=count+" eligible pairs within 1% of an EMA"
+        +" | "+(d.research_source_changes||0)+" readings changed since last tick"
+        +" | "+(d.research_alternative_count||0)+" additional candidates";
+      const render=(body,items)=>{
+        if(!items||!items.length){
+          const row=body.insertRow();
+          cell(row,"No additional candidates currently qualify").colSpan=7;
+          return;
+        }
+        for(const q of items){
+          const row=body.insertRow();
+          cell(row,q.symbol);cell(row,q.status);
+          cell(row,q.timeframe);cell(row,"EMA"+q.ema_period);
+          cell(row,q.distance_pct+"%");
+          cell(row,q.source_age_s==null?"unverified":q.source_age_s+"s");
+          cell(row,q.change);
+        }
+      };
+      render(research,d.research_rows||[]);
+      render(rotating,d.rotating_research_rows||[]);
+    }else{
+      researchNote.textContent="Candle evidence unavailable — no current research results";
     }
   }catch(e){status.className="bad";status.textContent="CONNECTION UNAVAILABLE: "+e.message;
-    invalidate();clear(research);}
+    invalidate();clear(research);clear(rotating);researchNote.textContent="Connection lost — no fresh research";}
   finally{requestPending=false;setTimeout(refresh,850);}
 }
 setInterval(()=>{if(aliveUntil&&performance.now()>=aliveUntil){
@@ -452,11 +545,14 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "technical_ready": live.get("technical_ready_symbols", []),
         "research": live.get("research_top10", []),
         "research_rows": live.get("research_rows", [])[:10],
+        "rotating_research": [r["symbol"] for r in live.get("rotating_research_rows", [])],
+        "research_eligible_count": live.get("research_eligible_count", 0),
+        "research_source_changes": live.get("research_source_changes", 0),
         "cycle_ms": cycle_ms,
         "worker_errors": live.get("errors", 0),
         "read_only": True,
     }
-    return "Ψ-V15.23 SIGNAL_TICK " + json.dumps(
+    return "Ψ-V15.24 SIGNAL_TICK " + json.dumps(
         report, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
 
@@ -493,4 +589,4 @@ def install(core, ema):
     core.app.fast_events_handler = http_events
     core.app.fast_quote_handler = http_quote
     core.app.fast_dashboard_handler = http_dashboard
-    print("Ψ-V15.23 LIVE_SIGNAL_DELIVERY installed read-only HTTP+SSE+QUOTE+BOARD strict-quote-micro=1200ms expiry=3s", flush=True)
+    print("Ψ-V15.24 LIVE_SIGNAL_DELIVERY installed cache-merging, rotating watch, source-age truth", flush=True)
