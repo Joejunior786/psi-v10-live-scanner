@@ -122,7 +122,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertGreater(opp["expected_value_pct"], 0)
         self.assertFalse(opp["promotion_validation"]["ready"])
         action, ready, blockers = v15._entry_action(
-            self.sensor(), {}, opp, True, []
+            dict(self.sensor(), setup="micro ignition"), {}, opp, True, []
         )
         self.assertEqual(action, "ML SHADOW BUY")
         self.assertFalse(ready)
@@ -136,7 +136,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertGreater(opp["expected_value_pct"], 0)
         self.assertTrue(opp["promotion_validation"]["ready"])
         action, ready, blockers = v15._entry_action(
-            self.sensor(), {}, opp, True, []
+            dict(self.sensor(), setup="micro ignition"), {}, opp, True, []
         )
         self.assertEqual(action, "ML BUY NOW")
         self.assertTrue(ready)
