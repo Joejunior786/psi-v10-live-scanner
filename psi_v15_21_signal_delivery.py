@@ -758,15 +758,24 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>PSI Live Scanner · V15.29</h1>
+<h1>PSI Live Scanner · V15.30</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
 <div id="authority" class="warn" role="status">Checking strategy authorities…</div>
-<h2>Verified scanner signals</h2>
-<table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>Target 1</th><th>Action</th></tr></thead>
-<tbody id="signals"><tr><td colspan="6">Fetching live market checks…</td></tr></tbody></table>
+<nav class="quick"><a href="#verified">Verified BUY NOW</a><a href="#qualification">ML qualification</a><a href="#research">Research</a></nav>
+<section class="approved" id="verified">
+<h2>VERIFIED BUY NOW · <span id="verifiedCount">0</span> active</h2>
+<p>Only separately approved, read-time-verified signals. Unverified structural BUYs remain in research.</p>
+<div id="verifiedSummary" class="good" aria-live="polite">Checking live approvals…</div>
+<h3>EMA verified lane · <span id="emaCount">0</span></h3>
+<div class="table-scroll"><table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="signals"></tbody></table></div>
+<h3>Machine Learning verified lane · <span id="mlCount">0</span></h3>
+<div class="table-scroll"><table><thead><tr><th>Pair</th><th>Setup / duration</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="mlSignals"></tbody></table></div>
+<h3>V12 Pinpoint verified lane · <span id="v12Count">0</span></h3>
+<div class="table-scroll"><table><thead><tr><th>Pair</th><th>Setup / frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="v12Signals"></tbody></table></div>
+</section>
 <h2>On-demand quote check</h2><div id="quote" aria-live="polite">Select Verify on an active signal.</div>
 <h2>Live trade/book delivery — entire shortlisted universe</h2>
 <p>REQUESTED is not subscribed; only exchange acknowledgements and actual
@@ -775,7 +784,7 @@ per-coin event timestamps confirm delivery. Quiet coins can have old trades.</p>
 <table><thead><tr><th>Pair</th><th>Trade ACK</th><th>Book ACK</th>
 <th>Trade age</th><th>Book age</th><th>Delivery status</th></tr></thead>
 <tbody id="subRows"></tbody></table>
-<h2>ML qualification — current decision, not buy instructions</h2>
+<h2 id="qualification">ML qualification — current decision, not buy instructions</h2>
 <p>NEAR BUY, DATA BLOCKED and MODEL REJECTED are diagnostic states, never execution approvals.</p>
 <div id="qualNote" class="warn">Checking qualification evidence…</div>
 <table><thead><tr><th>Pair</th><th>Engine</th><th>Status</th><th>Target</th><th>Primary blocker</th></tr></thead>
@@ -786,7 +795,7 @@ not all exchange gainers or a claim of a missed trade. Resets on scanner restart
 <div id="moverNote" class="warn">Waiting for verified tracking observations…</div>
 <table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead>
 <tbody id="moverRows"></tbody></table>
-<h2>Developing setups — highest-ranked</h2>
+<h2 id="research">Developing setups — highest-ranked</h2>
 <p>Based on cached 1H/4H/daily candles, not live quotes. Stable readings
 may repeat until Binance supplies a changed candle snapshot.</p>
 <div id="researchNote" class="warn" role="status">Checking source updates…</div>
@@ -803,6 +812,13 @@ Research only — not BUY signals.</p>
 const status=document.getElementById("status");
 const authority=document.getElementById("authority");
 const signals=document.getElementById("signals");
+const mlSignals=document.getElementById("mlSignals");
+const v12Signals=document.getElementById("v12Signals");
+const verifiedCount=document.getElementById("verifiedCount");
+const verifiedSummary=document.getElementById("verifiedSummary");
+const laneGroups={EMA:{body:signals,count:document.getElementById("emaCount")},
+  ML:{body:mlSignals,count:document.getElementById("mlCount")},
+  V12:{body:v12Signals,count:document.getElementById("v12Count")}};
 const research=document.getElementById("research");
 const rotating=document.getElementById("rotating");
 const researchNote=document.getElementById("researchNote");
@@ -818,8 +834,14 @@ function cell(row,value){const td=document.createElement("td");
   td.textContent=value==null?"—":String(value);row.appendChild(td);return td;}
 function money(v){return typeof v==="number"?Number(v.toPrecision(9)).toString():"—";}
 function clear(el){while(el.firstChild)el.removeChild(el.firstChild);}
-function invalidate(){aliveUntil=0;clear(signals);
-  let r=signals.insertRow();cell(r,"No verified active signal — do not trade from this page");}
+function invalidate(){
+  aliveUntil=0;verifiedCount.textContent="0";
+  verifiedSummary.textContent="No currently verified signal; previous approvals are expired.";
+  for(const group of Object.values(laneGroups)){
+    clear(group.body);group.count.textContent="0";
+    const row=group.body.insertRow();cell(row,"No active verified BUY NOW signal").colSpan=8;
+  }
+}
 async function verify(symbol){
   const started=performance.now();
   quote.textContent="Revalidating "+symbol+" against live trade/book evidence…";
