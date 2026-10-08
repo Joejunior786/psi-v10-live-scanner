@@ -1,4 +1,5 @@
 import unittest
+import json
 from types import SimpleNamespace
 import psi_v15_21_signal_delivery as feed
 import psi_v15_17_ema_lane as ema
@@ -83,6 +84,43 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(len(row["buy_signals"]), 0)
         self.assertEqual(len(feed._EVENTS), 0)
 
+
+    def test_research_rows_have_unambiguous_level_and_state(self):
+        row = feed.publish_once(1000000)
+        self.assertEqual(len(row["research_rows"]), 1)
+        research = row["research_rows"][0]
+        self.assertEqual(research["symbol"], "TESTUSDT")
+        self.assertEqual(research["timeframe"], "1h")
+        self.assertIn(research["ema_period"], (50, 200))
+        self.assertTrue(research["seller_exhaustion"])
+        self.assertEqual(feed.read_live(1000000)["research_rows"], row["research_rows"])
+
+    def test_timestamped_railway_log_bridge_only_reports_verified_buys(self):
+        row = feed.publish_once(1000000)
+        live = feed.read_live(1000000)
+        msg = feed.signal_tick_line(row, live, 42)
+        self.assertTrue(msg.startswith("Ψ-V15.22 SIGNAL_TICK "))
+        data = json.loads(msg.split("SIGNAL_TICK ", 1)[1])
+        self.assertEqual(data["generated_ms"], 1000000)
+        self.assertEqual(data["verified_at_ms"], 1000000)
+        self.assertEqual(data["status_at_generation"], "BUY_NOW_VERIFIED")
+        self.assertEqual(data["buy_count"], 2)
+        self.assertEqual(len(data["buys"]), 2)
+        self.assertEqual(data["cycle_ms"], 42)
+        self.assertTrue(data["read_only"])
+
+    def test_log_bridge_marks_stale_and_revoked_signals(self):
+        snapshot = feed.publish_once(1000000)
+        self.micro["book_sequence_verified"] = False
+        revoked = feed.read_live(1001000)
+        data = json.loads(feed.signal_tick_line(snapshot, revoked).split("SIGNAL_TICK ", 1)[1])
+        self.assertEqual(data["status_at_generation"], "NO_VERIFIED_BUY")
+        self.assertEqual(data["buys"], [])
+        expired = feed.read_live(1005000)
+        stale = json.loads(feed.signal_tick_line(snapshot, expired).split("SIGNAL_TICK ", 1)[1])
+        self.assertEqual(stale["status_at_generation"], "DATA_STALE")
+        self.assertEqual(stale["research"], [])
+        self.assertEqual(stale["buys"], [])
 
 if __name__ == "__main__":
     unittest.main()
