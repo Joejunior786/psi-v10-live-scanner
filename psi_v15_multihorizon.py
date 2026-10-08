@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.11.0-target10-validated"
+REVISION = "15.12.0-calibrated-target-ranking"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -944,8 +944,23 @@ def _opportunity(lane, x):
                 "expected_value_pct": round(ev, 3),
                 "promotion_validation": promotion,
             }
-            score = ev + 0.25 * p + 0.03 * math.log1p(samples)
-            score += 0.15 if promotion["ready"] else 0.0
+            # Ranking uses train/validation forecasts, never the TEST win-rate:
+            # the prospective TEST cohort remains an untouched promotion gate.
+            # Prefer credible risk-adjusted 10% outcomes to nominal 20% upside.
+            # Lower-confidence estimates and longer holding windows pay a penalty.
+            sample_weight = samples / (samples + 60.0)
+            conservative_p = p * sample_weight
+            conservative_ev = conservative_p * avg_win - (1.0 - conservative_p) * avg_loss - ROUND_TRIP_FEE_PCT
+            horizon_days = HORIZONS_MS[horizon] / (24.0 * 60 * 60_000)
+            score = (
+                conservative_ev / max(1.0, avg_loss)
+                + 0.5 * conservative_p
+                - 0.025 * math.log1p(horizon_days)
+            )
+            if not promotion["ready"]:
+                score -= 5.0
+            if source == "LEARNING":
+                score -= 3.0
             choice = (score, ev, p, target, horizon, model, source, samples, calibration, promotion)
             if target < MIN_TRADE_TARGET_PCT:
                 continue
@@ -956,7 +971,11 @@ def _opportunity(lane, x):
     # but they cannot displace a genuinely trained model. If no trained
     # combination exists yet, fall back to the learning pool so the lane still
     # publishes a research candidate.
-    selection_pool = ready_choices or choices
+    # Validation-ready models outrank unvalidated research predictions.
+    # If no model is promoted, retain the best research projection as WAIT,
+    # never convert a large hypothetical target into a buy.
+    validated_choices = [c for c in ready_choices if c[-1]["ready"]]
+    selection_pool = validated_choices or ready_choices or choices
     selection_pool.sort(key=lambda z: z[0], reverse=True)
     best = selection_pool[0]
     _, ev, p, target, horizon, model, source, samples, calibration, promotion = best
@@ -1494,6 +1513,7 @@ def report():
         "specialists": list(LANES),
         "targets_pct": list(TARGETS),
         "minimum_ml_trade_target_pct": MIN_TRADE_TARGET_PCT,
+        "ranking_policy": "calibrated probability and conservative risk-adjusted EV; model-sample shrinkage, duration cost and prospective holdout promotion gate",
         "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
         "horizons": list(HORIZON_ORDER),
         "decision_rule": "10%+ selected target + positive empirical EV + out-of-sample validation + hard live-data safety",
@@ -1720,7 +1740,7 @@ def install(core, v13, outcome=None, v14=None):
         "PSI-V15 INSTALLED revision=" + REVISION
         + " specialists=BEAST/EXHAUSTION/BREAKOUT/HTF_SWING"
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
-        + " trainedTargets=3,5,10,20 selectionTargets=10,20"
+        + " trainedTargets=3,5,10,20 selectionTargets=10,20 ranking=CONSERVATIVE_EV_HOLDOUT_GATE"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
         + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 bootstrapSafeHoldout=ENABLED knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY trainedModelPriority=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
