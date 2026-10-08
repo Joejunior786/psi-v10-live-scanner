@@ -518,6 +518,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     last_snapshot = 0.0
     last_control = 0.0
     last_rebalance = 0.0
+    last_inbound_at = time.monotonic()
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
     active = {str(s).upper() for s in symbols if str(s).upper().endswith("USDT")}
     activated_at = {sym: time.monotonic() for sym in active}
@@ -562,6 +563,12 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             except asyncio.TimeoutError:
                 msg = None
             now = time.monotonic()
+            if msg is not None and msg.type == aiohttp.WSMsgType.TEXT:
+                last_inbound_at = now
+            # A connected socket without any inbound frames is not a healthy
+            # market feed. Reconnect to the next configured Binance host.
+            if now - last_inbound_at > 45.0:
+                raise RuntimeError(f"silent websocket role={ROLE} age={now-last_inbound_at:.1f}s")
             if now - last_snapshot >= SNAPSHOT_INTERVAL:
                 await publish_snapshot(r, sorted(active), states, events, host)
                 last_snapshot = now
