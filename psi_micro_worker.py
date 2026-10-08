@@ -30,10 +30,10 @@ WS_HOSTS = tuple(
 CONTROL_POLL_SECONDS = max(1.0, float(os.getenv("PSI_WORKER_CONTROL_POLL_SECONDS", "2")))
 MAX_SYMBOLS = max(1, min(int(os.getenv("PSI_WORKER_MAX_SYMBOLS", "80")), 120))
 CONTROL_MAX_REPLACEMENTS = max(
-    1, min(int(os.getenv("PSI_WORKER_MAX_REPLACEMENTS", "4")), 12)
+    1, min(int(os.getenv("PSI_WORKER_MAX_REPLACEMENTS", "8")), 12)
 )
 CONTROL_REBALANCE_SECONDS = max(
-    5.0, float(os.getenv("PSI_WORKER_CONTROL_REBALANCE_SECONDS", "15"))
+    5.0, float(os.getenv("PSI_WORKER_CONTROL_REBALANCE_SECONDS", "8"))
 )
 CONTROL_MIN_HOLD_SECONDS = max(
     30.0, float(os.getenv("PSI_WORKER_MIN_HOLD_SECONDS", "90"))
