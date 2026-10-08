@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import unittest
 
@@ -285,6 +286,37 @@ class MicroStabilityTests(unittest.TestCase):
         self.assertGreaterEqual(hardening.FRESH_CHALLENGER_SLOTS, 8)
         self.assertLessEqual(hardening.FRESH_CHALLENGER_CHURN_PER_CYCLE, 8)
         self.assertIn("FAIL_CLOSED_AUTHORITY", hardening.AUTHORITY_CHAIN)
+
+
+
+class SubscriptionAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_distinguishes_requested_and_binance_confirmed(self):
+        class FakeRedis:
+            payload = None
+            async def set(self,key,value,ex=None):
+                self.payload=json.loads(value)
+        holder=FakeRedis()
+        await worker.publish_snapshot(holder,["TESTUSDT","OTHERUSDT"],{},0,
+                                      "fake-host",{"TESTUSDT"})
+        self.assertEqual(holder.payload["requested_symbols"],
+                         ["TESTUSDT","OTHERUSDT"])
+        self.assertEqual(holder.payload["subscription_acknowledged_symbols"],
+                         ["TESTUSDT"])
+
+    async def test_failed_ack_never_claims_subscription(self):
+        pending={4:("SUBSCRIBE",{"TESTUSDT"})}
+        confirmed=set()
+        self.assertTrue(worker._apply_exchange_subscription_reply(
+            {"id":4,"error":{"code":-1}},pending,confirmed))
+        self.assertEqual(confirmed,set())
+        pending={5:("SUBSCRIBE",{"TESTUSDT"})}
+        self.assertTrue(worker._apply_exchange_subscription_reply(
+            {"id":5,"result":None},pending,confirmed))
+        self.assertEqual(confirmed,{"TESTUSDT"})
+        pending={6:("UNSUBSCRIBE",{"TESTUSDT"})}
+        self.assertTrue(worker._apply_exchange_subscription_reply(
+            {"id":6,"result":None},pending,confirmed))
+        self.assertEqual(confirmed,set())
 
 
 if __name__ == "__main__":
