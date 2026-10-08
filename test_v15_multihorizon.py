@@ -312,6 +312,7 @@ class V15MultiHorizonTests(unittest.TestCase):
 
     def test_entry_location_actions_include_reclaim_and_pullback(self):
         opp = {
+            "target_pct": 10.0,
             "samples": 80, "model_source": "HTF_SWING",
             "expected_value_pct": 2.0, "probability": .62,
             "expected_loss_pct": 3.0,
