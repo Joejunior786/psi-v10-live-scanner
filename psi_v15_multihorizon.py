@@ -73,6 +73,7 @@ _entry_seed_seen = set()
 _entry_excursion_stats = {}
 _lane_stats = {}
 _board = []
+_daily_ma_top10 = []
 _last_board_ms = 0
 _last_save_ms = 0
 _stats = defaultdict(int)
@@ -1614,7 +1615,8 @@ def _build_board(at=None):
         ),
         reverse=True,
     )
-    global _qualified_total, _qualified_symbols
+    global _qualified_total, _qualified_symbols, _daily_ma_top10
+    _daily_ma_top10 = [r for r in out if r.get("daily_ma_exhaustion") and _f(r.get("selected_target_pct")) >= 10][:10]
     _qualified_symbols = [
         str(r.get("symbol") or "").upper()
         for r in out if bool(r.get("execution_ready"))
@@ -1663,7 +1665,7 @@ def report():
         "candidate_source": "V13 plus eligible cached sensors; 4-lane setup probes shadow only pending structural verification",
         "setup_probe_policy": "Two observed corroborating factors, independent structure confirmation required for BUY",
         "daily_trade_limit": None,
-        "daily_ma_exhaustion_top10": [r for r in rows if r.get("daily_ma_exhaustion") and _f(r.get("selected_target_pct")) >= 10][:10],
+        "daily_ma_exhaustion_top10": list(_daily_ma_top10),
         "daily_ma_exhaustion_rule": "requires numeric DAILY 50/200 MA within 1.5% or no more than 12% beneath, plus confirmed seller exhaustion; no forced picks",
         "selection_rule": "10%+ target only; smaller targets remain training data; positive EV and out-of-sample validation still required",
         "horizons": list(HORIZON_ORDER),
