@@ -602,6 +602,7 @@ def _seed_from_outcome_memory():
     initial_seed = not bool(_stats.get("initial_seed_complete"))
     prepared = []
     duplicate_ids = []
+    batch_buckets = set(_seed_buckets)
 
     for event in events:
         eid = str(event.get("id") or f"{event.get('symbol')}|{event.get('created_ms')}")
@@ -614,9 +615,10 @@ def _seed_from_outcome_memory():
         lane = _classify_lane(setup=event.get("setup"), features=event.get("features") or {})
         symbol = str(event.get("symbol") or "").upper()
         dedup_key = f"{symbol}|{lane}|{created // SEED_DEDUP_MS}"
-        if dedup_key in _seed_buckets:
+        if dedup_key in batch_buckets:
             duplicate_ids.append(eid)
             continue
+        batch_buckets.add(dedup_key)
         prepared.append((event, eid, lane, dedup_key))
 
     split_by_id = {}
