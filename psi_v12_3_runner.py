@@ -15,10 +15,11 @@ import psi_v13_perf24 as upgrade_perf24
 import psi_v13_3_execution as upgrade_v133
 import psi_v14_pinpoint as upgrade_v14
 import psi_v14_perf_fix as upgrade_v14_perf
+import psi_v15_multihorizon as upgrade_v15
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v14.0-pinpoint-three-engine-dual-authority+v13.3-evidence-ready-dual-authority+v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
+UPGRADE_RUNTIME = "v15.0-multihorizon-specialist-ml+v14.0-pinpoint-three-engine-dual-authority+v13.3-evidence-ready-dual-authority+v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
 
 
 def _start_async_daemon(name, coroutine_factory):
@@ -54,6 +55,7 @@ async def main():
     upgrade_v133.install(core, upgrade_v125, upgrade, upgrade_v13)
     upgrade_v14.install(core, upgrade_v125, outcome_learning, upgrade_v13, upgrade_v133)
     upgrade_v14_perf.install(upgrade_v14)
+    upgrade_v15.install(core, upgrade_v13, outcome_learning, upgrade_v14)
 
     # Bind the existing aiohttp server immediately so Railway's /live probe
     # reflects process liveness, while the inherited scanner bootstraps in
@@ -99,6 +101,7 @@ async def main():
         upgrade_v13.learning_worker(),
         upgrade_perf24.supervisor_loop(),
         upgrade_v14.supervisor_loop(),
+        upgrade_v15.supervisor_loop(),
     )
 
 
