@@ -57,7 +57,8 @@ class FeedTests(unittest.TestCase):
 
     def test_dashboard_has_unique_DOM_ids_and_valid_research_table(self):
         html=feed._DASHBOARD
-        ids=re.findall(r'\\bid="([^"]+)"',html)
+        ids=re.findall(r'id="([^"]+)"',html)
+        self.assertGreater(len(ids),10)
         self.assertEqual(len(ids),len(set(ids)),"Duplicate HTML element IDs can break dashboard JS")
         self.assertIn('<tbody id="research">',html)
         self.assertIn('<h2 id="research-section">',html)
