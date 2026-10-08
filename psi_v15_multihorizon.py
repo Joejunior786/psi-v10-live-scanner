@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.1.0-oos-promotion-gate"
+REVISION = "15.1.1-unlimited-qualified-buys"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_1_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -43,8 +43,7 @@ ROUND_TRIP_FEE_PCT = max(0.0, min(1.0, float(os.getenv("PSI_V15_FEE_PCT", "0.20"
 SIGNAL_COOLDOWN_MS = max(30 * 60_000, int(os.getenv("PSI_V15_SIGNAL_COOLDOWN_MS", str(6 * 60 * 60_000))))
 MAX_PENDING = max(200, int(os.getenv("PSI_V15_MAX_PENDING", "1800")))
 MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
-BOARD_LIMIT = 5
-MAX_ML_BUYS_PER_DAY = max(1, min(3, int(os.getenv("PSI_V15_MAX_BUYS_PER_DAY", "3"))))
+BOARD_LIMIT = max(10, min(40, int(os.getenv("PSI_V15_BOARD_LIMIT", "20"))))
 POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "15")))
 MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200")))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SPREAD_BPS", "20")))
@@ -68,8 +67,8 @@ _board = []
 _last_board_ms = 0
 _last_save_ms = 0
 _stats = defaultdict(int)
-_daily_buy_day = ""
-_daily_buy_symbols = set()
+_qualified_total = 0
+_qualified_symbols = []
 _last_error = ""
 
 
@@ -747,40 +746,6 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers):
 
 
 
-def _utc_day(at_ms):
-    return time.strftime("%Y-%m-%d", time.gmtime(int(at_ms) / 1000.0))
-
-
-def _apply_daily_buy_cap(rows, at_ms):
-    """Limit independent ML BUY NOW signals to the user's max trades/day.
-
-    Already-counted symbols may remain BUY NOW; additional otherwise-qualified
-    candidates stay visible as WAIT DAILY LIMIT so the ranking is not hidden.
-    """
-    global _daily_buy_day
-    day = _utc_day(at_ms)
-    if day != _daily_buy_day:
-        _daily_buy_day = day
-        _daily_buy_symbols.clear()
-
-    for row in rows:
-        if not bool(row.get("execution_ready")):
-            continue
-        sym = str(row.get("symbol") or "").upper()
-        row["qualified_before_daily_limit"] = True
-        if sym in _daily_buy_symbols:
-            continue
-        if len(_daily_buy_symbols) < MAX_ML_BUYS_PER_DAY:
-            _daily_buy_symbols.add(sym)
-            continue
-        row["execution_ready"] = False
-        row["action"] = "WAIT DAILY LIMIT"
-        row["blockers"] = list(dict.fromkeys(
-            list(row.get("blockers") or []) + ["MAX_3_ML_TRADES_PER_DAY"]
-        ))
-    return rows
-
-
 def _build_board(at=None):
     global _board, _last_board_ms
     at = _now_ms() if at is None else int(at)
@@ -857,7 +822,12 @@ def _build_board(at=None):
         ),
         reverse=True,
     )
-    _apply_daily_buy_cap(out, at)
+    global _qualified_total, _qualified_symbols
+    _qualified_symbols = [
+        str(r.get("symbol") or "").upper()
+        for r in out if bool(r.get("execution_ready"))
+    ]
+    _qualified_total = len(_qualified_symbols)
     for idx, row in enumerate(out, 1):
         row["rank"] = idx
     _board = out[:BOARD_LIMIT]
@@ -883,7 +853,9 @@ def report():
         "decision_rule": "positive empirical EV + setup-specific model + hard live-data safety",
         "fixed_50pct_gate_removed": True,
         "forced_top_five": True,
-        "max_ml_trades_per_day": MAX_ML_BUYS_PER_DAY,
+        "buy_signal_cap": None,
+        "qualified_buy_count_all": _qualified_total,
+        "qualified_buy_symbols_all": list(_qualified_symbols),
         "promotion_policy": {
             "out_of_sample_required": True,
             "minimum_test_samples": MIN_PROMOTION_TEST_SAMPLES,
@@ -891,9 +863,7 @@ def report():
             "minimum_test_ev_pct": MIN_PROMOTION_TEST_EV_PCT,
             "unvalidated_signal": "ML SHADOW BUY",
         },
-        "daily_buy_day_utc": _daily_buy_day or _utc_day(_now_ms()),
-        "daily_buy_symbols": sorted(_daily_buy_symbols),
-        "execution_ready": sum(bool(r.get("execution_ready")) for r in rows),
+        "execution_ready_shown": sum(bool(r.get("execution_ready")) for r in rows),
         "rows": rows,
         "training": {
             "pending_events": len(_pending),
@@ -927,8 +897,6 @@ def _save(force=False):
             "seen_seed": list(_seen_seed)[-5000:],
             "lane_stats": _lane_stats,
             "stats": dict(_stats),
-            "daily_buy_day": _daily_buy_day,
-            "daily_buy_symbols": sorted(_daily_buy_symbols),
         }
         with open(temp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, separators=(",", ":"), allow_nan=False)
@@ -939,7 +907,6 @@ def _save(force=False):
 
 
 def _restore():
-    global _daily_buy_day
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -958,14 +925,6 @@ def _restore():
         _lane_stats.clear()
         _lane_stats.update(payload.get("lane_stats") or {})
         _stats.update(payload.get("stats") or {})
-        _daily_buy_day = str(payload.get("daily_buy_day") or "")
-        _daily_buy_symbols.clear()
-        _daily_buy_symbols.update(
-            str(x).upper() for x in (payload.get("daily_buy_symbols") or []) if str(x)
-        )
-        if _daily_buy_day and _daily_buy_day != _utc_day(_now_ms()):
-            _daily_buy_day = _utc_day(_now_ms())
-            _daily_buy_symbols.clear()
     except (OSError, ValueError, TypeError):
         pass
 
@@ -1016,8 +975,9 @@ async def supervisor_loop():
                 audit = {
                     "revision": REVISION,
                     "generated_ms": _now_ms(),
-                    "daily_buy_day_utc": _daily_buy_day,
-                    "daily_buy_symbols": sorted(_daily_buy_symbols),
+                    "buy_signal_cap": None,
+                    "qualified_buy_count_all": _qualified_total,
+                    "qualified_buy_symbols_all": list(_qualified_symbols),
                     "rows": [
                         {
                             k: r.get(k) for k in (
@@ -1073,7 +1033,6 @@ def install(core, v13, outcome=None, v14=None):
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
         + " oosPromotion=REQUIRED"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
-        + f" maxBuysPerDay={MAX_ML_BUYS_PER_DAY}"
-        + " orders=DISABLED",
+        + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE" + " orders=DISABLED",
         flush=True,
     )
