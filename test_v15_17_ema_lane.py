@@ -89,6 +89,15 @@ class EMATests(unittest.TestCase):
         self.assertTrue(all(x["status"]=="BUY NOW — EMA" for _,x in records))
         self.assertTrue(all(x["evidence_status"]=="LIVE_VERIFIED" for _,x in records))
 
+    def test_verified_entry_uses_live_trade_price(self):
+        micro=dict(FLOW,last_trade_ms=1000000,last_book_ms=1000000,
+                   last_price=100.2,spread_bps=5,slippage_bps=10)
+        core=SimpleNamespace(_cache={"TESTUSDT":{"1h":{"snap":snap(),"updated":1000}}},
+                             app=SimpleNamespace(micro_metrics=lambda symbol:micro))
+        rows,_,_=lane.scan_cached_ema(core,now=1000)
+        self.assertTrue(any(x["status"]=="BUY NOW — EMA" for _,x in rows))
+        self.assertTrue(all(x["entry"]==100.2 for _,x in rows))
+
     def test_missing_spread_never_promotes(self):
         micro=dict(FLOW, last_trade_ms=1000000, last_book_ms=1000000,
                    last_price=100, slippage_bps=12)
