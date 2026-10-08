@@ -129,6 +129,45 @@ class V125Tests(unittest.TestCase):
         self.assertEqual(out[0], "ABCUSDT")
         self.assertIn("XYZUSDT", out)
 
+    def test_outermost_micro_selector_reserves_all_36_ml_observation_names(self):
+        priority=[f"MON{i}USDT" for i in range(36)]
+        others=[f"LEG{i}USDT" for i in range(44)]
+        u.CORE=SimpleNamespace(
+            q=SimpleNamespace(universe=priority+others),
+            REDIS_MICRO_POOL_SIZE=64,
+            ACTIVE_SYMBOLS_PER_CYCLE=8,
+            _signal_priority_symbols=list(priority),
+            _distributed_micro_sticky_pool=[],
+        )
+        # Earlier V12.4/V12.3 selectors can place other symbols first;
+        # the outermost V12.5 wrapper is the real control-plane authority.
+        u._original_micro=lambda: list(others)
+        u._latest_candidates[:] = [{
+            "symbol":others[0],"state":"EARLY_PINPOINT",
+            "hard_sensor_safety":True
+        }]
+        selected=u.promoted_micro_symbols()
+        self.assertEqual(selected[:36],priority)
+        self.assertEqual(len(selected),64)
+        self.assertEqual(len(set(selected)),64)
+        self.assertIn(others[0],selected)
+        self.assertEqual(u.CORE._distributed_micro_sticky_pool,selected)
+        self.assertEqual(u._stats["observation_admitted"],36)
+        self.assertIn(others[0],selected)
+
+    def test_outer_selector_filters_unlisted_symbols_without_fake_evidence(self):
+        u.CORE=SimpleNamespace(
+            q=SimpleNamespace(universe=["ABCUSDT","XYZUSDT"]),
+            REDIS_MICRO_POOL_SIZE=4,
+            _signal_priority_symbols=["NOTLISTEDUSDT","ABCUSDT"],
+            _distributed_micro_sticky_pool=[],
+        )
+        u._original_micro=lambda:["XYZUSDT"]
+        result=u.promoted_micro_symbols()
+        self.assertEqual(result,["ABCUSDT","XYZUSDT"])
+        self.assertEqual(u._stats["observation_admitted"],1)
+        self.assertNotIn("NOTLISTEDUSDT",result)
+
     def test_hazard_score_is_not_a_probability(self):
         row = u._hazard_row("ABCUSDT", strong_row())
         self.assertIn("hazard_score", row)
