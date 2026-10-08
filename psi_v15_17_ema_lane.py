@@ -26,8 +26,8 @@ def evaluate(snap, tf, updated, now, integrity, micro):
     if min(price,low,high,close,atr) <= 0 or low > high:
         return []
     sell_fade = snap.get("falling_volume") is True and num(snap.get("buy_ratio_3")) >= .5
-    absorption = num(snap.get("buy_ratio")) >= .55 and num(snap.get("buy_ratio_3")) >= .53
-    rejection = num(snap.get("lower_wick")) >= .24 and num(snap.get("close_strength")) >= .58
+    absorption = num(snap.get("buy_ratio")) >= .52 and num(snap.get("buy_ratio_3")) >= .51
+    rejection = num(snap.get("lower_wick")) >= .20 and num(snap.get("close_strength")) >= .55
     live_ok = bool(integrity.get("verified")) and not integrity.get("blockers")
     flow_ok = all(micro.get(k) is True for k in ("micro_ready", "sequence_verified", "book_sequence_verified"))
     positive_flow = num(micro.get("cvd_acceleration")) > 0 and num(micro.get("ofi_acceleration")) >= 0
@@ -51,7 +51,7 @@ def evaluate(snap, tf, updated, now, integrity, micro):
         if not flow_ok: blockers.append("INVALID_MICRO_SEQUENCE")
         if not positive_flow: blockers.append("CVD_OFI_NOT_POSITIVE")
         if not live_ok: blockers.append("LIVE_INTEGRITY_INVALID")
-        if not 0 < risk_pct <= 5: blockers.append("INVALID_EMA_RISK")
+        if not 0 < risk_pct <= 5.5: blockers.append("INVALID_EMA_RISK")
         state = ("BUY NOW — EMA" if not blockers else
                  "PRE-IGNITION" if touch and (sell_fade or absorption) else
                  "ARMED" if touch else "WATCH")
@@ -59,11 +59,11 @@ def evaluate(snap, tf, updated, now, integrity, micro):
                     "distance_pct":round(distance,4), "touch":touch,
                     "seller_exhaustion":exhausted,"buyer_reclaim":reclaim,
                     "status":state,"blockers":blockers,"entry":price,
-                    "stop":stop if 0<risk_pct<=5 else None,
-                    "tp1":price+per_unit*1.5 if 0<risk_pct<=5 else None,
-                    "tp2":price+per_unit*2 if 0<risk_pct<=5 else None,
-                    "tp3":price+per_unit*3 if 0<risk_pct<=5 else None,
-                    "risk_pct":round(risk_pct,3) if 0<risk_pct<=5 else None})
+                    "stop":stop if 0<risk_pct<=5.5 else None,
+                    "tp1":price+per_unit*1.5 if 0<risk_pct<=5.5 else None,
+                    "tp2":price+per_unit*2 if 0<risk_pct<=5.5 else None,
+                    "tp3":price+per_unit*3 if 0<risk_pct<=5.5 else None,
+                    "risk_pct":round(risk_pct,3) if 0<risk_pct<=5.5 else None})
     return out
 
 def attach(symbol, structural_row):
