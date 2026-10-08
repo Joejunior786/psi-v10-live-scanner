@@ -15,7 +15,7 @@ import time
 import redis.asyncio as redis_async
 from collections import defaultdict, deque
 
-REVISION = "15.28.0-end-to-end-event-triggered-evidence"
+REVISION = "15.29.0-verified-structural-ml-shortlist"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -50,6 +50,7 @@ MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
 MAX_SIGNAL_JOURNAL = max(500, int(os.getenv("PSI_V15_MAX_SIGNAL_JOURNAL", "5000")))
 SIGNAL_REARM_MS = max(15 * 60_000, int(os.getenv("PSI_V15_SIGNAL_REARM_MS", str(60 * 60_000))))
 BOARD_LIMIT = max(10, min(40, int(os.getenv("PSI_V15_BOARD_LIMIT", "30"))))
+STRUCTURAL_BOARD_QUOTA = max(4, min(12, BOARD_LIMIT // 2))
 POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "8")))
 MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200")))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SPREAD_BPS", "20")))
@@ -785,12 +786,26 @@ def _daily_ma_exhaustion_filter(sensor, structural):
     }
 
 
+def _verified_structural_setup(row):
+    """Only an actual V12 strategy decision can independently confirm setup.
+
+    This check never upgrades sensor-only flags, event flow, or a watchlist
+    membership to technical confirmation.
+    """
+    return (
+        isinstance(row, dict)
+        and str(row.get("setup") or "").strip() != ""
+        and str(row.get("state") or "").upper() in {"BUY", "ARMED", "WATCH"}
+        and str(row.get("setup_source") or "") != "SENSOR_SHADOW"
+    )
+
+
 def _structural_map():
     try:
         return {
             str(r.get("symbol") or "").upper(): r
             for r in (CORE._board() or [])
-            if isinstance(r, dict) and r.get("symbol")
+            if _verified_structural_setup(r) and r.get("symbol")
         }
     except Exception:
         return {}
@@ -1649,6 +1664,63 @@ def _action_priority(action):
     }.get(str(action or ""), 2)
 
 
+def _select_ml_shortlist(rows, requested, limit, structure_quota, at):
+    """Balance confirmed technical setups and independent ML discovery.
+
+    A selection affects only observation and display; it NEVER changes
+    execution_ready, ML probability, or the upstream technical decision.
+    """
+    limit = max(0, int(limit))
+    approved = [r for r in rows if r.get("execution_ready") is True]
+    remaining = [r for r in rows if r.get("execution_ready") is not True]
+    available = [r for r in remaining if r.get("setup_verification") == "UPSTREAM_STRUCTURAL"]
+    available.sort(key=lambda r: (
+        str(r.get("structural_state") or "").upper() == "BUY",
+        str(r.get("structural_state") or "").upper() == "ARMED",
+        _f(r.get("expected_value_pct")),
+        _f(r.get("probability")),
+        _f(r.get("rank_score")),
+    ), reverse=True)
+    selected = approved[:limit]
+    selected_symbols = {str(r.get("symbol") or "") for r in selected}
+    quota = max(0, min(int(structure_quota), limit-len(selected)))
+    def add(row):
+        sym = str(row.get("symbol") or "")
+        if len(selected) >= limit or not sym or sym in selected_symbols:
+            return
+        selected.append(row)
+        selected_symbols.add(sym)
+    for row in available[:quota]:
+        add(row)
+    requested_set = {str(s).upper() for s in requested or []}
+    for row in remaining:
+        if row.get("symbol") in requested_set:
+            add(row)
+    if len(selected) < limit:
+        others=[r for r in remaining if r.get("symbol") not in selected_symbols]
+        # Keep the prior diverse rotation for discovery research only.
+        if len(others) > limit-len(selected) >= 5:
+            top_count=max(1,(limit-len(selected))//2)
+            top=others[:top_count]
+            tail=others[top_count:]
+            off=(int(at)//max(1,int(POLL_SECONDS*1000)))%len(tail)
+            for row in top+((tail[off:]+tail[:off])[:limit-len(selected)-top_count]):
+                add(row)
+        else:
+            for row in others:
+                add(row)
+    audit={
+        "structural_available":len(available)+sum(
+            x.get("setup_verification")=="UPSTREAM_STRUCTURAL" for x in approved),
+        "structural_displayed":sum(
+            x.get("setup_verification")=="UPSTREAM_STRUCTURAL" for x in selected),
+        "buy_displayed":sum(
+            x.get("setup_verification")=="UPSTREAM_STRUCTURAL"
+            and str(x.get("structural_state") or "").upper()=="BUY" for x in selected),
+    }
+    return selected,audit
+
+
 def _build_board(at=None):
     global _board, _last_board_ms
     explicit_time = at is not None
@@ -1718,6 +1790,8 @@ def _build_board(at=None):
             "setup_evidence": evidence["evidence"],
             "setup_evidence_counts": evidence["all_counts"],
             "setup_verification": "PROVISIONAL_SENSOR" if is_shadow else ("UPSTREAM_STRUCTURAL" if srow else "NONE"),
+            "structural_state": str(srow.get("state") or ""),
+            "structural_execution_state": str(srow.get("execution_state") or ""),
             "action": action,
             "execution_ready": executable,
             "authority": AUTHORITY,
@@ -1798,33 +1872,21 @@ def _build_board(at=None):
         row["rank"] = idx
     # Preserve all qualified trade signals; rotate the research-only section
     # deterministically to surface unfamiliar names on successive snapshots.
-    approved = [r for r in out if r["execution_ready"]]
-    remaining = [r for r in out if not r["execution_ready"]]
-    slots = max(0, BOARD_LIMIT - len(approved))
-    # The previous research rotation changed 15 of 30 ML pairs every few
-    # seconds, faster than Binance worker subscriptions could warm. Keep
-    # currently-requested pairs on the ML board while evaluating all other
-    # discovered pairs independently. Retain their ORIGINAL ML decisions:
-    # no research symbol becomes execution-ready by virtue of subscription.
-    requested = set(str(x).upper() for x in
-                    list(getattr(CORE,"_signal_priority_symbols",[]) or []))
-    monitored = [r for r in remaining if r["symbol"] in requested]
-    other = [r for r in remaining if r["symbol"] not in requested]
-    if slots and monitored:
-        selected = approved + monitored[:slots]
-        slots_left = max(0,slots-len(monitored[:slots]))
-        if slots_left:
-            selected += other[:slots_left]
-    elif len(other) > slots and slots >= 5:
-        # Bootstrap only. Once the feed requests these pairs, the tracked
-        # shortlist becomes stable and worker ACKs can be attained.
-        top = max(1,slots//2)
-        pool = other[top:]
-        rotation = (at//max(1,int(POLL_SECONDS*1000)))%len(pool)
-        selected = approved + other[:top] + (
-            pool[rotation:]+pool[:rotation])[:slots-top]
-    else:
-        selected = approved + other[:slots]
+    # Qualified decisions always take precedence. Reserve research space
+    # for V12 independently CONFIRMED setups, otherwise hundreds of sensor-
+    # only research candidates can crowd 25 genuine V12 BUY structures off
+    # a 30-row ML board. These candidates still retain their original ML
+    # WAIT/REJECT status and must pass every independent buy/risk gate.
+    selected, board_audit = _select_ml_shortlist(
+        out,
+        list(getattr(CORE, "_signal_priority_symbols", []) or []),
+        BOARD_LIMIT,
+        STRUCTURAL_BOARD_QUOTA,
+        at,
+    )
+    _stats["structure_candidates_available"] = board_audit["structural_available"]
+    _stats["structure_candidates_displayed"] = board_audit["structural_displayed"]
+    _stats["structure_buy_displayed"] = board_audit["buy_displayed"]
     for idx, row in enumerate(selected, 1):
         row["rank"] = idx
     _board = selected[:BOARD_LIMIT]
@@ -1847,7 +1909,7 @@ def report():
         "specialists": list(LANES),
         "targets_pct": list(TARGETS),
         "minimum_ml_trade_target_pct": MIN_TRADE_TARGET_PCT,
-        "ranking_policy": "calibrated EV, full-universe discovery, monitored shortlist retained until worker warm-up, approved picks never displaced",
+        "ranking_policy": "calibrated EV, independently verified V12 setup quota, monitored shortlist dwell, approved picks never displaced",
         "candidate_source": "V13 plus eligible cached sensors; 4-lane setup probes shadow only pending structural verification",
         "setup_probe_policy": "Two observed corroborating factors, independent structure confirmation required for BUY",
         "daily_trade_limit": None,
@@ -1882,6 +1944,11 @@ def report():
         },
         "execution_ready_shown": sum(bool(r.get("execution_ready")) for r in rows),
         "trade_scorecard": _trade_scorecard(),
+        "structure_shortlist_diagnostics": {
+            "available":int(_stats.get("structure_candidates_available") or 0),
+            "displayed":int(_stats.get("structure_candidates_displayed") or 0),
+            "formal_buy_displayed":int(_stats.get("structure_buy_displayed") or 0),
+        },
         "live_decision_diagnostics": dict(_LIVE_DECISION_DIAG),
         "qualification_counts": {
             state: sum(r.get("qualification_state") == state for r in rows)
