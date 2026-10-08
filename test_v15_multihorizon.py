@@ -63,6 +63,65 @@ class V15MultiHorizonTests(unittest.TestCase):
             "v128_probe_score": 80,
         }
 
+    def test_formal_v12_setup_required_to_confirm_structure(self):
+        self.assertTrue(v15._verified_structural_setup({
+            "symbol":"AUSDT","setup":"4H_EMA200_REJECTION","state":"BUY"}))
+        self.assertTrue(v15._verified_structural_setup({
+            "symbol":"AUSDT","setup":"SUPPORT_TOUCH","state":"ARMED"}))
+        self.assertFalse(v15._verified_structural_setup({
+            "symbol":"AUSDT","state":"BUY"}))
+        self.assertFalse(v15._verified_structural_setup({
+            "symbol":"AUSDT","setup":"BEAST_PROBE","state":"WATCH",
+            "setup_source":"SENSOR_SHADOW"}))
+        self.assertFalse(v15._verified_structural_setup({}))
+
+    def test_structural_buy_candidate_gets_reserved_ml_research_slot(self):
+        noise=[{
+            "symbol":f"N{i}USDT","setup_verification":"NONE",
+            "structural_state":"","action":"WAIT",
+            "execution_ready":False,"expected_value_pct":50-i,
+            "probability":.8,"rank_score":50-i,
+        } for i in range(35)]
+        formal=[{
+            "symbol":f"F{i}USDT","setup_verification":"UPSTREAM_STRUCTURAL",
+            "structural_state":"BUY" if i<10 else "ARMED",
+            "action":"WAIT","execution_ready":False,
+            "expected_value_pct":1.0,"probability":.15,"rank_score":1.0
+        } for i in range(16)]
+        rows,audit=v15._select_ml_shortlist(noise+formal, [],30,12,2_000_000)
+        self.assertEqual(len(rows),30)
+        self.assertEqual(audit["structural_available"],16)
+        self.assertEqual(audit["structural_displayed"],12)
+        self.assertEqual(audit["buy_displayed"],10)
+        self.assertTrue(all(
+            r["execution_ready"] is False for r in rows))
+        self.assertEqual(sum(r["symbol"].startswith("F") for r in rows),12)
+
+    def test_verified_signal_keeps_absolute_priority_and_no_forced_buys(self):
+        formal=[{
+            "symbol":f"F{i}USDT","setup_verification":"UPSTREAM_STRUCTURAL",
+            "structural_state":"BUY","action":"WAIT",
+            "execution_ready":False,"expected_value_pct":1.0
+        } for i in range(15)]
+        approved={"symbol":"PASSUSDT","setup_verification":"UPSTREAM_STRUCTURAL",
+                  "structural_state":"BUY","action":"ML BUY NOW",
+                  "execution_ready":True}
+        selected,counts=v15._select_ml_shortlist(
+            formal+[approved],[],10,5,2_000_000)
+        self.assertEqual(selected[0]["symbol"],"PASSUSDT")
+        self.assertEqual(sum(x["execution_ready"] is True for x in selected),1)
+        self.assertEqual(counts["structural_displayed"],6)
+
+    def test_structural_map_never_treats_synthetic_probe_as_formal(self):
+        v15.CORE=types.SimpleNamespace(_board=lambda:[
+            {"symbol":"REALUSDT","setup":"DAILY_EMA200_REJECTION","state":"BUY"},
+            {"symbol":"FAKEUSDT","setup":"BEAST_PROBE","state":"WATCH",
+             "setup_source":"SENSOR_SHADOW"},
+            {"symbol":"EMPTYUSDT","state":"ARMED"},
+        ])
+        rows=v15._structural_map()
+        self.assertEqual(list(rows),["REALUSDT"])
+
     def test_setup_specialists_are_distinct(self):
         self.assertEqual(v15._classify_lane({"setup": "seller exhaustion pullback"}), "EXHAUSTION")
         self.assertEqual(v15._classify_lane({"setup": "compression breakout retest"}), "BREAKOUT")
