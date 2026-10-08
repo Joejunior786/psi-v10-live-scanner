@@ -312,7 +312,7 @@ def promoted_micro_symbols():
     base = list(_original_micro() or [])
     universe = set(str(sym).upper() for sym in list(getattr(core.q, "universe", []) or []))
     pool_size = int(getattr(core, "REDIS_MICRO_POOL_SIZE", max(40, len(base) or 40)))
-    reserved = max(0, min(36, pool_size - min(8, pool_size)))
+    reserved = max(0, min(36, pool_size - min(8, max(1, pool_size // 4))))
     promoted = list(_promotion_symbols())
     out = []
     seen = set()
