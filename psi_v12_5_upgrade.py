@@ -303,18 +303,40 @@ def _promotion_symbols():
 
 
 def promoted_micro_symbols():
+    # V15.28 outermost selector: V12.5 wraps V12.4, which wraps V12.3
+    # hardening, so fixing the original core selector is insufficient.
+    # Reserve at most 36 of the live 64 control slots for current verified
+    # market-data OBSERVATION priorities. This changes no BUY authority.
+    core = _core()
+    observation = tuple(getattr(core, "_signal_priority_symbols", []) or [])
     base = list(_original_micro() or [])
-    universe = set(str(s).upper() for s in list(getattr(_core().q, "universe", []) or []))
-    pool_size = int(getattr(_core(), "REDIS_MICRO_POOL_SIZE", max(40, len(base) or 40)))
+    universe = set(str(sym).upper() for sym in list(getattr(core.q, "universe", []) or []))
+    pool_size = int(getattr(core, "REDIS_MICRO_POOL_SIZE", max(40, len(base) or 40)))
+    reserved = max(0, min(36, pool_size - min(8, pool_size)))
+    promoted = list(_promotion_symbols())
     out = []
-    for sym in _promotion_symbols() + base:
+    seen = set()
+    def add(sym):
         sym = str(sym or "").upper()
-        if sym in universe and sym not in out:
+        if sym in universe and sym not in seen and len(out) < pool_size:
+            seen.add(sym)
             out.append(sym)
-        if len(out) >= pool_size:
-            break
-    _stats["deep_promoted"] = sum(1 for s in _promotion_symbols() if s in out)
-    return out or base
+    for sym in observation[:reserved]:
+        add(sym)
+    for sym in promoted + base:
+        add(sym)
+    if not out:
+        # Keep the previous fail-closed warm-start fallback, never fabricate
+        # market data when the universe has not hydrated.
+        out = base[:pool_size]
+    else:
+        # This is the ACTUAL Redis control list. Telemetry must inspect the
+        # active published selection, not an inner wrapper's superseded list.
+        core._distributed_micro_sticky_pool = list(out)
+    _stats["observation_requested"] = len(observation)
+    _stats["observation_admitted"] = sum(sym in out for sym in observation)
+    _stats["deep_promoted"] = sum(sym in out for sym in promoted)
+    return out
 
 
 def priority_symbols(universe):
