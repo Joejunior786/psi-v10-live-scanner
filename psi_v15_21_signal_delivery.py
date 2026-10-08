@@ -757,6 +757,16 @@ button{cursor:pointer;padding:8px 12px;background:#183c54;border:1px solid #6b97
 color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
+.quick{display:flex;flex-wrap:wrap;gap:9px;margin:18px 0}
+.quick a{padding:8px 11px;background:#193346;border:1px solid #34566d;border-radius:7px;color:#cfe9f5;text-decoration:none}
+.approved{border:1px solid #3a8672;padding:16px;border-radius:12px;margin-top:18px;background:#12252a}
+.approved h2{margin:0 0 8px}.approved h3{margin:22px 0 9px;font-size:1rem}
+.approved h3 span{font-variant-numeric:tabular-nums;color:#9ee2bc}
+.table-scroll{overflow-x:auto}
+.approved table{min-width:710px}.approved tbody tr{background:#193039}
+#verifiedSummary{margin:10px 0;padding:8px 0}
+@media(max-width:650px){body{padding:14px}.approved{padding:12px}}
+
 </style></head><body>
 <h1>PSI Live Scanner · V15.30</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
