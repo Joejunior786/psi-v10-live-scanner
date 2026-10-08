@@ -774,7 +774,7 @@ EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
 <div id="authority" class="warn" role="status">Checking strategy authorities…</div>
-<nav class="quick"><a href="#verified">Verified BUY NOW</a><a href="#qualification">ML qualification</a><a href="#research">Research</a></nav>
+<nav class="quick"><a href="#verified">Verified BUY NOW</a><a href="#qualification">ML qualification</a><a href="#research-section">Research</a></nav>
 <section class="approved" id="verified">
 <h2>VERIFIED BUY NOW · <span id="verifiedCount">0</span> active</h2>
 <p>Only separately approved, read-time-verified signals. Unverified structural BUYs remain in research.</p>
@@ -805,7 +805,7 @@ not all exchange gainers or a claim of a missed trade. Resets on scanner restart
 <div id="moverNote" class="warn">Waiting for verified tracking observations…</div>
 <table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead>
 <tbody id="moverRows"></tbody></table>
-<h2 id="research">Developing setups — highest-ranked</h2>
+<h2 id="research-section">Developing setups — highest-ranked</h2>
 <p>Based on cached 1H/4H/daily candles, not live quotes. Stable readings
 may repeat until Binance supplies a changed candle snapshot.</p>
 <div id="researchNote" class="warn" role="status">Checking source updates…</div>
@@ -879,11 +879,13 @@ async function refresh(){
   if(requestPending)return;
   requestPending=true;
   const id=++token, started=performance.now();
+  let responseOk=false;
   try{
     const response=await fetch("/signals/live?nocache="+Date.now(),
       {cache:"no-store",signal:AbortSignal.timeout(2600)});
     if(!response.ok)throw Error("HTTP "+response.status);
     const d=await response.json();
+    responseOk=true;
     if(id!==token)return;
     aliveUntil=performance.now()+Math.max(0,
       (d.expires_ms||0)-(d.server_time_ms||0)-(performance.now()-started)-150);
@@ -995,7 +997,7 @@ async function refresh(){
     }else{
       researchNote.textContent="Candle evidence unavailable — no current research results";
     }
-  }catch(e){status.className="bad";status.textContent="CONNECTION UNAVAILABLE: "+e.message;
+  }catch(e){status.className="bad";status.textContent=(responseOk?"DASHBOARD DISPLAY ERROR: ":"CONNECTION UNAVAILABLE: ")+e.message;
     invalidate();clear(research);clear(rotating);clear(subRows);clear(qualRows);clear(moverRows);
     subNote.textContent="Disconnected";qualNote.textContent="Disconnected";moverNote.textContent="Disconnected";
     researchNote.textContent="Connection lost — no fresh research";}
