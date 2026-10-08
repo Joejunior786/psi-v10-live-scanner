@@ -558,7 +558,7 @@ def _eligible_spot_symbol(sym):
         "DAI", "XUSD", "RLUSD", "PYUSD", "EUR", "EURC", "WBTC", "WBETH",
         "USDS", "PAXG", "XAUT", "MSFTB", "GOOGLB", "COINB", "AMZNB",
         "CBRSB", "TSMB", "AMDB", "AAPLB", "SOXLB", "SMHB", "DRAMB",
-        "FLNCB", "MUB", "NV DAB".replace(" ", ""),
+        "FLNCB", "MUB", "NVDAB",
     }
 
 
