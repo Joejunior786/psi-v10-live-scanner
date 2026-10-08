@@ -1,5 +1,7 @@
 """V15.26: actual event-time evidence, stable subscriptions, measured missed moves."""
 import unittest
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 import psi_v15_multihorizon as ml
@@ -91,15 +93,15 @@ class ObservationCohort(unittest.TestCase):
         feed._PRIORITY_LEASES.clear()
         feed._OBSERVED_QUOTES.clear()
         feed._MISSED_MOVES.clear()
-    def test_held_pool_retains_priority_for_two_minutes(self):
+    def test_held_pool_retains_priority_for_three_minutes(self):
         a=feed._stable_market_priorities(["TESTUSDT","OTHERUSDT"],NOW)
         self.assertEqual(a,["TESTUSDT","OTHERUSDT"])
         b=feed._stable_market_priorities(["NEWUSDT"],NOW+30000)
         self.assertEqual(b[:2],a)
         self.assertIn("NEWUSDT",b)
-        c=feed._stable_market_priorities(["FRESHUSDT"],NOW+120001)
+        c=feed._stable_market_priorities(["FRESHUSDT"],NOW+180001)
         self.assertEqual(c,["NEWUSDT","FRESHUSDT"])
-        d=feed._stable_market_priorities(["LATESTUSDT"],NOW+150001)
+        d=feed._stable_market_priorities(["LATESTUSDT"],NOW+210001)
         self.assertEqual(d,["FRESHUSDT","LATESTUSDT"])
     def test_missed_move_only_from_observed_fresh_quotes(self):
         measured={"last_price":100.0}
@@ -138,6 +140,79 @@ class ObservationCohort(unittest.TestCase):
         self.assertEqual(rows[0]["blockers"],["STALE_TRADE"])
         self.assertEqual(counts["DATA BLOCKED"],1)
         self.assertNotIn("entry",rows[0])
+
+
+class AcknowledgedDelivery(unittest.TestCase):
+    def test_complete_shortlist_reports_worker_acks_and_event_ages(self):
+        previous=(feed.CORE,feed.ML)
+        row={"symbol":"TESTUSDT","lane":"BEAST","action":"WAIT"}
+        feed.ML=SimpleNamespace(_board=[row])
+        feed.CORE=SimpleNamespace(_subscription_telemetry=lambda sym,now:{
+            "symbol":sym,"status":"TRADE_BOOK_ALIGNED",
+            "control_requested":True,"trade_acknowledged":True,
+            "book_acknowledged":True,"trade_age_ms":170,
+            "book_age_ms":210,"trade_sequence_verified":True,
+            "book_sequence_verified":True,
+        })
+        try:
+            summary,lines=feed._subscription_coverage(NOW)
+            self.assertEqual(summary["shortlisted"],1)
+            self.assertEqual(summary["both_acknowledged"],1)
+            self.assertEqual(summary["event_aligned"],1)
+            self.assertEqual(lines[0]["trade_age_ms"],170)
+            self.assertEqual(lines[0]["book_age_ms"],210)
+        finally:
+            feed.CORE,feed.ML=previous
+
+    def test_missing_ack_is_not_ignored(self):
+        previous=(feed.CORE,feed.ML)
+        feed.ML=SimpleNamespace(_board=[{"symbol":"TESTUSDT"}])
+        feed.CORE=SimpleNamespace(_subscription_telemetry=lambda sym,now:{
+            "status":"AWAIT_BINANCE_SUBSCRIBE_ACK",
+            "control_requested":True,"trade_acknowledged":True,
+            "book_acknowledged":False,"trade_age_ms":100,
+            "book_age_ms":100,
+        })
+        try:
+            summary,lines=feed._subscription_coverage(NOW)
+            self.assertEqual(summary["event_aligned"],0)
+            self.assertEqual(summary["both_acknowledged"],0)
+            self.assertEqual(lines[0]["status"],"AWAIT_BINANCE_SUBSCRIBE_ACK")
+        finally:
+            feed.CORE,feed.ML=previous
+
+
+class EventDrivenRecheck(unittest.IsolatedAsyncioTestCase):
+    async def test_paired_real_events_wake_prioritised_ml(self):
+        previous=ml.CORE
+        ml.CORE=SimpleNamespace(_signal_priority_symbols=["TESTUSDT"])
+        class Feed:
+            messages=[
+                {"type":"message","channel":"psi:v12:trade",
+                 "data":json.dumps({"symbol":"TESTUSDT"})},
+                {"type":"message","channel":"psi:v12:depth",
+                 "data":json.dumps({"symbol":"TESTUSDT"})}
+            ]
+            async def get_message(self,**kw):
+                return self.messages.pop(0) if self.messages else None
+        try:
+            self.assertTrue(await ml._await_shortlist_event_pair(Feed(),0.9))
+        finally:
+            ml.CORE=previous
+
+    async def test_irrelevant_events_do_not_trigger_model(self):
+        previous=ml.CORE
+        ml.CORE=SimpleNamespace(_signal_priority_symbols=["TESTUSDT"])
+        class Feed:
+            async def get_message(self,**kw):
+                await asyncio.sleep(.01)
+                return {"type":"message","channel":"psi:v12:trade",
+                        "data":json.dumps({"symbol":"OTHERUSDT"})}
+        try:
+            self.assertFalse(await ml._await_shortlist_event_pair(Feed(),0.04))
+        finally:
+            ml.CORE=previous
+
 
 if __name__=="__main__":
     unittest.main()
