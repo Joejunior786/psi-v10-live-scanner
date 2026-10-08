@@ -467,7 +467,7 @@ def _features_from_outcome(event):
     )
 
 
-def _classify_lane(def _classify_lane(structural=None, sensor=None, setup=None, features=None):
+def _classify_lane(structural=None, sensor=None, setup=None, features=None):
     structural = structural or {}
     sensor = sensor or {}
     features = features or {}
@@ -565,7 +565,7 @@ def _sensor_rows():
     return enriched
 
 
-def _prices():def _prices():
+def _prices():
     prices = {}
     for row in _sensor_rows():
         sym = str(row.get("symbol") or "").upper()
@@ -655,7 +655,7 @@ def _seed_from_outcome_memory():
     return added
 
 
-def _collect_candidates(def _collect_candidates(at=None):
+def _collect_candidates(at=None):
     at = _now_ms() if at is None else int(at)
     structural = _structural_map()
     rows = _sensor_rows()
@@ -992,7 +992,7 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers, entry_plan=Non
     return "ML BUY NOW", True, []
 
 
-def _signal_id(def _signal_id(row, at_ms):
+def _signal_id(row, at_ms):
     bucket = int(at_ms // SIGNAL_REARM_MS)
     return "|".join((
         str(row.get("symbol") or "").upper(),
