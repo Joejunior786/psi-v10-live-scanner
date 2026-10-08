@@ -1035,6 +1035,10 @@ async def start_http_server():
         app.router.add_get("/signals/live",globals()["fast_signal_handler"])
     if callable(globals().get("fast_events_handler")):
         app.router.add_get("/signals/events",globals()["fast_events_handler"])
+    if callable(globals().get("fast_quote_handler")):
+        app.router.add_get("/signals/quote",globals()["fast_quote_handler"])
+    if callable(globals().get("fast_dashboard_handler")):
+        app.router.add_get("/signals/board",globals()["fast_dashboard_handler"])
     runner=web.AppRunner(app); await runner.setup(); site=web.TCPSite(runner,"0.0.0.0",PORT); await site.start()
     print(f"Î¨-V10.1 HTTP listening on port {PORT}",flush=True); return runner
 

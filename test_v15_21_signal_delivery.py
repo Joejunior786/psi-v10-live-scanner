@@ -1,5 +1,7 @@
 import unittest
 import json
+import asyncio
+from unittest.mock import patch
 from types import SimpleNamespace
 import psi_v15_21_signal_delivery as feed
 import psi_v15_17_ema_lane as ema
@@ -99,7 +101,7 @@ class FeedTests(unittest.TestCase):
         row = feed.publish_once(1000000)
         live = feed.read_live(1000000)
         msg = feed.signal_tick_line(row, live, 42)
-        self.assertTrue(msg.startswith("Ψ-V15.22 SIGNAL_TICK "))
+        self.assertTrue(msg.startswith("Ψ-V15.23 SIGNAL_TICK "))
         data = json.loads(msg.split("SIGNAL_TICK ", 1)[1])
         self.assertEqual(data["generated_ms"], 1000000)
         self.assertEqual(data["verified_at_ms"], 1000000)
@@ -121,6 +123,49 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(stale["status_at_generation"], "DATA_STALE")
         self.assertEqual(stale["research"], [])
         self.assertEqual(stale["buys"], [])
+
+
+    def test_on_demand_refreshes_expired_snapshot_without_extending_old_signal(self):
+        feed.publish_once(1000000)
+        live_stale = feed.read_live(1005000)
+        self.assertFalse(live_stale["fresh"])
+        self.micro.update(working_micro(1005000))
+        self.core._cache["TESTUSDT"]["1h"]["updated"] = 1005
+        with patch.object(feed, "_ms", return_value=1005000):
+            response = asyncio.run(feed.http_live(None))
+        live = json.loads(response.text)
+        self.assertTrue(live["fresh"])
+        self.assertEqual(live["generated_ms"], 1005000)
+        self.assertEqual(live["buy_count"], 2)
+
+    def test_quote_requires_subsecond_live_book_and_trade_not_just_fresh_report(self):
+        feed.publish_once(1000000)
+        self.micro["last_trade_ms"] = 997000
+        self.micro["last_book_ms"] = 999000
+        self.assertEqual(feed.read_live(1000000)["buy_count"], 2)
+        with patch.object(feed, "_ms", return_value=1000000):
+            response = asyncio.run(feed.http_quote(
+                SimpleNamespace(query={"symbol": "TESTUSDT"})))
+        quote = json.loads(response.text)
+        self.assertEqual(quote["buy_count"], 0)
+        self.assertEqual(quote["status"], "NO_VERIFIED_BUY")
+        self.assertFalse(quote["order_placement"])
+
+    def test_quote_freshness_and_no_exchange_order(self):
+        with patch.object(feed, "_ms", return_value=1000000):
+            response = asyncio.run(feed.http_quote(
+                SimpleNamespace(query={"symbol": "TESTUSDT"})))
+        data = json.loads(response.text)
+        self.assertEqual(data["status"], "VERIFIED_AT_READ")
+        self.assertEqual(data["buy_count"], 2)
+        self.assertLessEqual(data["quotes"][0]["quote_expires_ms"], 1001200)
+        self.assertFalse(data["order_placement"])
+
+    def test_board_contains_both_new_live_routes_and_no_order_submission(self):
+        response = asyncio.run(feed.http_dashboard(None))
+        self.assertIn("/signals/live", response.text)
+        self.assertIn("/signals/quote", response.text)
+        self.assertIn("No order has been placed", response.text)
 
 if __name__ == "__main__":
     unittest.main()
