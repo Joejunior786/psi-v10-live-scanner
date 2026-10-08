@@ -1,6 +1,7 @@
 """Independent EMA50/EMA200 seller-exhaustion reporting and execution authority."""
 import time
 import math
+import asyncio
 
 CORE = None
 PREVIOUS_ATTACH = None
@@ -88,10 +89,9 @@ def attach(symbol, structural_row):
                     "execution_blockers":[],"ema_buy_signal":best})
     return row
 
-def print_board(*args, **kwargs):
-    original = PREVIOUS_PRINT(*args, **kwargs)
+def emit_report():
     if CORE is None:
-        return original
+        return None
     records = []
     covered = 0
     now = time.time()
@@ -132,7 +132,23 @@ def print_board(*args, **kwargs):
             f"blockers={','.join(item['blockers']) or '-'}",
             flush=True,
         )
-    return original
+    return None
+
+
+def print_board(*args, **kwargs):
+    result = PREVIOUS_PRINT(*args, **kwargs)
+    emit_report()
+    return result
+
+
+async def reporting_supervisor():
+    """Independent EMA reporter; never wait for long structural hydration loops."""
+    while True:
+        try:
+            emit_report()
+        except Exception as exc:
+            print(f"PSI-V15.17 EMA_REPORT_ERROR {type(exc).__name__}: {exc}", flush=True)
+        await asyncio.sleep(45)
 
 
 def install(core):

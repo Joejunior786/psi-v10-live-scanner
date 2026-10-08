@@ -3,7 +3,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [upgrade/v15-17-independent-ema]
+    branches: [upgrade/v15-17-independent-ema, repair/v15-17-ema-report-heartbeat]
 jobs:
   tests:
     runs-on: ubuntu-latest

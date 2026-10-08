@@ -93,6 +93,9 @@ async def main():
     control_threads.append(
         _start_async_daemon("psi-v15-multihorizon", upgrade_v15.supervisor_loop)
     )
+    control_threads.append(
+        _start_async_daemon("psi-v15-17-ema-report", upgrade_v1517.reporting_supervisor)
+    )
     print(
         "PSI-CONTROL-PLANE isolated threads="
         + ",".join(t.name for t in control_threads),
