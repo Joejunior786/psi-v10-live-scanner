@@ -3342,8 +3342,11 @@ def _distributed_micro_symbols():
     for sym in list(getattr(app, "selected_micro_symbols", []) or []):
         add_desired(sym)
 
-    # Independently verified EMA technical opportunities earn a bounded
-    # priority slice, without displacing the entire existing execution pool.
+    # V15.25: reserve bounded warm-up attention for genuine independent
+    # ML/BEAST/EXHAUSTION/BREAKOUT and EMA candidates, not just legacy V12.
+    # These are subscription priorities ONLY, never an execution authority.
+    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:12]:
+        add_desired(sym)
     for sym in list(globals().get("_ema_priority_symbols", []) or [])[:8]:
         add_desired(sym)
 

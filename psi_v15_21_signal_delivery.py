@@ -14,6 +14,7 @@ from aiohttp import web
 
 CORE = None
 EMA = None
+ML = None
 INTERVAL_SECONDS = 1.0
 LOG_INTERVAL_SECONDS = max(2.0, float(os.environ.get("PSI_SIGNAL_LOG_INTERVAL_SECONDS", "4")))
 MAX_AGE_MS = 3500
@@ -21,6 +22,9 @@ SIGNAL_LIFETIME_MS = 3000
 MAX_HISTORY = 100
 RESEARCH_ROTATE_MS = 20000
 RESEARCH_ROTATE_COUNT = 10
+SOURCE_DECISION_MAX_AGE_MS = 20000
+MICRO_QUOTE_MAX_AGE_MS = 1200
+ML_PRIORITY_COUNT = 12
 _RESEARCH_PREVIOUS = {}
 _LOCK = Lock()
 _PUBLISH_LOCK = Lock()
@@ -78,6 +82,183 @@ def _latest_verified(row, now_ms, strict_micro_age_ms=None):
     return None
 
 
+def _micro_authority_check(symbol, now_ms, strict_age_ms=MICRO_QUOTE_MAX_AGE_MS):
+    """Fail closed against actual Binance trade/book events, not a log timestamp.
+
+    This is common execution integrity only. Each setup engine remains the
+    exclusive authority on whether its own structural/ML rules passed.
+    """
+    if CORE is None or not re.fullmatch(r"[A-Z0-9]{2,24}USDT", symbol):
+        return None, ["INVALID_SYMBOL"]
+    try:
+        micro = CORE.app.micro_metrics(symbol) or {}
+    except Exception:
+        return None, ["MICRO_READ_ERROR"]
+    if not isinstance(micro, dict):
+        return None, ["MICRO_INVALID"]
+    err = []
+    trade_ms = EMA.num(micro.get("last_trade_ms"))
+    book_ms = EMA.num(micro.get("last_book_ms"))
+    trade_age = now_ms - trade_ms
+    book_age = now_ms - book_ms
+    if not (0 <= trade_age <= strict_age_ms):
+        err.append("STALE_TRADE")
+    if not (0 <= book_age <= strict_age_ms):
+        err.append("STALE_BOOK")
+    for key, blocker in (("micro_ready","MICRO_NOT_READY"),
+                         ("sequence_verified","TRADE_SEQUENCE"),
+                         ("book_sequence_verified","BOOK_SEQUENCE")):
+        if micro.get(key) is not True:
+            err.append(blocker)
+    spread = micro.get("spread_bps")
+    slippage = micro.get("slippage_bps")
+    if spread is None or not 0 <= EMA.num(spread,-1) <= 20:
+        err.append("SPREAD")
+    if slippage is None or not 0 <= EMA.num(slippage,-1) <= 35:
+        err.append("SLIPPAGE")
+    if EMA.num(micro.get("last_price")) <= 0:
+        err.append("LIVE_PRICE_MISSING")
+    if err:
+        return None, err
+    return micro, []
+
+
+def _foreign_signal_verified(row, now_ms, strict_age_ms=MICRO_QUOTE_MAX_AGE_MS):
+    """Read-time gateway for already APPROVED independent engines.
+
+    Neither ML research WATCHes nor V12 structural BUYs lacking the execution
+    authority are promoted. Fresh common market evidence is mandatory.
+    """
+    symbol = str(row.get("symbol") or "").upper()
+    authority = row.get("authority")
+    micro, errors = _micro_authority_check(symbol, now_ms, strict_age_ms)
+    if errors:
+        return None
+    price = EMA.num(micro.get("last_price"))
+    if authority == "V15_ML":
+        if ML is None or not (row.get("execution_ready") is True
+                and row.get("action") == "ML BUY NOW"
+                and row.get("promotion_ready") is True
+                and EMA.num(row.get("selected_target_pct")) >= 10
+                and row.get("setup_verification") == "UPSTREAM_STRUCTURAL"
+                and row.get("anti_chase") is not True):
+            return None
+        board_ms = EMA.num(getattr(ML, "_last_board_ms", 0))
+        if not 0 <= now_ms - board_ms <= SOURCE_DECISION_MAX_AGE_MS:
+            return None
+        # Latest model decision must still be in the authority's live board.
+        live = next((x for x in list(getattr(ML, "_board", []) or [])
+                     if x.get("symbol") == symbol and
+                     x.get("lane") == row.get("lane") and
+                     x.get("action") == "ML BUY NOW" and
+                     x.get("execution_ready") is True and
+                     x.get("promotion_ready") is True), None)
+        if live is None:
+            return None
+        expected = EMA.num(row.get("price"))
+        stop = EMA.num(row.get("dynamic_stop"))
+        low = EMA.num(row.get("entry_low"))
+        high = EMA.num(row.get("entry_high"))
+        maximum = EMA.num(row.get("max_chase"))
+        # Model authority is NOT transferable to a materially different price.
+        if not (expected > 0 and abs(price/expected-1) <= .015
+                and stop > 0 and stop < price
+                and low > 0 and high >= low
+                and low <= price <= high
+                and (maximum <= 0 or price <= maximum)):
+            return None
+        target_pct = EMA.num(row.get("selected_target_pct"))
+        target = price * (1 + target_pct/100.0)
+        result = {
+            "symbol":symbol, "authority":"V15_ML", "lane":row.get("lane"),
+            "timeframe":row.get("timeframe") or "?",
+            "setup":row.get("setup"), "entry":price, "stop":stop,
+            "tp1":target, "tp2":None, "tp3":None,
+            "target_pct":target_pct, "probability":row.get("probability"),
+            "expected_time_to_target":row.get("expected_time_to_target"),
+            "model_samples":row.get("model_samples"),
+            "risk_pct":round(100 * (price-stop)/price,3),
+        }
+    elif authority == "V12_PINPOINT":
+        if CORE is None or row.get("execution_state") != "BUY NOW":
+            return None
+        original = next((x for x in list(CORE._board() or [])
+                         if x.get("symbol") == symbol and
+                         x.get("execution_state") == "BUY NOW"), None)
+        if original is None or not 0 <= now_ms - EMA.num(original.get("generated_ms")) <= SOURCE_DECISION_MAX_AGE_MS:
+            return None
+        verify = getattr(CORE, "_attach_execution_gate", None)
+        if not callable(verify):
+            return None
+        try:
+            checked = verify(symbol, original)
+        except Exception:
+            return None
+        if checked.get("execution_state") != "BUY NOW" or checked.get("buy_now") is not True:
+            return None
+        expected = EMA.num(checked.get("current"))
+        stop = EMA.num(checked.get("invalidation"))
+        tps = [EMA.num(checked.get(k)) for k in ("tp1","tp2","tp3")]
+        if not (expected > 0 and abs(price/expected-1) <= .015
+                and stop > 0 and stop < price and
+                all(x > price for x in tps if x > 0)
+                and tps[0] > price):
+            return None
+        result = {
+            "symbol":symbol, "authority":"V12_PINPOINT", "lane":checked.get("setup"),
+            "timeframe":checked.get("timeframe") or "?",
+            "setup":checked.get("setup"), "entry":price, "stop":stop,
+            "tp1":tps[0], "tp2":tps[1] or None, "tp3":tps[2] or None,
+            "target_pct":round(100*(tps[0]/price-1),2),
+            "risk_pct":round(100*(price-stop)/price,3),
+        }
+    else:
+        return None
+    result["quote_checked_ms"] = now_ms
+    result["trade_age_ms"] = now_ms - EMA.num(micro.get("last_trade_ms"))
+    result["book_age_ms"] = now_ms - EMA.num(micro.get("last_book_ms"))
+    result["quote_expires_ms"] = min(
+        now_ms + SIGNAL_LIFETIME_MS,
+        int(EMA.num(micro.get("last_trade_ms")) + strict_age_ms),
+        int(EMA.num(micro.get("last_book_ms")) + strict_age_ms),
+    )
+    if result["quote_expires_ms"] <= now_ms:
+        return None
+    return result
+
+
+def _candidate_authorities(now_ms):
+    """Collect independent approved decisions, not merely candidate rankings."""
+    approved = []
+    inspected = {"ml_ranked": 0,"ml_approved":0,"v12_approved":0}
+    ml_rows = []
+    if ML is not None:
+        ml_rows = list(getattr(ML, "_board", []) or [])
+        inspected["ml_ranked"] = len(ml_rows)
+        if 0 <= now_ms - EMA.num(getattr(ML, "_last_board_ms",0)) <= SOURCE_DECISION_MAX_AGE_MS:
+            for row in ml_rows:
+                if row.get("execution_ready") is True and row.get("action") == "ML BUY NOW":
+                    inspected["ml_approved"] += 1
+                    approved.append(dict(row, authority="V15_ML"))
+    try:
+        structural_rows = list(CORE._board() or [])
+        for row in structural_rows:
+            if row.get("execution_state") == "BUY NOW" and row.get("buy_now") is True:
+                inspected["v12_approved"] += 1
+                approved.append(dict(row, authority="V12_PINPOINT"))
+    except (AttributeError, TypeError):
+        pass
+
+    # Scheduling only. Stable top-ranked candidates get an opportunity to
+    # warm both WebSocket sources, rather than being persistently skipped.
+    wanted = []
+    for row in ml_rows[:ML_PRIORITY_COUNT]:
+        symbol = str(row.get("symbol") or "").upper()
+        if re.fullmatch(r"[A-Z0-9]{2,24}USDT", symbol) and symbol not in wanted:
+            wanted.append(symbol)
+    return approved, inspected, wanted
+
+
 def _publish_once_unlocked(now_ms=None):
     """Refresh entire cached EMA opportunity set; no 45s reporting dependency."""
     global _SNAPSHOT, _ACTIVE, _NEXT_ID
@@ -85,6 +266,7 @@ def _publish_once_unlocked(now_ms=None):
     records, frames, live_checked = EMA.scan_cached_ema(CORE, now_ms / 1000)
     buys = {}
     technical = set()
+    foreign, inspected, wanted_ml = _candidate_authorities(now_ms)
     for symbol, item in records:
         if EMA._technical_complete(item) and not symbol.startswith(
             ("XUSD", "BFUSD", "USDC", "USD1", "FDUSD", "TUSD")
@@ -160,9 +342,27 @@ def _publish_once_unlocked(now_ms=None):
             for i in range(min(RESEARCH_ROTATE_COUNT, len(alternatives)))
         ]
     recent_changes = sum(r["change"] != "UNCHANGED" for r in eligible)
-    new_active = set(buys)
+    # The V15/V12 routes are additive, not gated on the EMA-specific rule.
+    # All existing explicit market-safety checks stay fail-closed.
+    foreign_approved = []
+    foreign_rejections = 0
+    for candidate in foreign:
+        verified = _foreign_signal_verified(candidate, now_ms)
+        if verified is None:
+            foreign_rejections += 1
+        else:
+            foreign_approved.append(verified)
+    try:
+        # Preserve a bounded ML warm-up slice; core's existing worker control
+        # still enforces capacity, rotation, dwell and real Binance subscriptions.
+        CORE._signal_priority_symbols = wanted_ml[:ML_PRIORITY_COUNT]
+    except (AttributeError, TypeError):
+        pass
+    new_active = set(buys) | {
+        (v["symbol"],v["authority"],v.get("lane")) for v in foreign_approved
+    }
     with _LOCK:
-        for key in sorted(new_active - _ACTIVE):
+        for key in sorted(set(buys) - _ACTIVE):
             _NEXT_ID += 1
             row = buys[key]
             _EVENTS.append({
@@ -192,13 +392,19 @@ def _publish_once_unlocked(now_ms=None):
             "research_rotation_tick": rotation_tick,
             "technical_ready_symbols": sorted(technical),
             "buy_signals": list(buys.values()),
+            "foreign_buy_signals": foreign_approved,
+            "foreign_approved_count": len(foreign_approved),
+            "foreign_screened_count": len(foreign),
+            "foreign_rejected_at_gate": foreign_rejections,
+            "authority_diagnostics": inspected,
+            "ml_priority_symbols": list(wanted_ml),
             "live_evidence_checked": live_checked,
             "last_event_id": _NEXT_ID,
             "order_placement": False,
         }
         _STATUS["cycles"] += 1
     if new_active:
-        print(f"Ψ-V15.21 LIVE_BUY_FEED liveBuys={len(new_active)} "
+        print(f"PSI-V15.25 LIVE_BUY_FEED liveBuys={len(new_active)} "
               f"events={_NEXT_ID} generated={now_ms}", flush=True)
     return dict(_SNAPSHOT)
 
@@ -217,6 +423,13 @@ def _fresh_buy_rows(snapshot, now_ms):
     for row in snapshot.get("buy_signals") or []:
         fresh = _latest_verified(row, now_ms)
         if fresh:
+            fresh["authority"] = "EMA"
+            fresh["lane"] = "EMA"
+            passed.append(fresh)
+    for row in snapshot.get("foreign_buy_signals") or []:
+        # Re-run the *same* independent authority check at response time.
+        fresh = _foreign_signal_verified(row, now_ms)
+        if fresh:
             passed.append(fresh)
     return passed
 
@@ -232,7 +445,7 @@ def read_live(now_ms=None):
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     return {
-        "ok": True, "revision": "15.24-live-signal-feed",
+        "ok": True, "revision": "15.25-unified-verified-authorities",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -242,6 +455,10 @@ def read_live(now_ms=None):
                    "NO_VERIFIED_BUY" if current else "DATA_STALE"),
         "buy_count": len(approved),
         "buy_signals": approved,
+        "authority_diagnostics": snap.get("authority_diagnostics", {}) if current else {},
+        "foreign_screened_count": snap.get("foreign_screened_count", 0) if current else 0,
+        "foreign_rejected_at_gate": snap.get("foreign_rejected_at_gate", 0) if current else 0,
+        "ml_priority_symbols": snap.get("ml_priority_symbols", []) if current else [],
         "research_top10": snap.get("research_top10", []) if current else [],
         "research_rows": snap.get("research_rows", []) if current else [],
         "rotating_research_rows": snap.get("rotating_research_rows", []) if current else [],
@@ -293,10 +510,12 @@ async def http_quote(request):
     )
     quotes = []
     if active:
-        for row in snap.get("buy_signals") or []:
+        for row in (snap.get("buy_signals") or []) + (snap.get("foreign_buy_signals") or []):
             if row.get("symbol") != symbol:
                 continue
-            verified = _latest_verified(row, checked_ms, strict_micro_age_ms=1200)
+            verified = (_foreign_signal_verified(row, checked_ms, strict_age_ms=1200)
+                        if row.get("authority") in {"V15_ML","V12_PINPOINT"}
+                        else _latest_verified(row, checked_ms, strict_micro_age_ms=1200))
             if verified is not None:
                 # The source snapshot may expire earlier than the micro lease.
                 verified["quote_expires_ms"] = min(
@@ -305,7 +524,7 @@ async def http_quote(request):
                 if checked_ms < verified["quote_expires_ms"]:
                     quotes.append(verified)
     return web.json_response({
-        "ok": True, "revision": "15.23-on-demand-verified-quote",
+        "ok": True, "revision": "15.25-on-demand-unified-verified-quote",
         "symbol": symbol, "server_time_ms": checked_ms,
         "generated_ms": snap.get("generated_ms"),
         "expires_ms": snap.get("expires_ms"),
@@ -332,10 +551,12 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>PSI Live Scanner · V15.24</h1>
+<h1>PSI Live Scanner · V15.25</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
+EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
+<div id="authority" class="warn" role="status">Checking strategy authorities…</div>
 <h2>Verified scanner signals</h2>
 <table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>Target 1</th><th>Action</th></tr></thead>
 <tbody id="signals"><tr><td colspan="6">Fetching live market checks…</td></tr></tbody></table>
@@ -355,6 +576,7 @@ Research only — not BUY signals.</p>
 <script>
 "use strict";
 const status=document.getElementById("status");
+const authority=document.getElementById("authority");
 const signals=document.getElementById("signals");
 const research=document.getElementById("research");
 const rotating=document.getElementById("rotating");
@@ -383,7 +605,7 @@ async function verify(symbol){
     }
     const q=d.quotes[0];
     quote.textContent=symbol+" live-verified at "+new Date(d.server_time_ms).toLocaleTimeString()
-      +" | Entry "+money(q.entry)+" | Stop "+money(q.stop)+" | TP1 "+money(q.tp1)
+      +" | "+(q.authority||"EMA")+" | Entry "+money(q.entry)+" | Stop "+money(q.stop)+" | TP1 "+money(q.tp1)
       +" | TP2 "+money(q.tp2)+" | TP3 "+money(q.tp3)
       +" | Quote lease remaining "+Math.floor(lease)+"ms"
       +" | Recheck the exchange before submitting. No order has been placed.";
@@ -408,11 +630,18 @@ async function refresh(){
       +" | verified buys "+(valid?d.buy_count:0)
       +" | scan age "+d.snapshot_age_ms+"ms | cycles "+d.cycles
       +" | checked "+new Date(d.server_time_ms).toLocaleTimeString();
+    const ad=d.authority_diagnostics||{};
+    authority.textContent=valid
+      ?"Independent engines: "+(ad.ml_ranked||0)+" ML ranked, "
+        +(ad.ml_approved||0)+" ML approved, "+(ad.v12_approved||0)
+        +" V12 approved; "+(d.foreign_rejected_at_gate||0)
+        +" rejected at fresh trade/book check"
+      :"Authority status unavailable — market verification is stale";
     clear(signals);
     if(valid&&d.buy_signals&&d.buy_signals.length){
       for(const q of d.buy_signals){
         const row=signals.insertRow();
-        cell(row,q.symbol);cell(row,q.timeframe+" EMA"+q.ema_period);
+        cell(row,q.symbol);cell(row,(q.authority||"EMA")+" · "+(q.lane||"EMA")+" · "+q.timeframe+(q.ema_period?" EMA"+q.ema_period:""));
         cell(row,money(q.entry));cell(row,money(q.stop));cell(row,money(q.tp1));
         const c=row.insertCell(), b=document.createElement("button");
         b.textContent="Verify quote";b.onclick=()=>verify(q.symbol);
@@ -552,7 +781,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "worker_errors": live.get("errors", 0),
         "read_only": True,
     }
-    return "Ψ-V15.24 SIGNAL_TICK " + json.dumps(
+    return "PSI-V15.25 SIGNAL_TICK " + json.dumps(
         report, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
 
@@ -578,15 +807,15 @@ async def supervisor_loop():
             with _LOCK:
                 _STATUS["errors"] += 1
                 _STATUS["last_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
-            print(f"Ψ-V15.23 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
+            print(f"PSI-V15.25 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(INTERVAL_SECONDS)
 
 
-def install(core, ema):
-    global CORE, EMA
-    CORE, EMA = core, ema
+def install(core, ema, ml=None):
+    global CORE, EMA, ML
+    CORE, EMA, ML = core, ema, ml
     core.app.fast_signal_handler = http_live
     core.app.fast_events_handler = http_events
     core.app.fast_quote_handler = http_quote
     core.app.fast_dashboard_handler = http_dashboard
-    print("Ψ-V15.24 LIVE_SIGNAL_DELIVERY installed cache-merging, rotating watch, source-age truth", flush=True)
+    print("PSI-V15.25 LIVE_SIGNAL_DELIVERY unified EMA+ML+V12 verification and market-priority bridge", flush=True)

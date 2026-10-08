@@ -59,7 +59,7 @@ async def main():
     upgrade_v14_perf.install(upgrade_v14)
     upgrade_v15.install(core, upgrade_v13, outcome_learning, upgrade_v14)
     upgrade_v1517.install(core)
-    signal_v1521.install(core, upgrade_v1517)
+    signal_v1521.install(core, upgrade_v1517, upgrade_v15)
 
     # Bind the existing aiohttp server immediately so Railway's /live probe
     # reflects process liveness, while the inherited scanner bootstraps in
