@@ -350,6 +350,7 @@ def _qualification_report(at):
             "symbol":item.get("symbol"),"lane":item.get("lane"),
             "state":state,"action":item.get("action"),
             "setup_confirmation":item.get("setup_verification") or "NONE",
+            "structural_state":item.get("structural_state") or "",
             "setup_not_confirmed":item.get("setup_verification") != "UPSTREAM_STRUCTURAL",
             "probability":item.get("probability"),
             "target_pct":item.get("selected_target_pct"),
@@ -514,6 +515,15 @@ def _publish_once_unlocked(now_ms=None):
     }
     _observe_missed_rallies(now_ms,priorities,approved_symbols)
     qualification_rows,qualification_counts=_qualification_report(now_ms)
+    structure_summary={
+        "available":int(getattr(ML,"_stats",{}).get("structure_candidates_available",0) or 0) if ML else 0,
+        "shown":sum(x.get("setup_verification")=="UPSTREAM_STRUCTURAL" for x in
+                    list(getattr(ML,"_board",[]) or [])[:30]) if ML else 0,
+        "formal_buy_shown":sum(
+            x.get("setup_verification")=="UPSTREAM_STRUCTURAL"
+            and str(x.get("structural_state") or "").upper()=="BUY"
+            for x in list(getattr(ML,"_board",[]) or [])[:30]) if ML else 0,
+    }
     subscription_summary,subscription_rows=_subscription_coverage(now_ms)
     new_active = set(buys) | {
         (v["symbol"],v["authority"],v.get("lane")) for v in foreign_approved
@@ -546,7 +556,7 @@ def _publish_once_unlocked(now_ms=None):
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.28-end-to-end-telemetry-recheck",
+            "revision": "15.29-verified-structural-ml-shortlist",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
@@ -568,6 +578,7 @@ def _publish_once_unlocked(now_ms=None):
             "ml_priority_symbols": list(priorities),
             "qualification_rows": qualification_rows,
             "qualification_counts": qualification_counts,
+            "structure_summary": structure_summary,
             "subscription_summary": subscription_summary,
             "subscription_rows": subscription_rows,
             "missed_rallies": list(_MISSED_MOVES)[-10:][::-1],
@@ -619,7 +630,7 @@ def read_live(now_ms=None):
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     return {
-        "ok": True, "revision": "15.28-end-to-end-telemetry-recheck",
+        "ok": True, "revision": "15.29-verified-structural-ml-shortlist",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -635,6 +646,7 @@ def read_live(now_ms=None):
         "ml_priority_symbols": snap.get("ml_priority_symbols", []) if current else [],
         "qualification_rows": snap.get("qualification_rows", []) if current else [],
         "qualification_counts": snap.get("qualification_counts", {}) if current else {},
+        "structure_summary": snap.get("structure_summary", {}) if current else {},
         "subscription_summary": snap.get("subscription_summary", {}) if current else {},
         "subscription_rows": snap.get("subscription_rows", []) if current else [],
         "missed_rallies": snap.get("missed_rallies", []) if current else [],
@@ -731,7 +743,7 @@ color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
 .good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
 code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
 </style></head><body>
-<h1>PSI Live Scanner · V15.28</h1>
+<h1>PSI Live Scanner · V15.29</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
@@ -871,14 +883,17 @@ async function refresh(){
         cell(row,q.status);
       }
       const counts=d.qualification_counts||{};
-      qualNote.textContent=Object.entries(counts).map(([k,v])=>k+": "+v).join(" | ")
-        ||"No current ML decisions";
+      const structure=d.structure_summary||{};
+      qualNote.textContent="Formal V12 setups shown: "+(structure.shown||0)
+        +" (BUY structure "+(structure.formal_buy_shown||0)+") | "
+        +(Object.entries(counts).map(([k,v])=>k+": "+v).join(" | ")
+        ||"No current ML decisions");
       for(const q of (d.qualification_rows||[])){
         const r=qualRows.insertRow();
         cell(r,q.symbol);cell(r,q.lane);cell(r,q.state);
         cell(r,(q.target_pct==null?"—":q.target_pct+"%"));
         const b=(q.blockers||[]).slice(0,2).join(", ");
-        cell(r,(q.setup_not_confirmed?"SETUP NOT CONFIRMED; ":"")+(b||"—"));
+        cell(r,(q.setup_not_confirmed?"SETUP NOT CONFIRMED; ":"FORMAL "+(q.structural_state||"STRUCTURE")+"; ")+(b||"—"));
       }
       const events=(d.missed_rallies||[]).filter(e=>!e.had_approved_buy);
       moverNote.textContent=events.length
@@ -1023,6 +1038,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "foreign_rejected_at_gate": live.get("foreign_rejected_at_gate", 0),
         "ml_priority_symbols": live.get("ml_priority_symbols", []),
         "qualification_counts": live.get("qualification_counts", {}),
+        "structure_summary": live.get("structure_summary", {}),
         "subscription_summary": live.get("subscription_summary", {}),
         "subscription_rows": live.get("subscription_rows", [])[:30],
         "missed_rally_count": live.get("missed_rally_count", 0),
@@ -1036,7 +1052,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "worker_errors": live.get("errors", 0),
         "read_only": True,
     }
-    return "PSI-V15.28 SIGNAL_TICK " + json.dumps(
+    return "PSI-V15.29 SIGNAL_TICK " + json.dumps(
         report, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
 
@@ -1062,7 +1078,7 @@ async def supervisor_loop():
             with _LOCK:
                 _STATUS["errors"] += 1
                 _STATUS["last_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
-            print(f"PSI-V15.28 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
+            print(f"PSI-V15.29 LIVE_FEED_ERROR {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(INTERVAL_SECONDS)
 
 
@@ -1073,4 +1089,4 @@ def install(core, ema, ml=None):
     core.app.fast_events_handler = http_events
     core.app.fast_quote_handler = http_quote
     core.app.fast_dashboard_handler = http_dashboard
-    print("PSI-V15.28 LIVE_SIGNAL_DELIVERY timed decision evidence, watch dwell and rally audit", flush=True)
+    print("PSI-V15.29 LIVE_SIGNAL_DELIVERY timed decision evidence, watch dwell and rally audit", flush=True)
