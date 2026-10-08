@@ -101,7 +101,7 @@ class FeedTests(unittest.TestCase):
         row = feed.publish_once(1000000)
         live = feed.read_live(1000000)
         msg = feed.signal_tick_line(row, live, 42)
-        self.assertTrue(msg.startswith("PSI-V15.27 SIGNAL_TICK "))
+        self.assertTrue(msg.startswith("PSI-V15.28 SIGNAL_TICK "))
         data = json.loads(msg.split("SIGNAL_TICK ", 1)[1])
         self.assertEqual(data["generated_ms"], 1000000)
         self.assertEqual(data["verified_at_ms"], 1000000)
