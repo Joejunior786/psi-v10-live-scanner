@@ -6,6 +6,8 @@ import unittest
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 import psi_micro_worker as worker
+import psi_strategy_v12_entry as core
+import types
 import psi_structure_worker as structure_worker
 import psi_v12_3_hardening as hardening
 
@@ -317,6 +319,42 @@ class SubscriptionAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker._apply_exchange_subscription_reply(
             {"id":6,"result":None},pending,confirmed))
         self.assertEqual(confirmed,set())
+
+
+
+class MicroPriorityHandoffTests(unittest.TestCase):
+    def test_all_36_specialist_slots_reach_core_control_pool(self):
+        # Regression for the 16-of-36 truncation between live signal
+        # delivery and the Redis worker-control authority.
+        expected=[f"P{i}USDT" for i in range(36)]
+        universe=expected+[f"EXTRA{i}USDT" for i in range(64)]
+        attrs=("q","app","_board","_signal_priority_symbols",
+               "_ema_priority_symbols","_distributed_micro_sticky_pool",
+               "_distributed_micro_pool_epoch","REDIS_MICRO_POOL_SIZE",
+               "REDIS_MICRO_PRIORITY_SLOTS")
+        previous={key:getattr(core,key,None) for key in attrs}
+        absent={key for key in attrs if not hasattr(core,key)}
+        try:
+            core.q=types.SimpleNamespace(universe=universe)
+            core.app=types.SimpleNamespace(selected_micro_symbols=[],
+                                           symbol_meta={})
+            core._board=lambda: []
+            core._signal_priority_symbols=list(expected)
+            core._ema_priority_symbols=[]
+            core._distributed_micro_sticky_pool=[]
+            core._distributed_micro_pool_epoch=0
+            core.REDIS_MICRO_POOL_SIZE=64
+            core.REDIS_MICRO_PRIORITY_SLOTS=40
+            selection=core._distributed_micro_symbols()
+            self.assertEqual(selection[:36],expected)
+            self.assertEqual(len(set(selection)),len(selection))
+            self.assertEqual(len(selection),64)
+        finally:
+            for key,value in previous.items():
+                if key in absent:
+                    delattr(core,key)
+                else:
+                    setattr(core,key,value)
 
 
 if __name__ == "__main__":
