@@ -36,6 +36,18 @@ class DecisionEvidence(unittest.TestCase):
         self.assertEqual(out["entry_reference"],100)
         self.assertEqual(src["generated_ms"],NOW-20000)
         self.assertTrue(ml._safety(out,NOW)[0])
+    def test_oldest_real_event_controls_evidence_freshness(self):
+        self.value=micro(last_trade=NOW-1150,last_book=NOW-250)
+        out=ml._synchronise_priority_sensor(sensor(),NOW)
+        self.assertEqual(out["generated_ms"],NOW-1150)
+        self.assertEqual(out["trade_age_ms"],1150)
+        self.assertTrue(ml._safety(out,NOW)[0])
+        self.assertEqual(out["live_evidence_source"],"DISTRIBUTED_TRADE_BOOK")
+    def test_future_event_timestamp_must_not_be_accepted(self):
+        self.value=micro(last_trade=NOW+1,last_book=NOW)
+        out=ml._synchronise_priority_sensor(sensor(),NOW)
+        self.assertFalse(out["hard_sensor_safety"])
+        self.assertNotIn("live_evidence_source",out)
     def test_stale_trade_never_freshened_by_clock(self):
         self.value=micro(last_trade=NOW-1201)
         out=ml._synchronise_priority_sensor(sensor(),NOW)
