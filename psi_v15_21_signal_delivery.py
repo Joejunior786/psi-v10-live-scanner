@@ -556,7 +556,7 @@ def _publish_once_unlocked(now_ms=None):
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.29-verified-structural-ml-shortlist",
+            "revision": "15.30-verified-buy-now-display-lanes",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
@@ -619,6 +619,19 @@ def _fresh_buy_rows(snapshot, now_ms):
     return passed
 
 
+def _group_verified_signals(approved):
+    """Group only the already revalidated, execution-approved rows."""
+    result={"EMA":[],"ML":[],"V12":[]}
+    keys={"EMA":"EMA","V15_ML":"ML","V12_PINPOINT":"V12"}
+    for row in approved or []:
+        if not isinstance(row,dict):
+            continue
+        group=keys.get(row.get("authority"))
+        if group:
+            result[group].append(dict(row))
+    return result
+
+
 def read_live(now_ms=None):
     now_ms = _ms() if now_ms is None else int(now_ms)
     with _LOCK:
@@ -630,7 +643,7 @@ def read_live(now_ms=None):
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     return {
-        "ok": True, "revision": "15.29-verified-structural-ml-shortlist",
+        "ok": True, "revision": "15.30-verified-buy-now-display-lanes",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -640,6 +653,8 @@ def read_live(now_ms=None):
                    "NO_VERIFIED_BUY" if current else "DATA_STALE"),
         "buy_count": len(approved),
         "buy_signals": approved,
+        "verified_lanes": _group_verified_signals(approved),
+        "verified_lane_counts": {k:len(v) for k,v in _group_verified_signals(approved).items()},
         "authority_diagnostics": snap.get("authority_diagnostics", {}) if current else {},
         "foreign_screened_count": snap.get("foreign_screened_count", 0) if current else 0,
         "foreign_rejected_at_gate": snap.get("foreign_rejected_at_gate", 0) if current else 0,
@@ -1052,7 +1067,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "worker_errors": live.get("errors", 0),
         "read_only": True,
     }
-    return "PSI-V15.29 SIGNAL_TICK " + json.dumps(
+    return "PSI-V15.30 SIGNAL_TICK " + json.dumps(
         report, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
 
