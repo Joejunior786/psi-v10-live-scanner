@@ -165,7 +165,10 @@ def scan_cached_ema(core, now=None):
                 if not cand_price or not live_price or abs(live_price / cand_price - 1) > 0.015:
                     integrity = dict(integrity, verified=False,
                                      blockers=list(integrity["blockers"])+["LIVE_PRICE_NOT_CONFIRMED"])
-                items = evaluate(snap, tf, updated, now, integrity, micro)
+                # Use the verified recent trade price for entry/risk geometry,
+                # never the potentially older last forming-candle price.
+                evaluated_snap = dict(snap, current=live_price) if integrity["verified"] else snap
+                items = evaluate(evaluated_snap, tf, updated, now, integrity, micro)
                 evidence_status = "LIVE_VERIFIED" if integrity["verified"] else "LIVE_BLOCKED"
             else:
                 items = previews
@@ -190,7 +193,16 @@ def attach(symbol, structural_row):
                         if qualified else ({}, {}))
     candidates = []
     for tf, snap, updated, _ in previews:
-        candidates.extend(evaluate(snap, tf, updated, now, integrity, micro))
+        if qualified and integrity.get("verified") and isinstance(snap, dict):
+            latest = num(micro.get("last_price"))
+            candle = num(snap.get("current"))
+            tf_ok = candle > 0 and latest > 0 and abs(latest / candle - 1) <= .015
+            effective = dict(snap, current=latest) if tf_ok else snap
+            tf_integrity = (integrity if tf_ok else
+                            {"verified":False,"blockers":["LIVE_PRICE_NOT_CONFIRMED"]})
+            candidates.extend(evaluate(effective, tf, updated, now, tf_integrity, micro))
+        else:
+            candidates.extend(evaluate(snap, tf, updated, now, integrity, micro))
     row["ema_signal_lane"] = candidates
     eligible = [r for r in candidates if r["status"] == "BUY NOW — EMA"]
     if eligible:
