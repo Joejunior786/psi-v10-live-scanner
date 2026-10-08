@@ -553,12 +553,16 @@ def _eligible_spot_symbol(sym):
     if not sym.endswith("USDT") or len(sym) <= 4:
         return False
     base = sym[:-4]
+    # Binance stock-token instruments frequently use a B-suffixed equity
+    # ticker. Conservative exclusion prevents them being misread as crypto.
+    if len(base) >= 4 and base.endswith("B"):
+        return False
     return base not in {
         "BFUSD", "FDUSD", "USDC", "USDP", "TUSD", "USDE", "USD1",
         "DAI", "XUSD", "RLUSD", "PYUSD", "EUR", "EURC", "WBTC", "WBETH",
         "USDS", "PAXG", "XAUT", "MSFTB", "GOOGLB", "COINB", "AMZNB",
         "CBRSB", "TSMB", "AMDB", "AAPLB", "SOXLB", "SMHB", "DRAMB",
-        "FLNCB", "MUB", "NVDAB",
+        "FLNCB", "MUB", "NVDAB", "EURI", "QQQ", "SPY", "TQQQ", "SQQQ", "USDF", "USTC", "USDY",
     }
 
 
