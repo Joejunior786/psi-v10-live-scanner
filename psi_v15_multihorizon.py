@@ -12,9 +12,10 @@ import math
 import os
 import statistics
 import time
+import redis.asyncio as redis_async
 from collections import defaultdict, deque
 
-REVISION = "15.27.0-synchronised-market-evidence"
+REVISION = "15.28.0-end-to-end-event-triggered-evidence"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -510,7 +511,7 @@ def _classify_lane(structural=None, sensor=None, setup=None, features=None):
 # V15.26: only the active, already-discovered priority pool is eligible for
 # on-decision live hydration. New timestamps/prices must come from actual
 # worker trade and book events, never from the decision/report clock.
-LIVE_DECISION_PRIORITY_LIMIT = 24
+LIVE_DECISION_PRIORITY_LIMIT = 48
 _LIVE_DECISION_DIAG = defaultdict(int)
 
 
@@ -534,6 +535,21 @@ def _synchronise_priority_sensor(sensor, at=None):
         return row
     if not isinstance(micro, dict):
         return row
+    # Check actual Binance subscription acknowledgements before treating
+    # worker tick data as a continuously monitored candidate.
+    subscribe_check=getattr(CORE,"_subscription_telemetry",None)
+    if callable(subscribe_check):
+        try:
+            transport=subscribe_check(sym,at)
+        except Exception:
+            _LIVE_DECISION_DIAG["subscription_check_failed"]+=1
+            return row
+        if not (transport.get("trade_acknowledged") and
+                transport.get("book_acknowledged") and
+                transport.get("trade_requested") and
+                transport.get("book_requested")):
+            _LIVE_DECISION_DIAG["subscription_not_acknowledged"]+=1
+            return row
     trade_ms = int(_f(micro.get("last_trade_ms")))
     book_ms = int(_f(micro.get("last_book_ms")))
     age_t, age_b = at-trade_ms, at-book_ms
@@ -581,7 +597,7 @@ def _synchronise_priority_sensor(sensor, at=None):
 
 def _decision_priority_symbols(structural):
     wanted = []
-    for sym in list(getattr(CORE, "_signal_priority_symbols", []) or [])[:16]:
+    for sym in list(getattr(CORE, "_signal_priority_symbols", []) or [])[:40]:
         if sym not in wanted:
             wanted.append(sym)
     for sym in list(getattr(CORE, "_ema_priority_symbols", []) or [])[:6]:
@@ -1960,10 +1976,53 @@ async def _health(request):
     return _augment(await _ORIGINAL_HEALTH(request))
 
 
+
+async def _await_shortlist_event_pair(pubsub, seconds):
+    """Wake ML on actual trade AND depth packets for monitored names.
+
+    A pub/sub notification is only a *wake up*. Actual BUY evidence is
+    independently read and verified against Binance event timestamps.
+    """
+    wanted={str(x).upper() for x in
+            list(getattr(CORE,"_signal_priority_symbols",[]) or [])}
+    if not wanted:
+        await asyncio.sleep(min(seconds,2.0))
+        return False
+    until=time.monotonic()+seconds
+    seen={}
+    while time.monotonic()<until:
+        remaining=max(0.0,until-time.monotonic())
+        event=await pubsub.get_message(ignore_subscribe_messages=True,
+                                       timeout=min(0.5,remaining))
+        if not isinstance(event,dict) or event.get("type")!="message":
+            continue
+        try:
+            data=json.loads(event.get("data") or "{}")
+            symbol=str(data.get("symbol") or "").upper()
+        except (TypeError,ValueError):
+            continue
+        if symbol not in wanted:
+            continue
+        channel=str(event.get("channel") or "")
+        mask=1 if channel=="psi:v12:trade" else 2 if channel=="psi:v12:depth" else 0
+        if not mask:
+            continue
+        seen[symbol]=seen.get(symbol,0)|mask
+        if seen[symbol]==3:
+            _stats["market_pair_wakeups"]+=1
+            # Worker snapshots are pushed approximately every 500ms.
+            await asyncio.sleep(0.55)
+            return True
+    return False
+
+
 async def supervisor_loop():
     global _last_error
     cycle = 0
+    source=None
+    pubsub=None
     while True:
+        started=time.monotonic()
         try:
             seeded = _seed_from_outcome_memory()
             _seed_entry_excursions()
@@ -2036,7 +2095,44 @@ async def supervisor_loop():
             _stats["worker_errors"] += 1
             _last_error = f"loop:{type(exc).__name__}:{str(exc)[:120]}"
             print("PSI-V15 ERROR " + _last_error, flush=True)
-        await asyncio.sleep(POLL_SECONDS)
+        # Wake on real packets for priority pairs, not only the 8-second
+        # model timer. Cap work to one full model cycle every 3 seconds.
+        # Failure to subscribe falls back to scheduled evaluation.
+        if pubsub is None and getattr(CORE,"REDIS_URL",""):
+            try:
+                source=redis_async.from_url(CORE.REDIS_URL,
+                    encoding="utf-8",decode_responses=True,
+                    socket_connect_timeout=1, socket_timeout=1)
+                pubsub=source.pubsub()
+                await pubsub.subscribe("psi:v12:trade","psi:v12:depth")
+            except Exception:
+                _stats["market_listener_connect_failed"]+=1
+                pubsub=None
+                if source is not None:
+                    await source.aclose()
+                source=None
+        if pubsub is not None:
+            try:
+                awakened=await _await_shortlist_event_pair(pubsub,
+                                               min(POLL_SECONDS,6.0))
+                if awakened:
+                    elapsed=time.monotonic()-started
+                    if elapsed<3:
+                        await asyncio.sleep(3-elapsed)
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _stats["market_listener_failed"]+=1
+                try:
+                    await pubsub.aclose()
+                    if source is not None:
+                        await source.aclose()
+                except Exception:
+                    pass
+                pubsub=None
+                source=None
+        await asyncio.sleep(POLL_SECONDS if not getattr(CORE,"REDIS_URL","") else 1.0)
 
 
 def install(core, v13, outcome=None, v14=None):
