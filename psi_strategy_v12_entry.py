@@ -3403,7 +3403,9 @@ def _distributed_micro_symbols():
 
     # Reserve real micro priority slots for ML and EMA before the inherited
     # structural pool. These affect subscriptions, NEVER buy authority.
-    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:16]:
+    # Keep all 36 specialist observation subscriptions, not only 16.
+    # Priority is capped by the actual micro pool; BUY approval stays separate.
+    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:min(36, REDIS_MICRO_PRIORITY_SLOTS)]:
         add_desired(sym)
     for sym in list(globals().get("_ema_priority_symbols", []) or [])[:6]:
         add_desired(sym)
