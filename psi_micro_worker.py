@@ -510,6 +510,25 @@ async def _subscription_change(ws, method: str, symbols, request_id: int):
     return request_id+1
 
 
+def _apply_exchange_subscription_reply(envelope, pending, confirmed):
+    """Apply ONLY a successful Binance websocket response to stream ACKs."""
+    if not isinstance(envelope,dict) or envelope.get("id") is None:
+        return False
+    command=pending.pop(envelope.get("id"),None)
+    if not command:
+        return False
+    method,names=command
+    if "result" in envelope and envelope.get("result") is None:
+        if method=="SUBSCRIBE":
+            confirmed.update(names)
+        elif method=="UNSUBSCRIBE":
+            confirmed.difference_update(names)
+    else:
+        print(f"PSI-MICRO SUBSCRIPTION_REJECTED role={ROLE} "
+              f"operation={method} size={len(names)}",flush=True)
+    return True
+
+
 async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], host: str):
     # Use Binance's raw /ws endpoint so control-pool changes can be applied
     # incrementally. Unchanged symbols retain their sequence/history instead of
@@ -646,18 +665,8 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                 try:
                     envelope = json.loads(msg.data)
                     if isinstance(envelope,dict) and envelope.get("id") is not None:
-                        cmd=pending_subscriptions.pop(envelope.get("id"),None)
-                        if cmd:
-                            method,names=cmd
-                            if "result" in envelope and envelope.get("result") is None:
-                                if method=="SUBSCRIBE":
-                                    subscription_confirmed.update(names)
-                                else:
-                                    subscription_confirmed.difference_update(names)
-                            else:
-                                print(f"PSI-MICRO SUBSCRIPTION_REJECTED role={ROLE} "
-                                      f"operation={method} size={len(names)}",
-                                      flush=True)
+                        _apply_exchange_subscription_reply(
+                            envelope,pending_subscriptions,subscription_confirmed)
                         continue
                     data = envelope.get("data") if isinstance(envelope, dict) and isinstance(envelope.get("data"),dict) else envelope
                     if not isinstance(data, dict):
