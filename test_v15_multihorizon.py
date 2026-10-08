@@ -510,5 +510,36 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertEqual(opp["model_source"], "BEAST")
 
 
+
+    def test_empty_prebootstrap_seed_does_not_consume_initial_holdout(self):
+        v15.OUTCOME = types.SimpleNamespace(_recent=[])
+        self.assertEqual(v15._seed_from_outcome_memory(), 0)
+        self.assertFalse(bool(v15._stats.get("initial_seed_complete")))
+
+        created = 7_000_000_000_000
+        events = []
+        for i in range(40):
+            stamp = created + i * 60_000
+            events.append({
+                "id": f"boot{i}",
+                "symbol": f"BOOT{i}USDT",
+                "created_ms": stamp,
+                "setup": "micro ignition",
+                "features": {"setup": "micro ignition", "buy_ratio": .61},
+                "first_target_ms": {"3": stamp + 5 * 60_000},
+                "stop_hit_ms": 0,
+                "horizon_returns": {"15m": 3.3, "1h": 3.8, "12h": 4.2, "24h": 4.5},
+                "entry_price": 100.0,
+                "observed_price_at_signal": 100.0,
+                "mfe_pct": 5.0,
+                "mae_pct": -0.5,
+            })
+        v15.OUTCOME = types.SimpleNamespace(_recent=events)
+        self.assertEqual(v15._seed_from_outcome_memory(), 40)
+        self.assertTrue(bool(v15._stats.get("initial_seed_complete")))
+        self.assertGreaterEqual(v15._stats.get("initial_oos_test_events", 0), 9)
+        self.assertGreater(v15._model("BEAST", "12h", 3)["test_n"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
