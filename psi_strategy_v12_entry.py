@@ -3525,8 +3525,23 @@ async def redis_control_loop():
             _redis_bridge_stats["control_connects"] += 1
             print("Ψ-V12 REDIS_CONTROL connected", flush=True)
             last_logged_symbols = None
+            last_priority_diag = 0.0
             while True:
                 symbols = _distributed_micro_symbols()
+                now_mono = time.monotonic()
+                if now_mono - last_priority_diag >= 10:
+                    monitored=list(globals().get("_signal_priority_symbols",[]) or [])
+                    selected=set(symbols)
+                    universe=set(getattr(q,"universe",[]) or [])
+                    missing=[x for x in monitored if x not in selected]
+                    outside=[x for x in missing if x not in universe]
+                    print("PSI-V15.28 CONTROL_RECONCILE "
+                          f"requested={len(monitored)} admitted={len(monitored)-len(missing)} "
+                          f"outsideUniverse={len(outside)} "
+                          f"pool={len(symbols)} priorityLimit={REDIS_MICRO_PRIORITY_SLOTS} "
+                          f"missing={','.join(missing[:12]) or '-'}",
+                          flush=True)
+                    last_priority_diag=now_mono
                 payload = json.dumps(
                     {
                         "version": VERSION,
