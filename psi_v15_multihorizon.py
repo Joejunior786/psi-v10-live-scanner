@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.1.1-unlimited-qualified-buys"
+REVISION = "15.2.0-trade-scorecard-unlimited"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_1_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -43,6 +43,8 @@ ROUND_TRIP_FEE_PCT = max(0.0, min(1.0, float(os.getenv("PSI_V15_FEE_PCT", "0.20"
 SIGNAL_COOLDOWN_MS = max(30 * 60_000, int(os.getenv("PSI_V15_SIGNAL_COOLDOWN_MS", str(6 * 60 * 60_000))))
 MAX_PENDING = max(200, int(os.getenv("PSI_V15_MAX_PENDING", "1800")))
 MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
+MAX_SIGNAL_JOURNAL = max(500, int(os.getenv("PSI_V15_MAX_SIGNAL_JOURNAL", "5000")))
+SIGNAL_REARM_MS = max(15 * 60_000, int(os.getenv("PSI_V15_SIGNAL_REARM_MS", str(60 * 60_000))))
 BOARD_LIMIT = max(10, min(40, int(os.getenv("PSI_V15_BOARD_LIMIT", "20"))))
 POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "15")))
 MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200")))
@@ -69,6 +71,8 @@ _last_save_ms = 0
 _stats = defaultdict(int)
 _qualified_total = 0
 _qualified_symbols = []
+_signal_journal = []
+_signal_seen = set()
 _last_error = ""
 
 
@@ -746,6 +750,174 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers):
 
 
 
+
+def _signal_id(row, at_ms):
+    bucket = int(at_ms // SIGNAL_REARM_MS)
+    return "|".join((
+        str(row.get("symbol") or "").upper(),
+        str(row.get("lane") or ""),
+        str(row.get("action") or ""),
+        str(int(_f(row.get("selected_target_pct")))),
+        str(row.get("selected_horizon") or ""),
+        str(bucket),
+    ))
+
+
+def _record_trade_signals(rows, at_ms):
+    added = 0
+    for row in rows:
+        if str(row.get("action") or "") not in {"ML BUY NOW", "ML SHADOW BUY"}:
+            continue
+        entry = _f(row.get("reference_entry"))
+        target_price = _f(row.get("selected_target_price"))
+        stop = _f(row.get("dynamic_stop"))
+        horizon = str(row.get("selected_horizon") or "")
+        horizon_ms = int(HORIZONS_MS.get(horizon) or 0)
+        if entry <= 0 or target_price <= 0 or horizon_ms <= 0:
+            continue
+        sid = _signal_id(row, at_ms)
+        if sid in _signal_seen:
+            continue
+        signal = {
+            "id": sid,
+            "symbol": str(row.get("symbol") or "").upper(),
+            "lane": str(row.get("lane") or ""),
+            "action": str(row.get("action") or ""),
+            "created_ms": int(at_ms),
+            "entry_price": entry,
+            "target_pct": _f(row.get("selected_target_pct")),
+            "target_price": target_price,
+            "stop_price": stop if stop > 0 else None,
+            "horizon": horizon,
+            "horizon_ms": horizon_ms,
+            "predicted_time_ms": int(_f(row.get("expected_time_ms"), horizon_ms)),
+            "predicted_time_text": str(row.get("expected_time_to_target") or ""),
+            "predicted_time_range": str(row.get("expected_time_range") or ""),
+            "probability": _f(row.get("probability")),
+            "expected_value_pct": _f(row.get("expected_value_pct")),
+            "model_samples": int(_f(row.get("model_samples"))),
+            "model_source": str(row.get("model_source") or ""),
+            "promotion_ready": bool(row.get("promotion_ready")),
+            "status": "OPEN",
+            "resolved_ms": 0,
+            "actual_time_ms": None,
+            "time_error_ms": None,
+            "hit_within_predicted_time": None,
+            "final_return_pct": None,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+        }
+        _signal_journal.append(signal)
+        _signal_seen.add(sid)
+        added += 1
+    if len(_signal_journal) > MAX_SIGNAL_JOURNAL:
+        drop = len(_signal_journal) - MAX_SIGNAL_JOURNAL
+        removed = _signal_journal[:drop]
+        del _signal_journal[:drop]
+        for signal in removed:
+            _signal_seen.discard(str(signal.get("id") or ""))
+    if added:
+        _stats["trade_signals_recorded"] += added
+    return added
+
+
+def _update_trade_scorecard(at_ms=None):
+    at_ms = _now_ms() if at_ms is None else int(at_ms)
+    prices = _prices()
+    resolved_now = 0
+    for signal in _signal_journal:
+        if signal.get("status") != "OPEN":
+            continue
+        symbol = str(signal.get("symbol") or "").upper()
+        price = _f(prices.get(symbol))
+        entry = _f(signal.get("entry_price"))
+        if price <= 0 or entry <= 0:
+            continue
+        ret = (price / entry - 1.0) * 100.0
+        signal["mfe_pct"] = max(_f(signal.get("mfe_pct")), ret)
+        signal["mae_pct"] = min(_f(signal.get("mae_pct")), ret)
+        age = max(0, at_ms - int(signal.get("created_ms") or at_ms))
+        target = _f(signal.get("target_price"))
+        stop = _f(signal.get("stop_price"))
+        status = None
+        if target > 0 and price >= target:
+            status = "TARGET_HIT"
+        elif stop > 0 and price <= stop:
+            status = "STOP_FIRST"
+        elif age >= int(signal.get("horizon_ms") or 0) > 0:
+            status = "HORIZON_TIMEOUT"
+
+        if status:
+            signal["status"] = status
+            signal["resolved_ms"] = at_ms
+            signal["actual_time_ms"] = age
+            predicted = int(signal.get("predicted_time_ms") or 0)
+            signal["time_error_ms"] = (age - predicted) if predicted > 0 else None
+            signal["hit_within_predicted_time"] = bool(
+                status == "TARGET_HIT" and predicted > 0 and age <= predicted
+            )
+            signal["final_return_pct"] = round(ret, 4)
+            resolved_now += 1
+    if resolved_now:
+        _stats["trade_signals_resolved"] += resolved_now
+    return resolved_now
+
+
+def _scorecard_for(action=None):
+    rows = [
+        s for s in _signal_journal
+        if action is None or str(s.get("action") or "") == action
+    ]
+    open_rows = [s for s in rows if s.get("status") == "OPEN"]
+    resolved = [s for s in rows if s.get("status") != "OPEN"]
+    wins = [s for s in resolved if s.get("status") == "TARGET_HIT"]
+    losses = [s for s in resolved if s.get("status") in {"STOP_FIRST", "HORIZON_TIMEOUT"}]
+    timed = [s for s in wins if s.get("hit_within_predicted_time") is not None]
+    within = [s for s in timed if s.get("hit_within_predicted_time")]
+    time_errors = [
+        abs(int(s.get("time_error_ms") or 0))
+        for s in wins if s.get("time_error_ms") is not None
+    ]
+    avg_abs_time_error_ms = (
+        int(sum(time_errors) / len(time_errors)) if time_errors else None
+    )
+    return {
+        "signals": len(rows),
+        "open": len(open_rows),
+        "resolved": len(resolved),
+        "correct_target_hits": len(wins),
+        "incorrect": len(losses),
+        "win_rate": round(len(wins) / len(resolved), 4) if resolved else None,
+        "target_hit_within_predicted_time": len(within),
+        "time_accuracy_rate": round(len(within) / len(timed), 4) if timed else None,
+        "avg_abs_time_error_ms": avg_abs_time_error_ms,
+        "avg_abs_time_error": _duration(avg_abs_time_error_ms) if avg_abs_time_error_ms is not None else None,
+    }
+
+
+def _trade_scorecard():
+    resolved = [s for s in _signal_journal if s.get("status") != "OPEN"]
+    recent = sorted(
+        resolved, key=lambda s: int(s.get("resolved_ms") or 0), reverse=True
+    )[:20]
+    return {
+        "all": _scorecard_for(),
+        "buy_now": _scorecard_for("ML BUY NOW"),
+        "shadow_buy": _scorecard_for("ML SHADOW BUY"),
+        "recent_resolved": [
+            {
+                k: s.get(k) for k in (
+                    "symbol", "lane", "action", "created_ms", "status",
+                    "entry_price", "target_pct", "target_price", "stop_price",
+                    "horizon", "predicted_time_text", "actual_time_ms",
+                    "hit_within_predicted_time", "final_return_pct",
+                    "mfe_pct", "mae_pct", "probability", "expected_value_pct",
+                )
+            } for s in recent
+        ],
+    }
+
+
 def _build_board(at=None):
     global _board, _last_board_ms
     at = _now_ms() if at is None else int(at)
@@ -791,6 +963,7 @@ def _build_board(at=None):
             "selected_horizon": opp["horizon"],
             "expected_time_to_target": expected_time,
             "expected_time_range": time_range,
+            "expected_time_ms": int(opp["expected_time_ms"]),
             "time_model_source": opp["time_source"],
             "probability": round(opp["probability"], 4),
             "expected_value_pct": round(opp["expected_value_pct"], 3),
@@ -828,6 +1001,7 @@ def _build_board(at=None):
         for r in out if bool(r.get("execution_ready"))
     ]
     _qualified_total = len(_qualified_symbols)
+    _record_trade_signals(out, at)
     for idx, row in enumerate(out, 1):
         row["rank"] = idx
     _board = out[:BOARD_LIMIT]
@@ -864,6 +1038,7 @@ def report():
             "unvalidated_signal": "ML SHADOW BUY",
         },
         "execution_ready_shown": sum(bool(r.get("execution_ready")) for r in rows),
+        "trade_scorecard": _trade_scorecard(),
         "rows": rows,
         "training": {
             "pending_events": len(_pending),
@@ -897,6 +1072,8 @@ def _save(force=False):
             "seen_seed": list(_seen_seed)[-5000:],
             "lane_stats": _lane_stats,
             "stats": dict(_stats),
+            "signal_journal": _signal_journal[-MAX_SIGNAL_JOURNAL:],
+            "signal_seen": list(_signal_seen)[-MAX_SIGNAL_JOURNAL:],
         }
         with open(temp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, separators=(",", ":"), allow_nan=False)
@@ -925,6 +1102,11 @@ def _restore():
         _lane_stats.clear()
         _lane_stats.update(payload.get("lane_stats") or {})
         _stats.update(payload.get("stats") or {})
+        _signal_journal[:] = list(payload.get("signal_journal") or [])[-MAX_SIGNAL_JOURNAL:]
+        _signal_seen.clear()
+        _signal_seen.update(str(x) for x in (payload.get("signal_seen") or []) if str(x))
+        if not _signal_seen:
+            _signal_seen.update(str(s.get("id") or "") for s in _signal_journal if s.get("id"))
     except (OSError, ValueError, TypeError):
         pass
 
@@ -954,6 +1136,7 @@ async def supervisor_loop():
             seeded = _seed_from_outcome_memory()
             added = _collect_candidates()
             resolved = _resolve_pending()
+            scored = _update_trade_scorecard()
             rows = _build_board()
             cycle += 1
             if cycle % 4 == 1:
@@ -969,6 +1152,7 @@ async def supervisor_loop():
                     f" pending={len(_pending)}"
                     f" exec={sum(bool(r.get('execution_ready')) for r in rows)}"
                     f" newlyTracked={added} newlyResolved={resolved} newlySeeded={seeded}"
+                    f" scoredTrades={scored}"
                     f" top={top or 'NONE'}",
                     flush=True,
                 )
@@ -978,6 +1162,7 @@ async def supervisor_loop():
                     "buy_signal_cap": None,
                     "qualified_buy_count_all": _qualified_total,
                     "qualified_buy_symbols_all": list(_qualified_symbols),
+                    "trade_scorecard": _trade_scorecard(),
                     "rows": [
                         {
                             k: r.get(k) for k in (
@@ -1033,6 +1218,8 @@ def install(core, v13, outcome=None, v14=None):
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
         + " oosPromotion=REQUIRED"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
-        + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE" + " orders=DISABLED",
+        + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
+        + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"
+        + " orders=DISABLED",
         flush=True,
     )
