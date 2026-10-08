@@ -20,6 +20,7 @@ class Unified(unittest.TestCase):
     def setUp(self):
         self.prev=(feed.CORE,feed.EMA,feed.ML,feed._SNAPSHOT)
         feed._SNAPSHOT={};feed._ACTIVE=set();feed._EVENTS.clear();feed._NEXT_ID=0
+        feed._PRIORITY_LEASES.clear();feed._OBSERVED_QUOTES.clear();feed._MISSED_MOVES.clear()
         self.m=micro()
         self.core=SimpleNamespace(_cache={},_board=lambda:[],
                   app=SimpleNamespace(micro_metrics=lambda s:self.m))
