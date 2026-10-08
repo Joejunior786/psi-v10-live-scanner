@@ -6,6 +6,9 @@ import asyncio
 CORE = None
 PREVIOUS_ATTACH = None
 PREVIOUS_PRINT = None
+EMA_REPORT_HISTORY = {}
+EMA_REPORT_TICK = 0
+EMA_DISPLAY_LIMIT = 30
 FRAMES = (("1h", "1H", 180), ("4h", "4H", 420), ("1d", "DAILY", 1200))
 
 def num(x, default=0):
@@ -89,7 +92,64 @@ def attach(symbol, structural_row):
                     "execution_blockers":[],"ema_buy_signal":best})
     return row
 
+def _ema_rank(item):
+    states = {"BUY NOW — EMA": 5, "PRE-IGNITION": 4, "ARMED": 3, "WATCH": 1}
+    return (states.get(item.get("status"), 0),
+            int(bool(item.get("seller_exhaustion"))),
+            int(bool(item.get("buyer_reclaim"))),
+            int(bool(item.get("touch"))),
+            -abs(num(item.get("distance_pct"), 999)))
+
+
+def select_ema_report(records, history, tick, limit=EMA_DISPLAY_LIMIT):
+    """Pure unique-symbol selection with stable priority and fair candidate rotation."""
+    grouped = {}
+    for symbol, item in records:
+        grouped.setdefault(symbol, []).append(item)
+    primary = {}
+    for symbol, items in grouped.items():
+        primary[symbol] = max(items, key=_ema_rank)
+    current = {}
+    for symbol, item in primary.items():
+        signature = (item.get("timeframe"), item.get("ema_period"),
+                     item.get("status"), bool(item.get("touch")),
+                     bool(item.get("seller_exhaustion")),
+                     bool(item.get("buyer_reclaim")),
+                     tuple(sorted(item.get("blockers") or ())))
+        prior = history.get(symbol)
+        if prior is None:
+            change = "NEW"
+        elif prior["signature"] == signature:
+            change = "UNCHANGED"
+        elif _ema_rank(item)[:4] > prior["rank"][:4]:
+            change = "IMPROVING"
+        elif _ema_rank(item)[:4] < prior["rank"][:4]:
+            change = "WEAKENING"
+        else:
+            change = "CHANGED"
+        current[symbol] = {"signature": signature, "rank": _ema_rank(item),
+                           "change": change, "last_shown": prior.get("last_shown", -1) if prior else -1}
+    ranked = sorted(primary, key=lambda sym: (_ema_rank(primary[sym]), sym), reverse=True)
+    # All BUY NOW signals are shown before any rotation; never hide a qualifying BUY.
+    approved = [sym for sym in ranked if primary[sym].get("status") == "BUY NOW — EMA"]
+    slots = max(0, limit - len(approved))
+    # Retain highest-quality signals; other slots favor new/improving and long-unseen coins.
+    fixed = [sym for sym in ranked if sym not in approved][:min(slots, max(1, limit // 3))]
+    slots -= len(fixed)
+    remainder = [sym for sym in ranked if sym not in approved and sym not in fixed]
+    rotated = sorted(remainder, key=lambda sym: (
+        int(current[sym]["change"] in ("NEW", "IMPROVING")),
+        -current[sym]["last_shown"], _ema_rank(primary[sym]), sym), reverse=True)[:slots]
+    chosen = approved + fixed + rotated
+    next_history = {sym: {**data, "last_shown": tick if sym in chosen else data["last_shown"]}
+                    for sym, data in current.items()}
+    rows = [(sym, primary[sym], current[sym]["change"], len(grouped[sym]))
+            for sym in chosen]
+    return rows, next_history, len(grouped)
+
+
 def emit_report():
+    global EMA_REPORT_HISTORY, EMA_REPORT_TICK
     if CORE is None:
         return None
     records = []
@@ -122,13 +182,19 @@ def emit_report():
         f"approaching={len(records)-len(touches)}",
         flush=True,
     )
-    for symbol, item in sorted(records, key=lambda x: (
-            x[1]["status"] == "BUY NOW — EMA",
-            x[1]["touch"], -abs(x[1]["distance_pct"])), reverse=True)[:30]:
+    EMA_REPORT_TICK += 1
+    shown, EMA_REPORT_HISTORY, unique_symbols = select_ema_report(
+        records, EMA_REPORT_HISTORY, EMA_REPORT_TICK)
+    print(f"Ψ-V15.17 EMA_ROTATION unique={unique_symbols} displayed={len(shown)} "
+          f"new={sum(row[2] == 'NEW' for row in shown)} "
+          f"improving={sum(row[2] == 'IMPROVING' for row in shown)} "
+          f"buy={sum(row[1]['status'] == 'BUY NOW — EMA' for row in shown)}", flush=True)
+    for symbol, item, change, signals in shown:
         print(
             f"EMA {symbol} tf={item['timeframe']} ema={item['ema_period']} "
             f"dist={item['distance_pct']:+.3f}% exhausted={item['seller_exhaustion']} "
             f"reclaim={item['buyer_reclaim']} status={item['status']} "
+            f"change={change} signals={signals} "
             f"blockers={','.join(item['blockers']) or '-'}",
             flush=True,
         )

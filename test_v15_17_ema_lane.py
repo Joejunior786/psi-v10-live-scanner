@@ -35,6 +35,34 @@ class EMATests(unittest.TestCase):
                         await lane.reporting_supervisor()
         asyncio.run(run())
         self.assertEqual(len(calls),1)
+    def test_one_primary_entry_per_coin(self):
+        records=[("A",{"timeframe":"1h","ema_period":50,"status":"ARMED","touch":True,"distance_pct":.1}),
+                 ("A",{"timeframe":"4h","ema_period":200,"status":"PRE-IGNITION","touch":True,"distance_pct":.3}),
+                 ("B",{"timeframe":"1d","ema_period":50,"status":"WATCH","touch":False,"distance_pct":.8})]
+        rows, history, unique = lane.select_ema_report(records,{},1,limit=10)
+        self.assertEqual(unique,2)
+        self.assertEqual(len(rows),2)
+        self.assertEqual(next(x for x in rows if x[0]=="A")[3],2)
+        self.assertEqual(next(x for x in rows if x[0]=="A")[1]["ema_period"],200)
+    def test_rotation_changes_unchanged_candidates(self):
+        records=[(str(i),{"timeframe":"1h","ema_period":50,"status":"ARMED","touch":True,"distance_pct":.1+i*.01}) for i in range(12)]
+        first,h,_=lane.select_ema_report(records,{},1,limit=6)
+        second,h,_=lane.select_ema_report(records,h,2,limit=6)
+        self.assertNotEqual([r[0] for r in first],[r[0] for r in second])
+        self.assertEqual(len({r[0] for r in second}),6)
+    def test_buy_never_displaced_by_rotation(self):
+        records=[(str(i),{"timeframe":"1h","ema_period":50,"status":"ARMED","touch":True,"distance_pct":.01}) for i in range(9)]
+        records.append(("BUY",{"timeframe":"4h","ema_period":200,"status":"BUY NOW — EMA","touch":True,"distance_pct":.3}))
+        rows,_,_=lane.select_ema_report(records,{},2,limit=4)
+        self.assertEqual(rows[0][0],"BUY")
+    def test_history_marks_unchanged_and_improving(self):
+        records=[("A",{"timeframe":"1h","ema_period":50,"status":"ARMED","touch":True,"distance_pct":.2})]
+        _,h,_=lane.select_ema_report(records,{},1)
+        rows,h,_=lane.select_ema_report(records,h,2)
+        self.assertEqual(rows[0][2],"UNCHANGED")
+        records[0][1]["status"]="PRE-IGNITION"
+        rows,h,_=lane.select_ema_report(records,h,3)
+        self.assertEqual(rows[0][2],"IMPROVING")
     def test_missing_data_rejected(self):
         self.assertFalse(any(v["status"]=="BUY NOW — EMA" for v in lane.evaluate(snap(),"1h",1000,1000,{},FLOW)))
     def test_seller_not_exhausted(self):
