@@ -328,5 +328,34 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertIn("hours", v15._duration(med))
 
 
+    def test_setup_specific_horizon_grid_blocks_implausible_fast_targets(self):
+        self.assertFalse(v15._combo_allowed("BEAST", 20, "30m"))
+        self.assertTrue(v15._combo_allowed("BEAST", 20, "4h"))
+        self.assertFalse(v15._combo_allowed("HTF_SWING", 10, "12h"))
+        self.assertTrue(v15._combo_allowed("HTF_SWING", 10, "24h"))
+        self.assertFalse(v15._combo_allowed("EXHAUSTION", 20, "12h"))
+        self.assertTrue(v15._combo_allowed("EXHAUSTION", 20, "24h"))
+
+    def test_opportunity_never_selects_disallowed_target_horizon_pair(self):
+        x = [0.1] * v15.FEATURE_COUNT
+        for h in v15.HORIZON_ORDER:
+            for target in v15.TARGETS:
+                model = v15._model("BEAST", h, target)
+                model["trained"] = 50
+                model["wins"] = 25
+                model["losses"] = 25
+                model["bias"] = 0.0
+                model["payoff_win_sum"] = 25 * float(target)
+                model["payoff_win_n"] = 25
+                model["payoff_loss_sum"] = 25 * 2.0
+                model["payoff_loss_n"] = 25
+        opp = v15._opportunity("BEAST", x)
+        self.assertTrue(v15._combo_allowed("BEAST", opp["target_pct"], opp["horizon"]))
+        if opp["target_pct"] == 20:
+            self.assertGreaterEqual(
+                v15.HORIZONS_MS[opp["horizon"]], v15.HORIZONS_MS["4h"]
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
