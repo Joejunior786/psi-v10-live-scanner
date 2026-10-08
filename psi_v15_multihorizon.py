@@ -1168,6 +1168,8 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers, entry_plan=Non
     if bool(structural.get("anti_chase")) or location == "CHASING":
         return "DO NOT CHASE", False, ["ANTI_CHASE"]
 
+    if not structural and not str((sensor or {}).get("setup") or "").strip():
+        return "WAIT", False, ["NO_VERIFIED_SETUP"]
     if _f(opp.get("target_pct")) < MIN_TRADE_TARGET_PCT:
         return "REJECT", False, ["TARGET_BELOW_10_PERCENT"]
     ready_model = opp["samples"] >= MIN_MODEL_SAMPLES or (
@@ -1409,9 +1411,7 @@ def _build_board(at=None):
         action, executable, action_blockers = _entry_action(
             sensor, srow, opp, safe, safety_blockers, entry_plan
         )
-        # An unclassified, purely generic BEAST fallback is research only.
-        if lane == "BEAST" and not srow and executable:
-            action, executable, action_blockers = "WAIT", False, ["NO_VERIFIED_SETUP"]
+
         price = _f(sensor.get("entry_reference"))
         loss_pct = max(0.75, opp["expected_loss_pct"])
         learned_stop = price * (1.0 - loss_pct / 100.0) if price > 0 else None
