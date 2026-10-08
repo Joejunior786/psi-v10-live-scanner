@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.4.0-plausible-horizon-grid"
+REVISION = "15.5.0-learned-entry-zones"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_4_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -66,6 +66,8 @@ _recent = deque(maxlen=MAX_RECENT)
 _last_signal = {}
 _seen_seed = set()
 _seed_buckets = set()
+_entry_seed_seen = set()
+_entry_excursion_stats = {}
 _lane_stats = {}
 _board = []
 _last_board_ms = 0
@@ -904,6 +906,65 @@ def _opportunity(lane, x):
     }
 
 
+def _entry_excursion_stat(lane, target):
+    key = f"{lane}|{int(target)}"
+    row = _entry_excursion_stats.get(key)
+    if not isinstance(row, dict):
+        row = {"winner_mae_pct": [], "n": 0}
+        _entry_excursion_stats[key] = row
+    return row
+
+
+def _record_entry_excursion(lane, target, mae_pct):
+    mae = _clamp(_f(mae_pct), -15.0, 0.0)
+    row = _entry_excursion_stat(lane, target)
+    values = row.setdefault("winner_mae_pct", [])
+    values.append(mae)
+    if len(values) > 800:
+        del values[:-800]
+    row["n"] = int(row.get("n") or 0) + 1
+
+
+def _seed_entry_excursions():
+    if OUTCOME is None:
+        return 0
+    added = 0
+    for event in list(getattr(OUTCOME, "_recent", []) or []):
+        if not isinstance(event, dict):
+            continue
+        eid = str(event.get("id") or f"{event.get('symbol')}|{event.get('created_ms')}")
+        if eid in _entry_seed_seen:
+            continue
+        created = int(_f(event.get("created_ms"), 0))
+        first = event.get("first_target_ms") or {}
+        mae_at = event.get("mae_at_target") or {}
+        stop_at = int(_f(event.get("stop_hit_ms"), 0))
+        lane = _classify_lane(setup=event.get("setup"), features=event.get("features") or {})
+        for target in TARGETS:
+            key = str(int(target))
+            hit = int(_f(first.get(key), 0))
+            if not hit or hit < created or (stop_at and stop_at < hit):
+                continue
+            mae = _f(mae_at.get(key), _f(event.get("mae_pct"), 0.0))
+            _record_entry_excursion(lane, target, mae)
+        _entry_seed_seen.add(eid)
+        added += 1
+    if added:
+        _stats["entry_excursion_seeded_events"] += added
+    return added
+
+
+def _learned_entry_offset(lane, target):
+    row = _entry_excursion_stat(lane, target)
+    values = sorted(_f(x) for x in (row.get("winner_mae_pct") or []))
+    n = len(values)
+    if n < 12:
+        return 0.0, n, "INSUFFICIENT"
+    median_mae = float(statistics.median(values))
+    offset = _clamp(0.5 * median_mae, -2.5, 0.0)
+    return offset, n, "EMPIRICAL_WINNER_MAE"
+
+
 def _entry_plan(sensor, structural, lane, opp):
     sensor = sensor or {}
     structural = structural or {}
@@ -913,10 +974,17 @@ def _entry_plan(sensor, structural, lane, opp):
     high = geometry["entry_high"]
     center = geometry["entry_center"]
     source = "STRUCTURAL_ZONE" if center > 0 else "LIVE_ML_REFERENCE"
+    learned_offset = 0.0
+    entry_samples = 0
     if center <= 0 and current > 0:
-        low = current * 0.9975
-        high = current * 1.0025
-        center = current
+        learned_offset, entry_samples, learned_source = _learned_entry_offset(
+            lane, opp.get("target_pct")
+        )
+        center = current * (1.0 + learned_offset / 100.0)
+        half_width_pct = max(0.20, min(0.75, abs(learned_offset) * 0.35 + 0.20))
+        low = center * (1.0 - half_width_pct / 100.0)
+        high = center * (1.0 + half_width_pct / 100.0)
+        source = learned_source if learned_source != "INSUFFICIENT" else "LIVE_ML_REFERENCE"
 
     invalidation = _f(structural.get("invalidation"))
     expected_loss = max(0.75, _f(opp.get("expected_loss_pct"), 3.0))
@@ -947,6 +1015,8 @@ def _entry_plan(sensor, structural, lane, opp):
         "entry_high": high or None,
         "entry_center": center or None,
         "entry_zone_source": source,
+        "learned_entry_offset_pct": round(learned_offset, 3),
+        "entry_model_samples": entry_samples,
         "entry_location": location,
         "entry_distance_pct": (
             round((current / center - 1.0) * 100.0, 3)
@@ -1233,6 +1303,8 @@ def _build_board(at=None):
             "entry_high": entry_plan.get("entry_high"),
             "entry_center": entry_plan.get("entry_center"),
             "entry_zone_source": entry_plan.get("entry_zone_source"),
+            "learned_entry_offset_pct": entry_plan.get("learned_entry_offset_pct"),
+            "entry_model_samples": entry_plan.get("entry_model_samples"),
             "entry_location": entry_plan.get("entry_location"),
             "entry_distance_pct": entry_plan.get("entry_distance_pct"),
             "max_chase": entry_plan.get("max_chase"),
@@ -1322,6 +1394,8 @@ def report():
         "historical_seed_dedup_window": _duration(SEED_DEDUP_MS),
         "entry_actions": ["ML BUY NOW", "ML SHADOW BUY", "BUY PULLBACK", "BUY RECLAIM", "BUY BREAKOUT/RETEST", "WAIT", "REJECT", "DO NOT CHASE"],
         "time_to_invalidation_enabled": True,
+        "learned_entry_zone_enabled": True,
+        "learned_entry_zone_method": "50% of median winner MAE capped at -2.5%; structural zone preferred",
         "buy_signal_cap": None,
         "qualified_buy_count_all": _qualified_total,
         "qualified_buy_symbols_all": list(_qualified_symbols),
@@ -1341,6 +1415,8 @@ def report():
             "model_count": len(_models),
             "seeded_events": int(_stats.get("seeded_events") or 0),
             "seed_dedup_skipped": int(_stats.get("seed_dedup_skipped") or 0),
+            "entry_excursion_seeded_events": int(_stats.get("entry_excursion_seeded_events") or 0),
+            "entry_excursion_cohorts": len(_entry_excursion_stats),
             "captured": int(_stats.get("captured") or 0),
             "resolved_horizons": int(_stats.get("resolved_horizons") or 0),
         },
@@ -1367,6 +1443,8 @@ def _save(force=False):
             "last_signal": _last_signal,
             "seen_seed": list(_seen_seed)[-5000:],
             "seed_buckets": list(_seed_buckets)[-5000:],
+            "entry_seed_seen": list(_entry_seed_seen)[-5000:],
+            "entry_excursion_stats": _entry_excursion_stats,
             "feature_schema_version": 4,
             "lane_stats": _lane_stats,
             "stats": dict(_stats),
@@ -1399,6 +1477,10 @@ def _restore():
         _seen_seed.update(payload.get("seen_seed") or [])
         _seed_buckets.clear()
         _seed_buckets.update(payload.get("seed_buckets") or [])
+        _entry_seed_seen.clear()
+        _entry_seed_seen.update(payload.get("entry_seed_seen") or [])
+        _entry_excursion_stats.clear()
+        _entry_excursion_stats.update(payload.get("entry_excursion_stats") or {})
         _lane_stats.clear()
         _lane_stats.update(payload.get("lane_stats") or {})
         _stats.update(payload.get("stats") or {})
@@ -1434,6 +1516,7 @@ async def supervisor_loop():
     while True:
         try:
             seeded = _seed_from_outcome_memory()
+            _seed_entry_excursions()
             added = _collect_candidates()
             resolved = _resolve_pending()
             scored = _update_trade_scorecard()
@@ -1468,7 +1551,8 @@ async def supervisor_loop():
                             k: r.get(k) for k in (
                                 "rank", "symbol", "lane", "action", "execution_ready",
                                 "price", "entry_low", "entry_high", "entry_center",
-                                "entry_zone_source", "entry_location", "entry_distance_pct",
+                                "entry_zone_source", "learned_entry_offset_pct", "entry_model_samples",
+                                "entry_location", "entry_distance_pct",
                                 "max_chase", "invalidation", "invalidation_source", "dynamic_stop",
                                 "selected_target_pct", "selected_target_basis_price",
                                 "selected_target_price", "selected_horizon",
@@ -1510,6 +1594,7 @@ def install(core, v13, outcome=None, v14=None):
     CORE, V13, OUTCOME, V14 = core, v13, outcome, v14
     _restore()
     _seed_from_outcome_memory()
+    _seed_entry_excursions()
     _ORIGINAL_SCAN = core.v12_scan
     _ORIGINAL_HEALTH = core.v12_health
     core.v12_scan = _scan
@@ -1522,7 +1607,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC"
+        + " oosPromotion=REQUIRED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"
