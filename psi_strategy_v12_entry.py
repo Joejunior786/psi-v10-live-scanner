@@ -3340,7 +3340,7 @@ def _distributed_micro_symbols():
 
     # Reserve real micro priority slots for ML and EMA before the inherited
     # structural pool. These affect subscriptions, NEVER buy authority.
-    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:8]:
+    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:16]:
         add_desired(sym)
     for sym in list(globals().get("_ema_priority_symbols", []) or [])[:6]:
         add_desired(sym)
