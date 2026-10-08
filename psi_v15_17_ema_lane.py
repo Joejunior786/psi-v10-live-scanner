@@ -163,15 +163,15 @@ def scan_cached_ema(core, now=None):
                 live_price = num(micro.get("last_price"))
                 cand_price = num(snap.get("current"))
                 if not cand_price or not live_price or abs(live_price / cand_price - 1) > 0.015:
-                    integrity = dict(integrity, verified=False, blockers=list(integrity["blockers"])+["LIVE_PRICE_NOT_CONFIRMED"])
+                    integrity = dict(integrity, verified=False,
+                                     blockers=list(integrity["blockers"])+["LIVE_PRICE_NOT_CONFIRMED"])
                 items = evaluate(snap, tf, updated, now, integrity, micro)
+                evidence_status = "LIVE_VERIFIED" if integrity["verified"] else "LIVE_BLOCKED"
             else:
                 items = previews
+                evidence_status = "DISCOVERY_ONLY"
             for item in items:
-                item["evidence_status"] = ("LIVE_VERIFIED" if live_by_symbol and
-                                           live_by_symbol[0]["verified"] and
-                                           "LIVE_PRICE_NOT_CONFIRMED" not in item["blockers"]
-                                           else "LIVE_BLOCKED" if live_by_symbol else "DISCOVERY_ONLY")
+                item["evidence_status"] = evidence_status
                 records.append((symbol, item))
     return records, frames_covered, len(full_evidence_symbols)
 
@@ -275,7 +275,7 @@ def emit_report():
         research = list(dict.fromkeys(sym for sym, item in ranked
                                      if item["touch"] and abs(item["distance_pct"]) <= 1.0
                                      and sym not in {"XUSDUSDT", "BFUSDUSDT", "USDCUSDT", "USD1USDT", "FDUSDUSDT", "TUSDUSDT"}))[:10]
-        priority = list(dict.fromkeys(technical_symbols + research))[:EMA_PRIORITY_LIMIT]
+        priority = list(dict.fromkeys([sym for sym in technical_symbols if sym not in {"XUSDUSDT", "BFUSDUSDT", "USDCUSDT", "USD1USDT", "FDUSDUSDT", "TUSDUSDT"}] + research))[:EMA_PRIORITY_LIMIT]
         snapshot = {
             "revision": EMA_REVISION, "generated_ms": int(time.time() * 1000),
             "candle_frames": covered, "interactions": len(records),
