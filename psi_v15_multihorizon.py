@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.16.0-daily-ema-candle-coverage"
+REVISION = "15.26.0-live-evidence-recheck-qualification"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -49,7 +49,7 @@ MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
 MAX_SIGNAL_JOURNAL = max(500, int(os.getenv("PSI_V15_MAX_SIGNAL_JOURNAL", "5000")))
 SIGNAL_REARM_MS = max(15 * 60_000, int(os.getenv("PSI_V15_SIGNAL_REARM_MS", str(60 * 60_000))))
 BOARD_LIMIT = max(10, min(40, int(os.getenv("PSI_V15_BOARD_LIMIT", "30"))))
-POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "15")))
+POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "8")))
 MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200")))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SPREAD_BPS", "20")))
 MAX_SLIPPAGE_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SLIPPAGE_BPS", "35")))
@@ -504,6 +504,118 @@ def _classify_lane(structural=None, sensor=None, setup=None, features=None):
     ):
         return "BREAKOUT"
     return "BEAST"
+
+
+
+# V15.26: only the active, already-discovered priority pool is eligible for
+# on-decision live hydration. New timestamps/prices must come from actual
+# worker trade and book events, never from the decision/report clock.
+LIVE_DECISION_PRIORITY_LIMIT = 24
+_LIVE_DECISION_DIAG = defaultdict(int)
+
+
+def _synchronise_priority_sensor(sensor, at=None):
+    """Return independent sensor evidence upgraded ONLY by verified live ticks.
+
+    Preserve learned/structural features. A connected Redis socket, a recent
+    snapshot write, or a candle alone cannot certify trade/book event age.
+    """
+    at = _now_ms() if at is None else int(at)
+    row = dict(sensor or {})
+    sym = str(row.get("symbol") or "").upper()
+    if not _eligible_spot_symbol(sym) or CORE is None:
+        return row
+    try:
+        app = getattr(CORE, "app", None)
+        getter = getattr(app, "micro_metrics", None)
+        micro = getter(sym) if callable(getter) else None
+    except Exception:
+        _LIVE_DECISION_DIAG["micro_read_error"] += 1
+        return row
+    if not isinstance(micro, dict):
+        return row
+    trade_ms = int(_f(micro.get("last_trade_ms")))
+    book_ms = int(_f(micro.get("last_book_ms")))
+    age_t, age_b = at-trade_ms, at-book_ms
+    if not (0 <= age_t <= MAX_SENSOR_AGE_MS and
+            0 <= age_b <= MAX_SENSOR_AGE_MS and
+            micro.get("micro_ready") is True and
+            micro.get("sequence_verified") is True and
+            micro.get("book_sequence_verified") is True):
+        _LIVE_DECISION_DIAG["event_age_or_sequence_rejected"] += 1
+        return row
+    spread = _f(micro.get("spread_bps"), 1e9)
+    slippage = _f(micro.get("slippage_bps"), 1e9)
+    price = _f(micro.get("last_price"))
+    old_price = _f(row.get("entry_reference"))
+    if not (0 < spread <= MAX_SPREAD_BPS and
+            0 <= slippage <= MAX_SLIPPAGE_BPS and
+            price > 0 and (old_price <= 0 or abs(price/old_price-1) <= .015)):
+        _LIVE_DECISION_DIAG["price_or_liquidity_rejected"] += 1
+        return row
+    row.update({
+        "generated_ms": at,
+        "trade_age_ms": age_t,
+        "book_age_ms": age_b,
+        "hard_sensor_safety": True,
+        "sequence_verified": True,
+        "book_sequence_verified": True,
+        "spread_bps": spread,
+        "slippage_bps": slippage,
+        "entry_reference": price,
+        "live_evidence_source": "DISTRIBUTED_TRADE_BOOK",
+        "live_quote_checked_ms": at,
+    })
+    # Do not promote guessed/old directional values. Use observed live values
+    # only when explicitly provided by the worker.
+    for key in ("cvd_acceleration", "ofi_acceleration", "obi",
+                "ask_depletion", "relative_volume_10s",
+                "relative_volume_30s", "trade_acceleration"):
+        if micro.get(key) is not None:
+            row[key] = micro[key]
+    if micro.get("aggressive_buy_ratio") is not None:
+        row["buy_ratio"] = micro["aggressive_buy_ratio"]
+    _LIVE_DECISION_DIAG["validated"] += 1
+    return row
+
+
+def _decision_priority_symbols(structural):
+    wanted = []
+    for sym in list(getattr(CORE, "_signal_priority_symbols", []) or [])[:12]:
+        if sym not in wanted:
+            wanted.append(sym)
+    for sym in list(getattr(CORE, "_ema_priority_symbols", []) or [])[:6]:
+        if sym not in wanted:
+            wanted.append(sym)
+    for sym, row in structural.items():
+        if str(row.get("state") or "") == "BUY" and sym not in wanted:
+            wanted.append(sym)
+        if len(wanted) >= LIVE_DECISION_PRIORITY_LIMIT:
+            break
+    return set(wanted[:LIVE_DECISION_PRIORITY_LIMIT])
+
+
+def _qualification_state(row):
+    """Never turn an unapproved model result into a buy instruction."""
+    if row.get("execution_ready") is True and row.get("action") == "ML BUY NOW":
+        return "MODEL_APPROVED_PENDING_QUOTE"
+    blockers = set(row.get("blockers") or [])
+    data = {"HARD_SENSOR_SAFETY", "STALE_TRADE", "STALE_BOOK",
+            "STALE_SENSOR_SNAPSHOT", "NO_LIVE_SENSOR", "TRADE_SEQUENCE",
+            "BOOK_SEQUENCE", "PRICE", "SPREAD", "SLIPPAGE"}
+    if blockers & data:
+        return "DATA BLOCKED"
+    if row.get("action") in {"REJECT", "DO NOT CHASE"} or (
+        blockers & {"NEGATIVE_EXPECTED_VALUE", "PROBABILITY_BELOW_DYNAMIC_FLOOR",
+                    "OUT_OF_SAMPLE_VALIDATION_PENDING"}
+    ):
+        return "MODEL REJECTED"
+    if row.get("setup_verification") == "UPSTREAM_STRUCTURAL" and (
+        _f(row.get("selected_target_pct")) >= 10 and
+        _f(row.get("expected_value_pct")) > 0
+    ):
+        return "NEAR BUY"
+    return "WATCH"
 
 
 def _safety(sensor, at=None):
@@ -1526,11 +1638,14 @@ def _build_board(at=None):
     at = _now_ms() if at is None else int(at)
     structural = _structural_map()
     rows = _sensor_rows()
+    priority = _decision_priority_symbols(structural)
     out = []
-    for sensor in rows:
-        sym = str(sensor.get("symbol") or "").upper()
+    for raw_sensor in rows:
+        sym = str(raw_sensor.get("symbol") or "").upper()
         if not sym:
             continue
+        sensor = (_synchronise_priority_sensor(raw_sensor, at)
+                  if sym in priority else raw_sensor)
         srow = dict(structural.get(sym) or {})
         daily_levels = _daily_candle_evidence(sym, at)
         daily_exhaustion = _daily_ma_exhaustion_filter(sensor, {**daily_levels, **srow})
@@ -1631,6 +1746,9 @@ def _build_board(at=None):
             "promotion_test_brier": (opp.get("promotion_validation") or {}).get("brier"),
             "multi_horizon_probabilities": opp["probabilities"],
             "hard_safety_verified": safe,
+            "live_evidence_source": sensor.get("live_evidence_source") or "SENSOR_CACHE",
+            "trade_age_ms": sensor.get("trade_age_ms"),
+            "book_age_ms": sensor.get("book_age_ms"),
             "blockers": list(dict.fromkeys(action_blockers + ([] if safe else safety_blockers)))[:10],
             "rank_score": round(rank_score, 5),
             "setup": str(srow.get("setup") or ""),
@@ -1639,6 +1757,8 @@ def _build_board(at=None):
             "setup_strength": _f(srow.get("setup_strength")),
             "anti_chase": bool(srow.get("anti_chase")),
         })
+    for item in out:
+        item["qualification_state"] = _qualification_state(item)
     out.sort(
         key=lambda r: (
             bool(r["execution_ready"]),
@@ -1730,6 +1850,12 @@ def report():
         },
         "execution_ready_shown": sum(bool(r.get("execution_ready")) for r in rows),
         "trade_scorecard": _trade_scorecard(),
+        "live_decision_diagnostics": dict(_LIVE_DECISION_DIAG),
+        "qualification_counts": {
+            state: sum(r.get("qualification_state") == state for r in rows)
+            for state in ("MODEL_APPROVED_PENDING_QUOTE", "NEAR BUY",
+                          "DATA BLOCKED", "MODEL REJECTED", "WATCH")
+        },
         "rows": rows,
         "training": {
             "pending_events": len(_pending),
@@ -1889,7 +2015,9 @@ async def supervisor_loop():
                                 "promotion_ready", "promotion_test_samples",
                                 "promotion_test_wins", "promotion_test_ev_pct",
                                 "promotion_test_brier",
-                                "hard_safety_verified", "setup", "timeframe", "trend_regime", "blockers",
+                                "hard_safety_verified", "live_evidence_source", "trade_age_ms",
+                                "book_age_ms", "qualification_state",
+                                "setup", "timeframe", "trend_regime", "blockers",
                             )
                         } for r in rows
                     ],
