@@ -208,6 +208,62 @@ class FeedTests(unittest.TestCase):
         self.assertLessEqual(data["quotes"][0]["quote_expires_ms"], 1001200)
         self.assertFalse(data["order_placement"])
 
+
+    def test_buy_structure_formal_only_without_executable_promotion(self):
+        self.micro["spread_bps"]=None
+        self.core._board=lambda: [
+            dict(symbol="TESTUSDT",state="BUY",setup="SUPPORT_RECLAIM",
+                timeframe="4H",generated_ms=1000000,setup_strength=92,
+                current=100,entry_low=99,entry_high=101,invalidation=95,
+                tp1=114,execution_state="COLLECTING DATA",buy_now=False,
+                execution_blockers=["STALE_BOOK"]),
+            dict(symbol="SHADOWUSDT",state="BUY",setup="SENSOR_PROBE",
+                setup_source="SENSOR_SHADOW",generated_ms=1000000),
+            dict(symbol="STALEUSDT",state="BUY",setup="BREAKOUT",
+                generated_ms=950000)]
+        feed.publish_once(1000000)
+        live=feed.read_live(1000000)
+        self.assertEqual(live["buy_structure_summary"]["structural_buy"],1)
+        self.assertEqual(len(live["buy_structure_rows"]),1)
+        row=live["buy_structure_rows"][0]
+        self.assertEqual(row["symbol"],"TESTUSDT")
+        self.assertEqual(row["status"],"STRUCTURE BUY")
+        self.assertEqual(row["potential_pct"],round(100*(114/101-1),2))
+        self.assertFalse(row["verified_buy_now"])
+        self.assertIn("STALE_BOOK",row["blockers"])
+        self.assertEqual(live["buy_count"],0)
+        self.assertFalse(feed._EVENTS)
+
+    def test_buy_structure_preserves_other_verified_lanes(self):
+        self.core._board=lambda: [dict(
+            symbol="TESTUSDT",state="ARMED",setup="EMA_REJECTION",
+            timeframe="1H",generated_ms=1000000,current=100,
+            entry_low=99,entry_high=101,invalidation=95,tp1=115,
+            execution_state="COLLECTING DATA",buy_now=False)]
+        feed.publish_once(1000000)
+        live=feed.read_live(1000000)
+        self.assertEqual(live["buy_structure_rows"][0]["status"],"STRUCTURE ARMED")
+        self.assertEqual(live["verified_lane_counts"]["V12"],0)
+        self.assertEqual(live["verified_lane_counts"]["ML"],0)
+        self.assertEqual(live["verified_lane_counts"]["EMA"],2)
+
+    def test_buy_structure_expires_independently_of_snapshot(self):
+        self.core._board=lambda: [dict(
+            symbol="TESTUSDT",state="BUY",setup="RETEST",
+            generated_ms=980000,entry_low=99,entry_high=101,
+            current=100,invalidation=95,tp1=115)]
+        feed.publish_once(1000000)
+        self.assertEqual(len(feed.read_live(1000000)["buy_structure_rows"]),1)
+        self.assertEqual(feed.read_live(1003300)["buy_structure_rows"],[])
+        self.assertEqual(feed.read_live(1005000)["buy_structure_rows"],[])
+
+    def test_dashboard_has_separate_buy_structure_board(self):
+        html=feed._DASHBOARD
+        self.assertIn('id="buy-structure"',html)
+        self.assertIn('<tbody id="structureRows">',html)
+        self.assertIn('href="#buy-structure"',html)
+        self.assertIn("d.buy_structure_rows||[]",html)
+
     def test_board_contains_both_new_live_routes_and_no_order_submission(self):
         response = asyncio.run(feed.http_dashboard(None))
         self.assertIn("/signals/live", response.text)

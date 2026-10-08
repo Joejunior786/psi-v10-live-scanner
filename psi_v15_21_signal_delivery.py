@@ -361,6 +361,69 @@ def _qualification_report(at):
     return rows,counts
 
 
+
+BUY_STRUCTURE_LIMIT = 20
+
+def _buy_structure_report(now_ms):
+    """Read-only, independent formal V12 structure board, NEVER a BUY signal."""
+    try:
+        formal = list(CORE._board() or []) if CORE is not None else []
+    except (AttributeError, TypeError, ValueError):
+        formal = []
+    rows, seen = [], set()
+    counts = {"BUY": 0, "ARMED": 0, "WATCH": 0}
+    for item in formal:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").upper()
+        state = str(item.get("state") or "").upper()
+        setup = str(item.get("setup") or "").strip()
+        source_ms = int(EMA.num(item.get("generated_ms")))
+        age_ms = now_ms - source_ms
+        if (not re.fullmatch(r"[A-Z0-9]{2,24}USDT", symbol)
+                or symbol in seen or not setup
+                or item.get("setup_source") == "SENSOR_SHADOW"
+                or state not in counts
+                or not 0 <= age_ms <= SOURCE_DECISION_MAX_AGE_MS):
+            continue
+        seen.add(symbol)
+        counts[state] += 1
+        low,high,stop,tp1,reference = (
+            EMA.num(item.get(k)) for k in
+            ("entry_low","entry_high","invalidation","tp1","current")
+        )
+        valid_levels = (low > 0 and high >= low and 0 < stop < high
+                        and tp1 > high and reference > 0)
+        blockers = list(item.get("execution_blockers") or [])[:3]
+        if not valid_levels:
+            blockers = ["RISK_LEVELS_UNAVAILABLE"] + blockers
+        rows.append({
+            "symbol":symbol, "setup":setup,
+            "timeframe":str(item.get("timeframe") or "?"),
+            "state":state, "status":"STRUCTURE "+state,
+            "execution_state":str(item.get("execution_state") or "NOT_APPROVED"),
+            "source_ms":source_ms, "source_age_ms":age_ms,
+            "reference_price":reference,
+            "entry_low":low if valid_levels else None,
+            "entry_high":high if valid_levels else None,
+            "stop":stop if valid_levels else None,
+            "tp1":tp1 if valid_levels else None,
+            "potential_pct":round(100*(tp1/high-1),2) if valid_levels else None,
+            "setup_strength":EMA.num(item.get("setup_strength")),
+            "blockers":blockers,
+            "verified_buy_now":False,
+        })
+    rows.sort(key=lambda x: (
+        {"BUY":3,"ARMED":2,"WATCH":1}[x["state"]],
+        x["setup_strength"]), reverse=True)
+    return rows[:BUY_STRUCTURE_LIMIT], {
+        "formal_fresh":len(rows), "shown":min(len(rows),BUY_STRUCTURE_LIMIT),
+        "structural_buy":counts["BUY"], "armed":counts["ARMED"],
+        "watch":counts["WATCH"],
+        "execution_authority":"V12_PINPOINT_READ_TIME_ONLY",
+    }
+
+
 def _observe_missed_rallies(now_ms, chosen, accepted):
     """Observed window only: verified trade/book quotes, never cached closes."""
     active=set(accepted or [])
@@ -515,6 +578,7 @@ def _publish_once_unlocked(now_ms=None):
     }
     _observe_missed_rallies(now_ms,priorities,approved_symbols)
     qualification_rows,qualification_counts=_qualification_report(now_ms)
+    buy_structure_rows,buy_structure_summary=_buy_structure_report(now_ms)
     structure_summary={
         "available":int(getattr(ML,"_stats",{}).get("structure_candidates_available",0) or 0) if ML else 0,
         "shown":sum(x.get("setup_verification")=="UPSTREAM_STRUCTURAL" for x in
@@ -556,7 +620,7 @@ def _publish_once_unlocked(now_ms=None):
             })
         _ACTIVE = new_active
         _SNAPSHOT = {
-            "revision": "15.30-verified-buy-now-display-lanes",
+            "revision": "15.31-independent-buy-structure-lane",
             "generated_ms": now_ms,
             "expires_ms": now_ms + SIGNAL_LIFETIME_MS,
             "candle_frames": frames,
@@ -579,6 +643,8 @@ def _publish_once_unlocked(now_ms=None):
             "qualification_rows": qualification_rows,
             "qualification_counts": qualification_counts,
             "structure_summary": structure_summary,
+            "buy_structure_rows": buy_structure_rows,
+            "buy_structure_summary": buy_structure_summary,
             "subscription_summary": subscription_summary,
             "subscription_rows": subscription_rows,
             "missed_rallies": list(_MISSED_MOVES)[-10:][::-1],
@@ -642,8 +708,20 @@ def read_live(now_ms=None):
         and now_ms < int(snap.get("expires_ms") or 0)
     )
     approved = _fresh_buy_rows(snap, now_ms) if current else []
+    v12_approved = {(str(r.get("symbol")), str(r.get("setup")))
+                    for r in approved if r.get("authority") == "V12_PINPOINT"}
+    structure = []
+    if current:
+        for item in snap.get("buy_structure_rows") or []:
+            age = now_ms - int(item.get("source_ms") or 0)
+            if not 0 <= age <= SOURCE_DECISION_MAX_AGE_MS:
+                continue
+            verified = (item.get("symbol"),item.get("setup")) in v12_approved
+            structure.append(dict(item,source_age_ms=age,
+                verified_buy_now=verified,
+                status=("VERIFIED BUY NOW" if verified else item["status"])))
     return {
-        "ok": True, "revision": "15.30-verified-buy-now-display-lanes",
+        "ok": True, "revision": "15.31-independent-buy-structure-lane",
         "server_time_ms": now_ms,
         "generated_ms": snap.get("generated_ms"),
         "snapshot_age_ms": now_ms - snap["generated_ms"] if snap.get("generated_ms") else None,
@@ -662,6 +740,8 @@ def read_live(now_ms=None):
         "qualification_rows": snap.get("qualification_rows", []) if current else [],
         "qualification_counts": snap.get("qualification_counts", {}) if current else {},
         "structure_summary": snap.get("structure_summary", {}) if current else {},
+        "buy_structure_rows": structure,
+        "buy_structure_summary": snap.get("buy_structure_summary", {}) if current else {},
         "subscription_summary": snap.get("subscription_summary", {}) if current else {},
         "subscription_rows": snap.get("subscription_rows", []) if current else [],
         "missed_rallies": snap.get("missed_rallies", []) if current else [],
@@ -768,13 +848,13 @@ code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border
 @media(max-width:650px){body{padding:14px}.approved{padding:12px}}
 
 </style></head><body>
-<h1>PSI Live Scanner · V15.30</h1>
+<h1>PSI Live Scanner · V15.31</h1>
 <p>Auto-refreshes live market checks. Historical logs are never executable quotes.
 EMA, V12 structural and independently approved ML BUYs are separate authorities.
 Every entry requires a new server-side integrity check; this page never submits orders.</p>
 <div id="status" role="status" aria-live="polite">Connecting…</div>
 <div id="authority" class="warn" role="status">Checking strategy authorities…</div>
-<nav class="quick"><a href="#verified">Verified BUY NOW</a><a href="#qualification">ML qualification</a><a href="#research-section">Research</a></nav>
+<nav class="quick"><a href="#verified">Verified BUY NOW</a><a href="#buy-structure">Buy Structure</a><a href="#qualification">ML qualification</a><a href="#research-section">Research</a></nav>
 <section class="approved" id="verified">
 <h2>VERIFIED BUY NOW · <span id="verifiedCount">0</span> active</h2>
 <p>Only separately approved, read-time-verified signals. Unverified structural BUYs remain in research.</p>
@@ -794,6 +874,15 @@ per-coin event timestamps confirm delivery. Quiet coins can have old trades.</p>
 <table><thead><tr><th>Pair</th><th>Trade ACK</th><th>Book ACK</th>
 <th>Trade age</th><th>Book age</th><th>Delivery status</th></tr></thead>
 <tbody id="subRows"></tbody></table>
+<h2 id="buy-structure">BUY STRUCTURE · <span id="structureCount">0</span> setups</h2>
+<p>Independent V12 technical structure (BUY, ARMED, WATCH). A structural BUY is
+not an executable BUY NOW. Verified buys also appear above only after fresh
+read-time validation. Entry zones below are research references, not live quotes.</p>
+<div id="structureNote" class="warn" role="status">Checking formal structure…</div>
+<div class="table-scroll"><table><thead><tr><th>Pair</th><th>State</th>
+<th>Setup / frame</th><th>Entry zone</th><th>Stop</th><th>TP1</th>
+<th>Potential</th><th>Evidence age</th><th>Execution blockers</th></tr></thead>
+<tbody id="structureRows"></tbody></table></div>
 <h2 id="qualification">ML qualification — current decision, not buy instructions</h2>
 <p>NEAR BUY, DATA BLOCKED and MODEL REJECTED are diagnostic states, never execution approvals.</p>
 <div id="qualNote" class="warn">Checking qualification evidence…</div>
@@ -829,6 +918,9 @@ const verifiedSummary=document.getElementById("verifiedSummary");
 const laneGroups={EMA:{body:signals,count:document.getElementById("emaCount")},
   ML:{body:mlSignals,count:document.getElementById("mlCount")},
   V12:{body:v12Signals,count:document.getElementById("v12Count")}};
+const structureRows=document.getElementById("structureRows");
+const structureNote=document.getElementById("structureNote");
+const structureCount=document.getElementById("structureCount");
 const research=document.getElementById("research");
 const rotating=document.getElementById("rotating");
 const researchNote=document.getElementById("researchNote");
@@ -846,6 +938,8 @@ function money(v){return typeof v==="number"?Number(v.toPrecision(9)).toString()
 function clear(el){while(el.firstChild)el.removeChild(el.firstChild);}
 function invalidate(){
   aliveUntil=0;verifiedCount.textContent="0";
+  clear(structureRows);structureCount.textContent="0";
+  structureNote.textContent="Structure evidence unavailable or expired";
   verifiedSummary.textContent="No currently verified signal; previous approvals are expired.";
   for(const group of Object.values(laneGroups)){
     clear(group.body);group.count.textContent="0";
@@ -929,8 +1023,32 @@ async function refresh(){
     verifiedSummary.textContent=valid?
       visible+" read-time verified signals across EMA, ML and V12 lanes":
       "No current live quote; verification has expired";
-    clear(subRows);clear(qualRows);clear(moverRows);
+    clear(subRows);clear(qualRows);clear(moverRows);clear(structureRows);
+    structureCount.textContent="0";
+    structureNote.textContent="Structure evidence unavailable";
     if(valid){
+      const bs=d.buy_structure_summary||{};
+      const structural=d.buy_structure_rows||[];
+      structureCount.textContent=String(structural.length);
+      structureNote.textContent=(bs.structural_buy||0)+" structural BUY | "
+        +(bs.armed||0)+" ARMED | "+(bs.watch||0)+" WATCH | "
+        +"Only separately verified V12 signals qualify for BUY NOW.";
+      if(!structural.length){
+        const row=structureRows.insertRow();
+        cell(row,"No fresh V12 structural setups").colSpan=9;
+      }
+      for(const q of structural){
+        const row=structureRows.insertRow();
+        cell(row,q.symbol);
+        cell(row,q.status+(q.verified_buy_now?" ✓":" — NOT EXECUTION APPROVED"));
+        cell(row,q.setup+" / "+q.timeframe);
+        cell(row,q.entry_low==null?"—":money(q.entry_low)+"–"+money(q.entry_high));
+        cell(row,money(q.stop));cell(row,money(q.tp1));
+        cell(row,q.potential_pct==null?"—":q.potential_pct+"%");
+        cell(row,q.source_age_ms==null?"—":q.source_age_ms+"ms");
+        cell(row,q.verified_buy_now?"NONE":
+          ((q.blockers||[]).slice(0,2).join(", ")||"EXECUTION NOT APPROVED"));
+      }
       const summary=d.subscription_summary||{};
       subNote.textContent=(summary.control_requested||0)+"/"+(summary.shortlisted||0)
         +" control requested | "+(summary.both_acknowledged||0)
@@ -1102,6 +1220,8 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "ml_priority_symbols": live.get("ml_priority_symbols", []),
         "qualification_counts": live.get("qualification_counts", {}),
         "structure_summary": live.get("structure_summary", {}),
+        "buy_structure_summary": live.get("buy_structure_summary", {}),
+        "buy_structure_rows": live.get("buy_structure_rows", [])[:20],
         "subscription_summary": live.get("subscription_summary", {}),
         "subscription_rows": live.get("subscription_rows", [])[:30],
         "missed_rally_count": live.get("missed_rally_count", 0),
