@@ -206,6 +206,30 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertTrue(all("expected_time_to_target" in r for r in board))
 
 
+    def test_shadow_setup_requires_independent_confirmation(self):
+        now = v15._now_ms()
+        sensor = self.sensor(now)
+        sensor["symbol"] = "SHADOWUSDT"
+        sensor["relative_volume_10s"] = 4.0
+        sensor["trade_acceleration"] = 2.0
+        sensor["cvd_acceleration"] = 0.8
+        sensor["ofi_acceleration"] = 0.7
+        probe = v15._setup_evidence(sensor, {})
+        self.assertEqual(probe["lane"], "BEAST")
+        self.assertGreaterEqual(len(probe["evidence"]), 2)
+        v15.V13 = types.SimpleNamespace(_rows=lambda: [sensor])
+        v15.CORE = types.SimpleNamespace(_board=lambda: [])
+        board = v15._build_board(now)
+        self.assertEqual(board[0]["action"], "SETUP SHADOW")
+        self.assertFalse(board[0]["execution_ready"])
+        self.assertEqual(board[0]["setup_verification"], "PROVISIONAL_SENSOR")
+        self.assertEqual(v15._qualified_total, 0)
+
+    def test_unverified_single_factor_is_not_a_setup(self):
+        probe = v15._setup_evidence({"relative_volume_10s": 4.0, "trade_acceleration": 2.0}, {})
+        self.assertIsNone(probe["lane"])
+        self.assertFalse(probe["evidence"])
+
     def test_no_daily_buy_cap_allows_more_than_ten_qualified_signals(self):
         now = v15._now_ms()
         rows = []
