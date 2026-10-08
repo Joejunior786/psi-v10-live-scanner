@@ -206,6 +206,17 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertTrue(all("expected_time_to_target" in r for r in board))
 
 
+    def test_daily_ema_uses_only_complete_fresh_candles(self):
+        stamp = 2_000_000_000_000
+        day = 86_400_000
+        rows = [[stamp - (220-i)*day, "1", "1", "1", str(100+i*.1), "1", stamp - (219-i)*day] for i in range(220)]
+        v15.CORE = types.SimpleNamespace(_cache={"TUSDT": {"1d": {"rows": rows, "updated": stamp/1000}}})
+        found = v15._daily_candle_evidence("TUSDT", stamp)
+        self.assertGreater(found["daily_ema50"], found["daily_ema200"])
+        self.assertEqual(v15._daily_candle_evidence("TUSDT", stamp + 20_000_000), {})
+        v15.CORE._cache["TUSDT"]["1d"]["rows"] = rows[:150]
+        self.assertEqual(v15._daily_candle_evidence("TUSDT", stamp), {})
+
     def test_daily_ma_top10_requires_actual_ma_and_seller_exhaustion(self):
         row = self.sensor()
         row["entry_reference"] = 99.5
