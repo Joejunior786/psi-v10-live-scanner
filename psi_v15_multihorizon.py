@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.0.0-multihorizon-specialists"
+REVISION = "15.0.1-multihorizon-daily-cap-audit"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -41,6 +41,7 @@ SIGNAL_COOLDOWN_MS = max(30 * 60_000, int(os.getenv("PSI_V15_SIGNAL_COOLDOWN_MS"
 MAX_PENDING = max(200, int(os.getenv("PSI_V15_MAX_PENDING", "1800")))
 MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
 BOARD_LIMIT = 5
+MAX_ML_BUYS_PER_DAY = max(1, min(3, int(os.getenv("PSI_V15_MAX_BUYS_PER_DAY", "3"))))
 POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "15")))
 MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200")))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SPREAD_BPS", "20")))
@@ -64,6 +65,8 @@ _board = []
 _last_board_ms = 0
 _last_save_ms = 0
 _stats = defaultdict(int)
+_daily_buy_day = ""
+_daily_buy_symbols = set()
 _last_error = ""
 
 
@@ -667,6 +670,41 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers):
     return "ML BUY NOW", True, []
 
 
+
+def _utc_day(at_ms):
+    return time.strftime("%Y-%m-%d", time.gmtime(int(at_ms) / 1000.0))
+
+
+def _apply_daily_buy_cap(rows, at_ms):
+    """Limit independent ML BUY NOW signals to the user's max trades/day.
+
+    Already-counted symbols may remain BUY NOW; additional otherwise-qualified
+    candidates stay visible as WAIT DAILY LIMIT so the ranking is not hidden.
+    """
+    global _daily_buy_day
+    day = _utc_day(at_ms)
+    if day != _daily_buy_day:
+        _daily_buy_day = day
+        _daily_buy_symbols.clear()
+
+    for row in rows:
+        if not bool(row.get("execution_ready")):
+            continue
+        sym = str(row.get("symbol") or "").upper()
+        row["qualified_before_daily_limit"] = True
+        if sym in _daily_buy_symbols:
+            continue
+        if len(_daily_buy_symbols) < MAX_ML_BUYS_PER_DAY:
+            _daily_buy_symbols.add(sym)
+            continue
+        row["execution_ready"] = False
+        row["action"] = "WAIT DAILY LIMIT"
+        row["blockers"] = list(dict.fromkeys(
+            list(row.get("blockers") or []) + ["MAX_3_ML_TRADES_PER_DAY"]
+        ))
+    return rows
+
+
 def _build_board(at=None):
     global _board, _last_board_ms
     at = _now_ms() if at is None else int(at)
@@ -738,6 +776,7 @@ def _build_board(at=None):
         ),
         reverse=True,
     )
+    _apply_daily_buy_cap(out, at)
     for idx, row in enumerate(out, 1):
         row["rank"] = idx
     _board = out[:BOARD_LIMIT]
@@ -763,6 +802,9 @@ def report():
         "decision_rule": "positive empirical EV + setup-specific model + hard live-data safety",
         "fixed_50pct_gate_removed": True,
         "forced_top_five": True,
+        "max_ml_trades_per_day": MAX_ML_BUYS_PER_DAY,
+        "daily_buy_day_utc": _daily_buy_day or _utc_day(_now_ms()),
+        "daily_buy_symbols": sorted(_daily_buy_symbols),
         "execution_ready": sum(bool(r.get("execution_ready")) for r in rows),
         "rows": rows,
         "training": {
@@ -797,6 +839,8 @@ def _save(force=False):
             "seen_seed": list(_seen_seed)[-5000:],
             "lane_stats": _lane_stats,
             "stats": dict(_stats),
+            "daily_buy_day": _daily_buy_day,
+            "daily_buy_symbols": sorted(_daily_buy_symbols),
         }
         with open(temp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, separators=(",", ":"), allow_nan=False)
@@ -807,6 +851,7 @@ def _save(force=False):
 
 
 def _restore():
+    global _daily_buy_day
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -825,6 +870,14 @@ def _restore():
         _lane_stats.clear()
         _lane_stats.update(payload.get("lane_stats") or {})
         _stats.update(payload.get("stats") or {})
+        _daily_buy_day = str(payload.get("daily_buy_day") or "")
+        _daily_buy_symbols.clear()
+        _daily_buy_symbols.update(
+            str(x).upper() for x in (payload.get("daily_buy_symbols") or []) if str(x)
+        )
+        if _daily_buy_day and _daily_buy_day != _utc_day(_now_ms()):
+            _daily_buy_day = _utc_day(_now_ms())
+            _daily_buy_symbols.clear()
     except (OSError, ValueError, TypeError):
         pass
 
@@ -872,6 +925,31 @@ async def supervisor_loop():
                     f" top={top or 'NONE'}",
                     flush=True,
                 )
+                audit = {
+                    "revision": REVISION,
+                    "generated_ms": _now_ms(),
+                    "daily_buy_day_utc": _daily_buy_day,
+                    "daily_buy_symbols": sorted(_daily_buy_symbols),
+                    "rows": [
+                        {
+                            k: r.get(k) for k in (
+                                "rank", "symbol", "lane", "action", "execution_ready",
+                                "price", "dynamic_stop", "selected_target_pct",
+                                "selected_target_price", "selected_horizon",
+                                "expected_time_to_target", "expected_time_range",
+                                "time_model_source", "probability", "expected_value_pct",
+                                "expected_mfe_pct", "expected_mae_pct", "model_samples",
+                                "model_source", "probability_calibration",
+                                "hard_safety_verified", "blockers",
+                            )
+                        } for r in rows
+                    ],
+                }
+                print(
+                    "PSI-V15 ML_MULTI_JSON "
+                    + json.dumps(audit, separators=(",", ":"), allow_nan=False),
+                    flush=True,
+                )
             _save()
         except asyncio.CancelledError:
             _save(force=True)
@@ -902,6 +980,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
+        + f" maxBuysPerDay={MAX_ML_BUYS_PER_DAY}"
         + " orders=DISABLED",
         flush=True,
     )
