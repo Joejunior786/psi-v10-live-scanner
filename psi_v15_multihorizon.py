@@ -14,9 +14,9 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.5.0-learned-entry-zones"
+REVISION = "15.6.0-chronological-oos-ranked-30"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
-STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_4_multihorizon.json")
+STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_6_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
 HORIZONS_MS = {
     "15m": 15 * 60_000,
@@ -46,7 +46,7 @@ MAX_PENDING = max(200, int(os.getenv("PSI_V15_MAX_PENDING", "1800")))
 MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
 MAX_SIGNAL_JOURNAL = max(500, int(os.getenv("PSI_V15_MAX_SIGNAL_JOURNAL", "5000")))
 SIGNAL_REARM_MS = max(15 * 60_000, int(os.getenv("PSI_V15_SIGNAL_REARM_MS", str(60 * 60_000))))
-BOARD_LIMIT = max(10, min(40, int(os.getenv("PSI_V15_BOARD_LIMIT", "20"))))
+BOARD_LIMIT = max(10, min(40, int(os.getenv("PSI_V15_BOARD_LIMIT", "30"))))
 POLL_SECONDS = max(5.0, float(os.getenv("PSI_V15_POLL_SECONDS", "15")))
 MAX_SENSOR_AGE_MS = max(250, int(os.getenv("PSI_V15_MAX_SENSOR_AGE_MS", "1200")))
 MAX_SPREAD_BPS = max(1.0, float(os.getenv("PSI_V15_MAX_SPREAD_BPS", "20")))
@@ -171,10 +171,12 @@ def _probability(model, x):
     return _clamp(calibrated, 0.001, 0.999), raw, source
 
 
-def _update_model(model, x, outcome, stamp, realised_return=None):
+def _update_model(model, x, outcome, stamp, realised_return=None, split_override=None):
     """Train without leaking untouched TEST outcomes into prediction/calibration."""
     p = _raw_probability(model, x)
-    split = _split(stamp)
+    split = str(split_override or _split(stamp)).upper()
+    if split not in {"TRAIN", "VALIDATION", "TEST"}:
+        split = _split(stamp)
     realised = _f(realised_return)
 
     if split == "TEST":
@@ -593,11 +595,14 @@ def _prices():
 def _seed_from_outcome_memory():
     if OUTCOME is None:
         return 0
-    added = 0
     events = sorted(
         [e for e in list(getattr(OUTCOME, "_recent", []) or []) if isinstance(e, dict)],
         key=lambda e: int(_f(e.get("created_ms"), 0)),
     )
+    initial_seed = not bool(_stats.get("initial_seed_complete"))
+    prepared = []
+    duplicate_ids = []
+
     for event in events:
         eid = str(event.get("id") or f"{event.get('symbol')}|{event.get('created_ms')}")
         if eid in _seen_seed:
@@ -610,10 +615,41 @@ def _seed_from_outcome_memory():
         symbol = str(event.get("symbol") or "").upper()
         dedup_key = f"{symbol}|{lane}|{created // SEED_DEDUP_MS}"
         if dedup_key in _seed_buckets:
-            _seen_seed.add(eid)
-            _stats["seed_dedup_skipped"] += 1
+            duplicate_ids.append(eid)
             continue
+        prepared.append((event, eid, lane, dedup_key))
 
+    split_by_id = {}
+    if initial_seed and prepared:
+        groups = defaultdict(list)
+        for item in prepared:
+            groups[item[2]].append(item)
+        for lane_items in groups.values():
+            lane_items.sort(key=lambda z: int(_f(z[0].get("created_ms"), 0)))
+            n = len(lane_items)
+            train_cut = max(1, int(math.floor(n * 0.65)))
+            val_cut = max(train_cut, int(math.floor(n * 0.75)))
+            if n >= 4:
+                val_cut = max(train_cut + 1, val_cut)
+            val_cut = min(n, val_cut)
+            for idx, item in enumerate(lane_items):
+                split_by_id[item[1]] = (
+                    "TRAIN" if idx < train_cut
+                    else "VALIDATION" if idx < val_cut
+                    else "TEST"
+                )
+
+    for eid in duplicate_ids:
+        _seen_seed.add(eid)
+        _stats["seed_dedup_skipped"] += 1
+
+    added = 0
+    initial_test_events = 0
+    for event, eid, lane, dedup_key in prepared:
+        created = int(_f(event.get("created_ms"), 0))
+        split_override = split_by_id.get(eid)
+        if split_override == "TEST":
+            initial_test_events += 1
         x = _features_from_outcome(event)
         first = event.get("first_target_ms") or {}
         stop_at = int(_f(event.get("stop_hit_ms"), 0))
@@ -638,7 +674,11 @@ def _seed_from_outcome_memory():
                 hit = int(_f(first.get(str(int(target))), 0))
                 win = bool(hit and hit - created <= hms and (not stop_at or hit <= stop_at))
                 for specialist in (lane, "ALL"):
-                    _update_model(_model(specialist, horizon, target), x, win, created, realised)
+                    _update_model(
+                        _model(specialist, horizon, target),
+                        x, win, created, realised,
+                        split_override=split_override,
+                    )
                 target_key = str(int(target))
                 if win and target_key not in recorded_targets:
                     _record_lane_stats(
@@ -652,12 +692,16 @@ def _seed_from_outcome_memory():
         _seed_buckets.add(dedup_key)
         _seen_seed.add(eid)
         added += 1
+
+    if initial_seed:
+        _stats["initial_seed_complete"] = 1
+        _stats["initial_oos_test_events"] = initial_test_events
     if added:
         _stats["seeded_events"] += added
     return added
 
 
-def _collect_candidates(at=None):
+def _collect_candidates(def _collect_candidates(at=None):
     at = _now_ms() if at is None else int(at)
     structural = _structural_map()
     rows = _sensor_rows()
@@ -1244,6 +1288,22 @@ def _trade_scorecard():
     }
 
 
+def _action_priority(action):
+    return {
+        "ML BUY NOW": 10,
+        "ML SHADOW BUY": 9,
+        "BUY RECLAIM": 8,
+        "BUY PULLBACK": 8,
+        "BUY BREAKOUT/RETEST": 8,
+        "WAIT ENTRY": 7,
+        "ML LEARNING": 6,
+        "WAIT DATA": 5,
+        "WAIT": 4,
+        "DO NOT CHASE": 1,
+        "REJECT": 0,
+    }.get(str(action or ""), 2)
+
+
 def _build_board(at=None):
     global _board, _last_board_ms
     at = _now_ms() if at is None else int(at)
@@ -1350,6 +1410,7 @@ def _build_board(at=None):
     out.sort(
         key=lambda r: (
             bool(r["execution_ready"]),
+            _action_priority(r.get("action")),
             r["expected_value_pct"],
             r["probability"],
             r["rank_score"],
@@ -1392,6 +1453,7 @@ def report():
         "feature_count": FEATURE_COUNT,
         "setup_specific_horizon_grid": HORIZON_MIN_BY_LANE_TARGET,
         "historical_seed_dedup_window": _duration(SEED_DEDUP_MS),
+        "initial_holdout_policy": "CHRONOLOGICAL_PER_LANE_65_TRAIN_10_VALIDATION_25_TEST",
         "entry_actions": ["ML BUY NOW", "ML SHADOW BUY", "BUY PULLBACK", "BUY RECLAIM", "BUY BREAKOUT/RETEST", "WAIT", "REJECT", "DO NOT CHASE"],
         "time_to_invalidation_enabled": True,
         "learned_entry_zone_enabled": True,
@@ -1415,6 +1477,7 @@ def report():
             "model_count": len(_models),
             "seeded_events": int(_stats.get("seeded_events") or 0),
             "seed_dedup_skipped": int(_stats.get("seed_dedup_skipped") or 0),
+            "initial_oos_test_events": int(_stats.get("initial_oos_test_events") or 0),
             "entry_excursion_seeded_events": int(_stats.get("entry_excursion_seeded_events") or 0),
             "entry_excursion_cohorts": len(_entry_excursion_stats),
             "captured": int(_stats.get("captured") or 0),
@@ -1607,7 +1670,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
+        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"

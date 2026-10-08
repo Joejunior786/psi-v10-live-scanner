@@ -19,7 +19,7 @@ import psi_v15_multihorizon as upgrade_v15
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
-UPGRADE_RUNTIME = "v15.3-context-entry-time-ml+v14.0-pinpoint-three-engine-dual-authority+v13.3-evidence-ready-dual-authority+v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
+UPGRADE_RUNTIME = "v15.6-chronological-oos-ranked-30+v14.0-pinpoint-three-engine-dual-authority+v13.3-evidence-ready-dual-authority+v13.1-24h-outcome-monitor+v13.0-independent-ml30+v12.9.6-full-eight-symbol-recovery-batch+v12.9.5-direct-recovery-commit+v12.8.0-early-probe-sticky-sequence-memory"
 
 
 def _start_async_daemon(name, coroutine_factory):

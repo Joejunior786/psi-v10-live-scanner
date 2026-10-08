@@ -19,6 +19,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.board = list(v15._board)
         self.signal_journal = list(v15._signal_journal)
         self.signal_seen = set(v15._signal_seen)
+        self.stats = dict(v15._stats)
         self.core, self.v13, self.outcome, self.v14 = v15.CORE, v15.V13, v15.OUTCOME, v15.V14
         v15._models.clear()
         v15._pending.clear()
@@ -32,6 +33,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._board.clear()
         v15._signal_journal.clear()
         v15._signal_seen.clear()
+        v15._stats.clear()
 
     def tearDown(self):
         v15._models.clear(); v15._models.update(self.models)
@@ -46,6 +48,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._board[:] = self.board
         v15._signal_journal[:] = self.signal_journal
         v15._signal_seen.clear(); v15._signal_seen.update(self.signal_seen)
+        v15._stats.clear(); v15._stats.update(self.stats)
         v15.CORE, v15.V13, v15.OUTCOME, v15.V14 = self.core, self.v13, self.outcome, self.v14
 
     def sensor(self, now=1_000_000):
@@ -397,6 +400,35 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertEqual(source, "EMPIRICAL_WINNER_MAE")
         self.assertAlmostEqual(offset, -0.8, places=6)
         self.assertEqual(len(v15._models), before_models)
+
+
+
+    def test_initial_seed_creates_chronological_per_lane_test_holdout(self):
+        created = 4_000_000_000_000
+        events = []
+        for i in range(40):
+            events.append({
+                "id": f"oos{i}", "symbol": f"O{i}USDT",
+                "created_ms": created + i * 60_000,
+                "setup": "micro ignition",
+                "features": {"setup": "micro ignition", "buy_ratio": .61},
+                "first_target_ms": {"3": created + i * 60_000 + 5 * 60_000},
+                "stop_hit_ms": 0,
+                "horizon_returns": {"15m": 3.4, "1h": 4.0},
+                "entry_price": 100.0,
+                "observed_price_at_signal": 100.0,
+                "mfe_pct": 4.2, "mae_pct": -0.4,
+            })
+        v15.OUTCOME = types.SimpleNamespace(_recent=events)
+        self.assertEqual(v15._seed_from_outcome_memory(), 40)
+        model = v15._model("BEAST", "15m", 3)
+        self.assertGreaterEqual(model["test_n"], 9)
+        self.assertGreater(model["wins"] + model["losses"], model["test_n"])
+        self.assertGreaterEqual(v15._stats.get("initial_oos_test_events", 0), 9)
+
+    def test_useful_entry_actions_rank_above_chased_or_rejected_rows(self):
+        self.assertGreater(v15._action_priority("BUY RECLAIM"), v15._action_priority("DO NOT CHASE"))
+        self.assertGreater(v15._action_priority("ML SHADOW BUY"), v15._action_priority("REJECT"))
 
 
 if __name__ == "__main__":
