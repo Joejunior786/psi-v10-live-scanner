@@ -26,6 +26,7 @@ def evaluate(snap, tf, updated, now, integrity, micro):
     rejection = num(snap.get("lower_wick")) >= .24 and num(snap.get("close_strength")) >= .58
     live_ok = bool(integrity.get("verified")) and not integrity.get("blockers")
     flow_ok = all(micro.get(k) is True for k in ("micro_ready", "sequence_verified", "book_sequence_verified"))
+    positive_flow = num(micro.get("cvd_acceleration")) > 0 and num(micro.get("ofi_acceleration")) >= 0
     out = []
     for period in (50,200):
         ema = num(snap.get(f"ema{period}"))
@@ -44,6 +45,7 @@ def evaluate(snap, tf, updated, now, integrity, micro):
         if not exhausted: blockers.append("SELLER_EXHAUSTION_UNCONFIRMED")
         if not reclaim: blockers.append("EMA_RECLAIM_MISSING")
         if not flow_ok: blockers.append("INVALID_MICRO_SEQUENCE")
+        if not positive_flow: blockers.append("CVD_OFI_NOT_POSITIVE")
         if not live_ok: blockers.append("LIVE_INTEGRITY_INVALID")
         if not 0 < risk_pct <= 5: blockers.append("INVALID_EMA_RISK")
         state = ("BUY NOW — EMA" if not blockers else
