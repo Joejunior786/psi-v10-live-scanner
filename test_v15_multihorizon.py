@@ -488,5 +488,27 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertEqual(m2d["wins"] + m2d["losses"] + m2d["test_n"], 0)
 
 
+
+    def test_untrained_long_horizon_prior_cannot_beat_trained_model(self):
+        sensor = self.sensor()
+        x = v15._features_from_sensor(sensor, {})
+        model = v15._model("BEAST", "24h", 20)
+        p = 0.20
+        model["bias"] = math.log(p / (1 - p))
+        model["weights"] = [0.0] * v15.FEATURE_COUNT
+        model["trained"] = 40
+        model["wins"] = 8
+        model["losses"] = 32
+        model["payoff_win_sum"] = 8 * 20.0
+        model["payoff_win_n"] = 8
+        model["payoff_loss_sum"] = 32 * 3.0
+        model["payoff_loss_n"] = 32
+        opp = v15._opportunity("BEAST", x)
+        self.assertEqual(opp["horizon"], "24h")
+        self.assertEqual(opp["target_pct"], 20.0)
+        self.assertEqual(opp["samples"], 40)
+        self.assertEqual(opp["model_source"], "BEAST")
+
+
 if __name__ == "__main__":
     unittest.main()

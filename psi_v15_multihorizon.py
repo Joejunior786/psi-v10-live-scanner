@@ -14,7 +14,7 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.8.0-censor-safe-warm-start"
+REVISION = "15.9.0-ready-model-selection"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_8_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -908,8 +908,17 @@ def _combo_allowed(lane, target, horizon):
     return int(HORIZONS_MS.get(str(horizon)) or 0) >= int(HORIZONS_MS.get(required) or 0)
 
 
+def _selection_model_ready(source, samples):
+    samples = int(samples or 0)
+    return bool(
+        samples >= MIN_MODEL_SAMPLES
+        or (str(source or "") != "LEARNING" and samples >= MIN_SPECIALIST_SAMPLES)
+    )
+
+
 def _opportunity(lane, x):
     choices = []
+    ready_choices = []
     probabilities = {}
     for horizon in HORIZON_ORDER:
         probabilities[horizon] = {}
@@ -932,9 +941,17 @@ def _opportunity(lane, x):
             }
             score = ev + 0.25 * p + 0.03 * math.log1p(samples)
             score += 0.15 if promotion["ready"] else 0.0
-            choices.append((score, ev, p, target, horizon, model, source, samples, calibration, promotion))
-    choices.sort(key=lambda z: z[0], reverse=True)
-    best = choices[0]
+            choice = (score, ev, p, target, horizon, model, source, samples, calibration, promotion)
+            choices.append(choice)
+            if _selection_model_ready(source, samples):
+                ready_choices.append(choice)
+    # Untrained long-horizon priors remain visible in the probability grid,
+    # but they cannot displace a genuinely trained model. If no trained
+    # combination exists yet, fall back to the learning pool so the lane still
+    # publishes a research candidate.
+    selection_pool = ready_choices or choices
+    selection_pool.sort(key=lambda z: z[0], reverse=True)
+    best = selection_pool[0]
     _, ev, p, target, horizon, model, source, samples, calibration, promotion = best
     avg_win, avg_loss = _payoffs(model, target, lane)
     med, lo, hi, time_source = _target_time(lane, target, HORIZONS_MS[horizon])
@@ -1694,7 +1711,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
+        + " oosPromotion=REQUIRED chronologicalHoldout=65/10/25 knownTargetLabels=ENABLED warmStartMax=24h longHorizons=PROSPECTIVE_ONLY trainedModelPriority=ENABLED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H horizonGrid=SETUP_SPECIFIC entryZone=LEARNED_WINNER_MAE"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"
