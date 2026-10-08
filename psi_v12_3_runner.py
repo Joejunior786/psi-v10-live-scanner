@@ -83,11 +83,19 @@ async def main():
         control_threads.append(
             _start_async_daemon("psi-hardening-supervisor", hardening.supervisor_loop)
         )
-        print(
-            "PSI-CONTROL-PLANE isolated threads="
-            + ",".join(t.name for t in control_threads),
-            flush=True,
-        )
+
+    # V15 must not inherit the legacy scanner's long synchronous hydration
+    # pauses. Its supervisor only reads atomic/copyable sensor + structural
+    # snapshots and owns its own model state, so isolate it on a daemon event
+    # loop just like the control plane.
+    control_threads.append(
+        _start_async_daemon("psi-v15-multihorizon", upgrade_v15.supervisor_loop)
+    )
+    print(
+        "PSI-CONTROL-PLANE isolated threads="
+        + ",".join(t.name for t in control_threads),
+        flush=True,
+    )
 
     await asyncio.gather(
         core.main(),
@@ -101,7 +109,6 @@ async def main():
         upgrade_v13.learning_worker(),
         upgrade_perf24.supervisor_loop(),
         upgrade_v14.supervisor_loop(),
-        upgrade_v15.supervisor_loop(),
     )
 
 
