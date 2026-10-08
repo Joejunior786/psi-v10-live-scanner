@@ -4,6 +4,7 @@ import math
 
 CORE = None
 PREVIOUS_ATTACH = None
+PREVIOUS_PRINT = None
 FRAMES = (("1h", "1H", 180), ("4h", "4H", 420), ("1d", "DAILY", 1200))
 
 def num(x, default=0):
@@ -85,10 +86,41 @@ def attach(symbol, structural_row):
                     "execution_blockers":[],"ema_buy_signal":best})
     return row
 
+def print_board(*args, **kwargs):
+    original = PREVIOUS_PRINT(*args, **kwargs)
+    if CORE is None:
+        return original
+    records = []
+    for symbol, row in list(CORE._results.items()):
+        for item in row.get("ema_signal_lane") or []:
+            records.append((symbol, item))
+    touches = [r for r in records if r[1]["touch"]]
+    buys = [r for r in touches if r[1]["status"] == "BUY NOW — EMA"]
+    print(
+        f"Ψ-V15.17 EMA_SIGNAL_LANE evaluated={len(records)} "
+        f"touches={len(touches)} buys={len(buys)} "
+        f"approaching={len(records)-len(touches)}",
+        flush=True,
+    )
+    for symbol, item in sorted(records, key=lambda x: (
+            x[1]["status"] == "BUY NOW — EMA",
+            x[1]["touch"], -abs(x[1]["distance_pct"])), reverse=True)[:30]:
+        print(
+            f"EMA {symbol} tf={item['timeframe']} ema={item['ema_period']} "
+            f"dist={item['distance_pct']:+.3f}% exhausted={item['seller_exhaustion']} "
+            f"reclaim={item['buyer_reclaim']} status={item['status']} "
+            f"blockers={','.join(item['blockers']) or '-'}",
+            flush=True,
+        )
+    return original
+
+
 def install(core):
-    global CORE, PREVIOUS_ATTACH
+    global CORE, PREVIOUS_ATTACH, PREVIOUS_PRINT
     if CORE is not None: return
     CORE = core
     PREVIOUS_ATTACH = core._attach_execution_gate
     core._attach_execution_gate = attach
+    PREVIOUS_PRINT = core.print_board
+    core.print_board = print_board
     print("PSI-V15.17 EMA_EXHAUSTION 1H/4H/DAILY 50/200 independent route installed",flush=True)
