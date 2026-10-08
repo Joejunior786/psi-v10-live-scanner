@@ -856,87 +856,220 @@ async def http_quote(request):
 
 _DASHBOARD = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PSI Live Scanner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a111d">
+<meta name="description" content="Live Binance Spot market intelligence, independently verified signal lanes and structural research. Read-only scanner.">
+<title>Live Scanner · Market Intelligence</title>
 <style>
-:root{color-scheme:dark;font-family:system-ui,sans-serif}
-body{background:#0e1620;color:#e9f1f5;margin:auto;max-width:1100px;padding:22px}
-h1{font-size:1.5rem}h2{font-size:1.05rem;margin-top:26px}
-p{color:#b7c6d0}table{width:100%;border-collapse:collapse;font-size:0.9rem}
-td,th{border-bottom:1px solid #293746;text-align:left;padding:9px 7px}
-button{cursor:pointer;padding:8px 12px;background:#183c54;border:1px solid #6b97b0;
-color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
-.good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
-code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
-.quick{display:flex;flex-wrap:wrap;gap:9px;margin:18px 0}
-.quick a{padding:8px 11px;background:#193346;border:1px solid #34566d;border-radius:7px;color:#cfe9f5;text-decoration:none}
-.approved{border:1px solid #3a8672;padding:16px;border-radius:12px;margin-top:18px;background:#12252a}
-.approved h2{margin:0 0 8px}.approved h3{margin:22px 0 9px;font-size:1rem}
-.approved h3 span{font-variant-numeric:tabular-nums;color:#9ee2bc}
-.table-scroll{overflow-x:auto}
-.approved table{min-width:710px}.approved tbody tr{background:#193039}
-#verifiedSummary{margin:10px 0;padding:8px 0}
-@media(max-width:650px){body{padding:14px}.approved{padding:12px}}
-
-</style></head><body>
-<h1>PSI Live Scanner · V15.31</h1>
-<p>Auto-refreshes live market checks. Historical logs are never executable quotes.
-EMA, V12 structural and independently approved ML BUYs are separate authorities.
-Every entry requires a new server-side integrity check; this page never submits orders.</p>
-<div id="status" role="status" aria-live="polite">Connecting…</div>
-<div id="authority" class="warn" role="status">Checking strategy authorities…</div>
-<nav class="quick"><a href="#verified">Verified BUY NOW</a><a href="#buy-structure">Buy Structure</a><a href="#qualification">ML qualification</a><a href="#research-section">Research</a></nav>
-<section class="approved" id="verified">
-<h2>VERIFIED BUY NOW · <span id="verifiedCount">0</span> active</h2>
-<p>Only separately approved, read-time-verified signals. Unverified structural BUYs remain in research.</p>
-<div id="verifiedSummary" class="good" aria-live="polite">Checking live approvals…</div>
-<h3>EMA verified lane · <span id="emaCount">0</span></h3>
-<div class="table-scroll"><table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="signals"></tbody></table></div>
-<h3>Machine Learning verified lane · <span id="mlCount">0</span></h3>
-<div class="table-scroll"><table><thead><tr><th>Pair</th><th>Setup / duration</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="mlSignals"></tbody></table></div>
-<h3>V12 Pinpoint verified lane · <span id="v12Count">0</span></h3>
-<div class="table-scroll"><table><thead><tr><th>Pair</th><th>Setup / frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="v12Signals"></tbody></table></div>
+:root{color-scheme:dark;--bg:#0a111d;--surface:#121d2b;--surface-2:#172536;--edge:#26374a;--line:#213144;--text:#e9f1f7;--muted:#9aafc0;--mint:#6be4b6;--mint-bg:rgba(73,195,153,.11);--amber:#efc77b;--red:#ff9d9d;--blue:#99c8ef;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-synthesis:none}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:96px}
+body{margin:0;min-width:280px;color:var(--text);background:radial-gradient(ellipse at 85% -120px,rgba(55,100,120,.16),transparent 500px),var(--bg);font-size:14px;line-height:1.55;-webkit-text-size-adjust:100%}
+.app-shell{max-width:1360px;margin:0 auto;padding:0 27px 72px}
+.topbar{min-height:94px;display:flex;align-items:center;justify-content:space-between;gap:20px;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:14px;min-width:0}
+.brand-mark{width:43px;height:43px;flex-shrink:0;display:grid;place-items:center;border:1px solid #436c72;border-radius:13px;background:linear-gradient(135deg,#17343c,#10222c);box-shadow:0 0 25px rgba(53,170,143,.08)}
+.brand-mark:after{content:"";width:16px;height:16px;border:3px solid var(--mint);border-top-color:transparent;transform:rotate(-45deg);border-radius:4px}
+.kicker{font-size:10px;font-weight:800;color:#8fb0bd;letter-spacing:.15em;text-transform:uppercase}
+h1{font-size:20px;letter-spacing:-.045em;line-height:1.2;margin:2px 0 0;font-weight:750}
+.version{display:inline-block;margin-left:7px;padding:3px 6px;border-radius:5px;background:#253343;border:1px solid #344456;color:#9fb8cc;font-size:10px;vertical-align:3px;letter-spacing:0;font-weight:750}
+.header-meta{display:flex;align-items:center;gap:16px;color:var(--muted);font-size:12px;white-space:nowrap}
+.header-market{border:1px solid var(--edge);border-radius:999px;padding:7px 11px;letter-spacing:.06em;font-weight:700;font-size:10px;color:#c5d4df}
+.last-check{font-variant-numeric:tabular-nums}
+.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:34px 0 25px}
+.hero h2{font-size:clamp(25px,3.4vw,38px);line-height:1.13;letter-spacing:-.045em;margin:7px 0 12px;font-weight:760}
+.hero p{max-width:700px;margin:0;color:var(--muted);font-size:13px}
+.hero-stamp{flex-shrink:0;align-self:flex-start;border:1px solid var(--edge);border-radius:9px;color:var(--muted);padding:10px 13px;background:rgba(21,38,53,.5);font-size:10px;font-weight:750;letter-spacing:.11em}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:13px}
+.metric{min-width:0;padding:18px 19px;background:linear-gradient(155deg,#152335,#101b29);border:1px solid var(--edge);border-radius:13px}
+.metric:first-child{background:linear-gradient(145deg,rgba(35,98,82,.29),#101c27);border-color:#325c58}
+.metric-label{display:flex;align-items:center;gap:8px;color:#a9bdcb;font-size:11px;font-weight:700;letter-spacing:.055em;text-transform:uppercase}
+.metric-label:before{content:"";height:7px;width:7px;background:#789ab1;border-radius:50%;flex-shrink:0}
+.metric:first-child .metric-label:before{background:var(--mint);box-shadow:0 0 12px rgba(101,224,179,.55)}
+.metric-value{font-size:29px;line-height:1.1;font-weight:750;margin-top:11px;font-variant-numeric:tabular-nums;letter-spacing:-.04em}
+.metric:first-child .metric-value{color:var(--mint)}
+.metric-detail{font-size:11px;color:#8fa5b6;margin-top:8px}
+.connection-panel{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:13px 16px;border-radius:11px;border:1px solid var(--edge);background:rgba(18,29,43,.78);font-size:12px;overflow-wrap:anywhere}
+#status{font-variant-numeric:tabular-nums;font-weight:650;padding-left:18px;position:relative;color:var(--muted)}
+#status:before{content:"";position:absolute;top:6px;left:0;width:8px;height:8px;border-radius:50%;background:#7895a6}
+#status.good:before{background:var(--mint);box-shadow:0 0 9px rgba(100,228,180,.7)}
+#status.bad:before{background:var(--red)}
+#authority{padding-left:18px;color:#a1b2c1}
+.quick{display:flex;gap:7px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;margin:22px 0 20px;padding:0 0 2px}
+.quick::-webkit-scrollbar{display:none}
+.quick a{flex-shrink:0;text-decoration:none;color:#b7c9d6;font-size:12px;font-weight:700;border:1px solid var(--edge);background:#142233;border-radius:8px;padding:10px 16px;transition:background .15s,border-color .15s}
+.quick a:hover,.quick a:focus-visible{background:#1b3145;border-color:#4b697d;color:#fff}
+main>section.panel{scroll-margin-top:86px}
+.panel{background:var(--surface);border:1px solid var(--edge);border-radius:15px;padding:21px 22px;margin:0 0 15px;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+.approved{background:linear-gradient(165deg,rgba(20,53,49,.45),#121e2c 42%);border-color:#335a55}
+.section-header{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:7px}
+.section-tag{padding:5px 9px;background:#203548;border:1px solid #305064;color:#abc9db;border-radius:7px;font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:800}
+.tag-mint{background:var(--mint-bg);color:var(--mint);border-color:#356c59}
+h2{font-size:17px;letter-spacing:-.025em;line-height:1.35;font-weight:730;margin:0;color:#f0f5f9}
+h3{font-size:13px;margin:22px 0 11px;font-weight:750;letter-spacing:.005em;color:#d6e7ed}
+h3 span{color:var(--mint);font-variant-numeric:tabular-nums}
+p{color:var(--muted);margin:7px 0 15px;font-size:12px;line-height:1.7}
+.inline-number{color:var(--mint);font-variant-numeric:tabular-nums}
+.detail-note{font-size:11px;color:#8099ab}
+.note{padding:11px 13px;background:#162637;border:1px solid #263b4e;border-radius:9px;margin:12px 0;font-size:12px;color:#c1cfda;overflow-wrap:anywhere}
+#verifiedSummary{background:var(--mint-bg);border-color:#315b4f;color:#a6edd0}
+#quote{font-variant-numeric:tabular-nums;line-height:1.8}
+.table-scroll{overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:13px 11px;border-bottom:1px solid #263648;vertical-align:middle}
+th{color:#8ca3b6;white-space:nowrap;font-size:10px;font-weight:800;letter-spacing:.065em;text-transform:uppercase}
+td{color:#d4e0e9;overflow-wrap:anywhere}
+td:first-child{font-weight:750;color:#f2f6fa;white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover td{background:rgba(141,182,211,.045)}
+button{font:inherit;font-size:11px;font-weight:750;cursor:pointer;padding:9px 12px;background:rgba(55,128,113,.19);border:1px solid #3a8573;border-radius:7px;color:#abf3d4;white-space:nowrap;min-height:38px}
+button:hover,button:focus-visible{background:#255c50;color:#fff}
+button:disabled{opacity:.4;cursor:default}
+.good,.text-mint,.state-buy{color:var(--mint)}
+.warn,.state-armed{color:var(--amber)}
+.bad{color:var(--red)}
+.state-watch{color:#f2df90}
+.state-buy,.state-armed,.state-watch{font-weight:800}
+.panel .table-scroll{margin-top:9px}
+code{word-break:break-word}
+.footer{margin:26px 0 0;color:#7f97a8;font-size:11px;text-align:center}
+:focus-visible{outline:2px solid #8bdac2;outline-offset:3px}
+@media(max-width:900px){
+ .app-shell{padding:0 18px 85px}
+ .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .header-meta .last-check{display:none}
+ .hero-stamp{display:none}
+}
+@media(max-width:700px){
+ html{scroll-padding-top:80px}
+ .app-shell{padding:0 13px calc(104px + env(safe-area-inset-bottom))}
+ .topbar{min-height:72px;gap:10px}
+ .brand{gap:10px}
+ .brand-mark{width:37px;height:37px;border-radius:10px}
+ h1{font-size:17px}
+ .header-meta{gap:7px}
+ .header-market{font-size:9px;padding:6px 8px}
+ .hero{padding:24px 3px 20px}
+ .hero h2{font-size:27px;margin:5px 0 10px}
+ .hero p{font-size:12px}
+ .metrics{gap:9px}
+ .metric{padding:13px;border-radius:11px}
+ .metric-label{font-size:9px;line-height:1.4}
+ .metric-value{font-size:27px;margin-top:8px}
+ .metric-detail{font-size:10px;margin-top:6px}
+ .connection-panel{padding:12px}
+ .quick{position:fixed;z-index:40;left:0;bottom:0;right:0;padding:8px 10px calc(9px + env(safe-area-inset-bottom));margin:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;background:rgba(10,17,29,.97);border-top:1px solid #2c3c4e;box-shadow:0 -8px 28px rgba(0,0,0,.23)}
+ .quick a{font-size:10px;text-align:center;line-height:1.25;padding:9px 2px;border-radius:8px;white-space:normal;display:grid;place-items:center;min-height:42px}
+ .panel{padding:16px 13px;border-radius:12px;margin-bottom:11px}
+ .section-header{align-items:flex-start}
+ h2{font-size:16px}
+ h3{margin:20px 0 9px;font-size:12px}
+ .note{padding:10px 11px;margin:11px 0}
+ table,thead,tbody,tr,td{box-sizing:border-box}
+ table,tbody{display:block;width:100%;min-width:0!important}
+ thead{display:none}
+ .table-scroll{overflow:visible}
+ tbody{display:grid;gap:9px;padding-top:8px}
+ tbody tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px 14px;background:#172637;border:1px solid #2a3d50;border-radius:10px;padding:13px;min-width:0}
+ .approved tbody tr{background:#162e32;border-color:#31534d}
+ tbody tr td{min-width:0;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:3px;border:0!important;padding:0!important;white-space:normal!important;line-height:1.45;font-size:12px}
+ tbody tr td:before{content:attr(data-label);color:#86a1b5;display:block;font-size:9px;font-weight:750;text-transform:uppercase;letter-spacing:.07em}
+ tbody tr td:first-child{grid-column:1/-1;font-size:16px;color:#fff;font-weight:800;padding-bottom:8px!important;border-bottom:1px solid #2e4655!important}
+ tbody tr td:first-child:before{content:"Pair";font-size:9px}
+ tbody tr td[data-label="Verify"]{grid-column:1/-1}
+ tbody tr td[data-label="Verify"] button{width:100%;margin-top:3px;font-size:12px}
+ tbody tr td[colspan]{grid-column:1/-1;font-size:12px!important;border:0!important;padding:3px 0!important;font-weight:500!important;color:#b3c6d5}
+ tbody tr td[colspan]:before{display:none}
+ tbody tr td[data-label="Execution blockers"],tbody tr td[data-label="Primary blocker"]{grid-column:1/-1}
+ .footer{margin-top:17px}
+}
+@media(max-width:370px){
+ .brand-mark{width:32px;height:32px}
+ h1{font-size:15px}
+ .version{font-size:9px}
+ .header-market{font-size:8px}
+ .quick a{font-size:9px}
+ tbody tr{gap:9px}
+}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+</style></head><body><div class="app-shell">
+<header class="topbar">
+ <div class="brand"><div class="brand-mark" aria-hidden="true"></div>
+  <div><div class="kicker">Market intelligence</div><h1>Live Scanner <span class="version">V15.31</span></h1></div></div>
+ <div class="header-meta"><span class="header-market">BINANCE SPOT · USDT</span><span class="last-check" id="lastUpdated">Checking feed…</span></div>
+</header>
+<main>
+<section class="hero" aria-label="Scanner overview"><div>
+ <div class="kicker">REAL-TIME MARKET OVERVIEW</div>
+ <h2>Clarity in every signal.</h2>
+ <p>Independent EMA, structural and ML analysis, with verified trade and order-book integrity. Signals are informational only: this scanner does not place orders.</p>
+</div><div class="hero-stamp">LIVE MARKET MONITOR · READ ONLY</div></section>
+<section class="metrics" aria-label="Live scan metrics">
+ <article class="metric"><div class="metric-label">Verified BUY NOW</div><div class="metric-value" id="metricVerified">0</div><div class="metric-detail">Read-time approved entries</div></article>
+ <article class="metric"><div class="metric-label">Buy structure</div><div class="metric-value" id="metricStructure">0</div><div class="metric-detail">Research setups only</div></article>
+ <article class="metric"><div class="metric-label">ML verified</div><div class="metric-value" id="metricMl">0</div><div class="metric-detail">Independent ML approvals</div></article>
+ <article class="metric"><div class="metric-label">Data integrity</div><div class="metric-value" id="metricFeed">Checking</div><div class="metric-detail">Freshness-aware live check</div></article>
 </section>
-<h2>On-demand quote check</h2><div id="quote" aria-live="polite">Select Verify on an active signal.</div>
-<h2>Live trade/book delivery — entire shortlisted universe</h2>
-<p>REQUESTED is not subscribed; only exchange acknowledgements and actual
-per-coin event timestamps confirm delivery. Quiet coins can have old trades.</p>
-<div id="subNote" class="warn">Checking worker subscriptions…</div>
-<table><thead><tr><th>Pair</th><th>Trade ACK</th><th>Book ACK</th>
-<th>Trade age</th><th>Book age</th><th>Delivery status</th></tr></thead>
-<tbody id="subRows"></tbody></table>
-<h2 id="buy-structure">BUY STRUCTURE · <span id="structureCount">0</span> setups</h2>
-<p>Independent V12 technical structure (BUY, ARMED, WATCH). A structural BUY is
-not an executable BUY NOW. Verified buys also appear above only after fresh
-read-time validation. V12 formal TP1 and ML estimated targets are labelled separately. Entry zones below are research references, not live quotes.</p>
-<div id="structureNote" class="warn" role="status">Checking formal structure…</div>
-<div class="table-scroll"><table><thead><tr><th>Pair</th><th>State</th>
-<th>Setup / frame</th><th>Entry zone</th><th>Stop</th><th>Target (source)</th>
-<th>Potential</th><th>Evidence age</th><th>Execution blockers</th></tr></thead>
-<tbody id="structureRows"></tbody></table></div>
-<h2 id="qualification">ML qualification — current decision, not buy instructions</h2>
-<p>NEAR BUY, DATA BLOCKED and MODEL REJECTED are diagnostic states, never execution approvals.</p>
-<div id="qualNote" class="warn">Checking qualification evidence…</div>
-<table><thead><tr><th>Pair</th><th>Engine</th><th>Status</th><th>Target</th><th>Primary blocker</th></tr></thead>
-<tbody id="qualRows"></tbody></table>
-<h2>Observed 10%+ rallies without prior approval</h2>
-<p>Only prices observed with verified live trade and book evidence while monitored;
-not all exchange gainers or a claim of a missed trade. Resets on scanner restart.</p>
-<div id="moverNote" class="warn">Waiting for verified tracking observations…</div>
-<table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead>
-<tbody id="moverRows"></tbody></table>
-<h2 id="research-section">Developing setups — highest-ranked</h2>
-<p>Based on cached 1H/4H/daily candles, not live quotes. Stable readings
-may repeat until Binance supplies a changed candle snapshot.</p>
-<div id="researchNote" class="warn" role="status">Checking source updates…</div>
-<table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead>
-<tbody id="research"></tbody></table>
-<h2>Additional near-EMA setups — rotating watch</h2>
-<p>Up to 10 different eligible near-EMA candidates rotate every 20 seconds.
-WATCH means not yet touching; repeated names are possible when the eligible pool is small.
-Research only — not BUY signals.</p>
-<table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead>
-<tbody id="rotating"></tbody></table>
+<div class="connection-panel">
+ <div id="status" role="status" aria-live="polite">Connecting to market feed…</div>
+ <div id="authority" role="status">Checking independent strategy authorities…</div>
+</div>
+<nav class="quick" aria-label="Dashboard sections">
+ <a href="#verified">Verified</a><a href="#buy-structure">Structure</a><a href="#qualification">ML review</a><a href="#research-section">Research</a><a href="#feed">Live feed</a>
+</nav>
+<section class="approved panel" id="verified">
+ <div class="section-header"><h2>Verified BUY NOW · <span class="inline-number" id="verifiedCount">0</span> active</h2><span class="section-tag tag-mint">Execution-grade check</span></div>
+ <p>Only read-time verified signals are shown here. A technical BUY structure alone is not an approved BUY NOW. Verify a fresh quote before considering an order.</p>
+ <div id="verifiedSummary" class="note" aria-live="polite">Checking live approvals…</div>
+ <h3>EMA verified lane · <span id="emaCount">0</span></h3>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="signals"></tbody></table></div>
+ <h3>Machine Learning verified lane · <span id="mlCount">0</span></h3>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Setup / duration</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="mlSignals"></tbody></table></div>
+ <h3>V12 Pinpoint verified lane · <span id="v12Count">0</span></h3>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Setup / frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="v12Signals"></tbody></table></div>
+</section>
+<section class="panel" id="quote-check">
+ <div class="section-header"><h2>On-demand quote verification</h2><span class="section-tag">Fresh validation</span></div>
+ <p>Select Verify on an approved signal. Quotes expire quickly and are never orders.</p>
+ <div id="quote" class="note" aria-live="polite">Select Verify on an active signal.</div>
+</section>
+<section class="panel" id="feed">
+ <div class="section-header"><h2>Live trade &amp; book delivery</h2><span class="section-tag">Data integrity</span></div>
+ <p>All shortlisted symbols. A requested subscription is not an acknowledged subscription; live event ages and sequence validation determine feed readiness.</p>
+ <div id="subNote" class="note">Checking worker subscriptions…</div>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Trade ACK</th><th>Book ACK</th><th>Trade age</th><th>Book age</th><th>Delivery status</th></tr></thead><tbody id="subRows"></tbody></table></div>
+</section>
+<section class="panel" id="buy-structure">
+ <div class="section-header"><h2>BUY STRUCTURE · <span class="inline-number" id="structureCount">0</span> setups</h2><span class="section-tag">Independent V12 lane</span></div>
+ <p>BUY, ARMED and WATCH structures remain separate from executable BUY NOW approvals. Entry zones are research references; formal V12 TP1 and ML estimated targets have different sources.</p>
+ <div id="structureNote" class="note" role="status">Checking formal structure…</div>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>State</th><th>Setup / frame</th><th>Entry zone</th><th>Stop</th><th>Target (source)</th><th>Potential</th><th>Evidence age</th><th>Execution blockers</th></tr></thead><tbody id="structureRows"></tbody></table></div>
+</section>
+<section class="panel" id="qualification">
+ <div class="section-header"><h2>Machine Learning qualification</h2><span class="section-tag">Decision audit</span></div>
+ <p>NEAR BUY, DATA BLOCKED and MODEL REJECTED are diagnostics, not trade approvals.</p>
+ <div id="qualNote" class="note">Checking qualification evidence…</div>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Engine</th><th>Status</th><th>Target</th><th>Primary blocker</th></tr></thead><tbody id="qualRows"></tbody></table></div>
+</section>
+<section class="panel" id="rallies">
+ <div class="section-header"><h2>Observed 10%+ rallies</h2><span class="section-tag">Learning audit</span></div>
+ <p>Verified monitored moves without a prior approval, not a full exchange gainer list. Tracking resets on scanner restart.</p>
+ <div id="moverNote" class="note">Waiting for verified tracking observations…</div>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead><tbody id="moverRows"></tbody></table></div>
+</section>
+<section class="panel" id="research-section">
+ <div class="section-header"><h2>Developing setups</h2><span class="section-tag">Ranked research</span></div>
+ <p>Highest-ranked near-EMA setups based on cached 1H/4H/daily candles, not live execution quotes. Unchanged snapshots can repeat.</p>
+ <div id="researchNote" class="note" role="status">Checking source updates…</div>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead><tbody id="research"></tbody></table></div>
+</section>
+<section class="panel" id="rotating-section">
+ <div class="section-header"><h2>Rotating near-EMA watch</h2><span class="section-tag">Opportunity monitor</span></div>
+ <p>Up to 10 other eligible symbols rotate every 20 seconds. WATCH and near-touch states are not verified BUY signals.</p>
+ <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead><tbody id="rotating"></tbody></table></div>
+</section>
+<p class="footer">LIVE SCANNER · BINANCE SPOT MONITORING · READ-ONLY SIGNAL RESEARCH</p>
+</main></div>
 <script>
 "use strict";
 const status=document.getElementById("status");
@@ -962,13 +1095,22 @@ const qualNote=document.getElementById("qualNote");
 const moverRows=document.getElementById("moverRows");
 const moverNote=document.getElementById("moverNote");
 const quote=document.getElementById("quote");
+const metricVerified=document.getElementById("metricVerified");
+const metricStructure=document.getElementById("metricStructure");
+const metricMl=document.getElementById("metricMl");
+const metricFeed=document.getElementById("metricFeed");
+const lastUpdated=document.getElementById("lastUpdated");
 let aliveUntil=0, token=0, requestPending=false;
 function cell(row,value){const td=document.createElement("td");
-  td.textContent=value==null?"—":String(value);row.appendChild(td);return td;}
+  td.textContent=value==null?"—":String(value);
+  const header=row.closest("table")?.querySelectorAll("thead th")[row.cells.length];
+  if(header)td.setAttribute("data-label",header.textContent.trim());
+  row.appendChild(td);return td;}
 function money(v){return typeof v==="number"?Number(v.toPrecision(9)).toString():"—";}
 function clear(el){while(el.firstChild)el.removeChild(el.firstChild);}
 function invalidate(){
   aliveUntil=0;verifiedCount.textContent="0";
+  metricVerified.textContent="0";metricStructure.textContent="0";metricMl.textContent="0";metricFeed.textContent="Offline";
   clear(structureRows);structureCount.textContent="0";
   structureNote.textContent="Structure evidence unavailable or expired";
   verifiedSummary.textContent="No currently verified signal; previous approvals are expired.";
@@ -1016,6 +1158,8 @@ async function refresh(){
       (d.expires_ms||0)-(d.server_time_ms||0)-(performance.now()-started)-150);
     const valid=d.fresh&&performance.now()<aliveUntil;
     status.className=valid?"good":"bad";
+    metricFeed.textContent=valid?"Live":"Stale";
+    lastUpdated.textContent=valid?"Checked "+new Date(d.server_time_ms).toLocaleTimeString():"Data stale";
     status.textContent=(valid?"LIVE: ":"STALE: ")+d.status
       +" | verified buys "+(valid?d.buy_count:0)
       +" | scan age "+d.snapshot_age_ms+"ms | cycles "+d.cycles
@@ -1047,10 +1191,13 @@ async function refresh(){
         cell(r,money(q.entry));cell(r,money(q.stop));
         cell(r,money(q.tp1));cell(r,money(q.tp2));cell(r,money(q.tp3));
         const td=r.insertCell(),b=document.createElement("button");
+        td.setAttribute("data-label","Verify");
         b.textContent="Verify quote";b.onclick=()=>verify(q.symbol);td.appendChild(b);
       }
     }
     verifiedCount.textContent=String(visible);
+    metricVerified.textContent=String(visible);
+    metricMl.textContent=String(valid?Number(laneGroups.ML.count.textContent):0);
     verifiedSummary.textContent=valid?
       visible+" read-time verified signals across EMA, ML and V12 lanes":
       "No current live quote; verification has expired";
@@ -1061,6 +1208,7 @@ async function refresh(){
       const bs=d.buy_structure_summary||{};
       const structural=d.buy_structure_rows||[];
       structureCount.textContent=String(structural.length);
+      metricStructure.textContent=String(structural.length);
       structureNote.textContent=(bs.structural_buy||0)+" structural BUY | "
         +(bs.armed||0)+" ARMED | "+(bs.watch||0)+" WATCH | "
         +"Only separately verified V12 signals qualify for BUY NOW.";
@@ -1071,7 +1219,8 @@ async function refresh(){
       for(const q of structural){
         const row=structureRows.insertRow();
         cell(row,q.symbol);
-        cell(row,q.status+(q.verified_buy_now?" ✓":" — NOT EXECUTION APPROVED"));
+        const stateCell=cell(row,q.status+(q.verified_buy_now?" ✓":" — NOT EXECUTION APPROVED"));
+        stateCell.className=q.status==="BUY"?"state-buy":q.status==="ARMED"?"state-armed":"state-watch";
         cell(row,q.setup+" / "+q.timeframe);
         cell(row,q.entry_low==null?"—":money(q.entry_low)+"–"+money(q.entry_high));
         cell(row,money(q.stop));
@@ -1089,8 +1238,8 @@ async function refresh(){
       for(const q of (d.subscription_rows||[])){
         const row=subRows.insertRow();
         cell(row,q.symbol);
-        cell(row,q.trade_ack?"YES":"NO");
-        cell(row,q.book_ack?"YES":"NO");
+        const tradeCell=cell(row,q.trade_ack?"YES":"NO");tradeCell.className=q.trade_ack?"good":"bad";
+        const bookCell=cell(row,q.book_ack?"YES":"NO");bookCell.className=q.book_ack?"good":"bad";
         cell(row,q.trade_age_ms==null?"—":q.trade_age_ms+"ms");
         cell(row,q.book_age_ms==null?"—":q.book_age_ms+"ms");
         cell(row,q.status);
@@ -1103,7 +1252,8 @@ async function refresh(){
         ||"No current ML decisions");
       for(const q of (d.qualification_rows||[])){
         const r=qualRows.insertRow();
-        cell(r,q.symbol);cell(r,q.lane);cell(r,q.state);
+        cell(r,q.symbol);cell(r,q.lane);const decisionCell=cell(r,q.state);
+        decisionCell.className=q.state==="BUY"?"state-buy":q.state==="ARMED"?"state-armed":"";
         cell(r,(q.target_pct==null?"—":q.target_pct+"%"));
         const b=(q.blockers||[]).slice(0,2).join(", ");
         cell(r,(q.setup_not_confirmed?"SETUP NOT CONFIRMED; ":"FORMAL "+(q.structural_state||"STRUCTURE")+"; ")+(b||"—"));
@@ -1147,14 +1297,14 @@ async function refresh(){
     }else{
       researchNote.textContent="Candle evidence unavailable — no current research results";
     }
-  }catch(e){status.className="bad";status.textContent=(responseOk?"DASHBOARD DISPLAY ERROR: ":"CONNECTION UNAVAILABLE: ")+e.message;
+  }catch(e){status.className="bad";metricFeed.textContent="Offline";lastUpdated.textContent="Disconnected";status.textContent=(responseOk?"DASHBOARD DISPLAY ERROR: ":"CONNECTION UNAVAILABLE: ")+e.message;
     invalidate();clear(research);clear(rotating);clear(subRows);clear(qualRows);clear(moverRows);
     subNote.textContent="Disconnected";qualNote.textContent="Disconnected";moverNote.textContent="Disconnected";
     researchNote.textContent="Connection lost — no fresh research";}
   finally{requestPending=false;setTimeout(refresh,850);}
 }
 setInterval(()=>{if(aliveUntil&&performance.now()>=aliveUntil){
-  status.className="bad";status.textContent="EXPIRED — refreshing; no active quote";
+  status.className="bad";metricFeed.textContent="Stale";lastUpdated.textContent="Expired";status.textContent="EXPIRED — refreshing; no active quote";
   invalidate();}},150);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
 refresh();
