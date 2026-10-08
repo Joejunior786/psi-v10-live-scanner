@@ -54,6 +54,36 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(len(feed._EVENTS), 2)
         self.assertFalse(live["order_placement"])
 
+    def test_verified_ema_signals_have_an_independent_lane(self):
+        feed.publish_once(1000000)
+        live=feed.read_live(1000000)
+        self.assertEqual(len(live["verified_lanes"]["EMA"]),2)
+        self.assertEqual(live["verified_lane_counts"]["EMA"],2)
+        self.assertEqual(live["verified_lane_counts"]["ML"],0)
+        self.assertEqual(live["verified_lane_counts"]["V12"],0)
+        self.assertEqual(live["buy_count"],sum(live["verified_lane_counts"].values()))
+        self.assertFalse(live["order_placement"])
+
+    def test_all_authorities_keep_distinct_verified_lanes(self):
+        rows=[{"symbol":"AUSDT","authority":"EMA","lane":"EMA"},
+              {"symbol":"AUSDT","authority":"V15_ML","lane":"BEAST"},
+              {"symbol":"BUSDT","authority":"V12_PINPOINT","lane":"BREAKOUT"}]
+        groups=feed._group_verified_signals(rows)
+        self.assertEqual([len(groups[k]) for k in ("EMA","ML","V12")],[1,1,1])
+        self.assertEqual(groups["ML"][0]["lane"],"BEAST")
+        self.assertEqual(groups["V12"][0]["symbol"],"BUSDT")
+        self.assertEqual(rows[1]["authority"],"V15_ML")
+
+    def test_revoked_or_expired_signals_leave_all_verified_lanes(self):
+        feed.publish_once(1000000)
+        self.micro["book_sequence_verified"]=False
+        revoked=feed.read_live(1001000)
+        self.assertEqual(revoked["buy_count"],0)
+        self.assertTrue(all(not v for v in revoked["verified_lanes"].values()))
+        expired=feed.read_live(1005000)
+        self.assertEqual(expired["buy_count"],0)
+        self.assertTrue(all(not v for v in expired["verified_lanes"].values()))
+
     def test_no_duplicates_on_repeated_fast_ticks(self):
         feed.publish_once(1000000)
         feed.publish_once(1001000)
@@ -101,7 +131,7 @@ class FeedTests(unittest.TestCase):
         row = feed.publish_once(1000000)
         live = feed.read_live(1000000)
         msg = feed.signal_tick_line(row, live, 42)
-        self.assertTrue(msg.startswith("PSI-V15.29 SIGNAL_TICK "))
+        self.assertTrue(msg.startswith("PSI-V15.30 SIGNAL_TICK "))
         data = json.loads(msg.split("SIGNAL_TICK ", 1)[1])
         self.assertEqual(data["generated_ms"], 1000000)
         self.assertEqual(data["verified_at_ms"], 1000000)
