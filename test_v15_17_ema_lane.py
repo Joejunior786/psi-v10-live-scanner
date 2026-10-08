@@ -63,6 +63,19 @@ class EMATests(unittest.TestCase):
         records[0][1]["status"]="PRE-IGNITION"
         rows,h,_=lane.select_ema_report(records,h,3)
         self.assertEqual(rows[0][2],"IMPROVING")
+    def test_marginal_buyer_strength_now_qualifies(self):
+        case=snap(buy_ratio=.525,buy_ratio_3=.515,lower_wick=.21,close_strength=.56)
+        self.assertTrue(all(x["status"]=="BUY NOW — EMA" for x in lane.evaluate(case,"1h",1000,1000,GOOD,FLOW)))
+    def test_weak_buying_still_blocked(self):
+        case=snap(buy_ratio=.49,buy_ratio_3=.48)
+        self.assertTrue(all(x["status"]!="BUY NOW — EMA" for x in lane.evaluate(case,"1h",1000,1000,GOOD,FLOW)))
+    def test_invalid_sequence_still_blocks(self):
+        bad=dict(FLOW,book_sequence_verified=False)
+        self.assertTrue(all(x["status"]!="BUY NOW — EMA" for x in lane.evaluate(snap(),"1h",1000,1000,GOOD,bad)))
+    def test_marginal_risk_plan_accepted(self):
+        case=snap(low=96.1,atr=1.0)
+        outcome=lane.evaluate(case,"1h",1000,1000,GOOD,FLOW)
+        self.assertTrue(all(x["status"]=="BUY NOW — EMA" for x in outcome))
     def test_missing_data_rejected(self):
         self.assertFalse(any(v["status"]=="BUY NOW — EMA" for v in lane.evaluate(snap(),"1h",1000,1000,{},FLOW)))
     def test_seller_not_exhausted(self):
