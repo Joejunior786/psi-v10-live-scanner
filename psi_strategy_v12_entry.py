@@ -248,6 +248,12 @@ def _refresh_micro_snapshots_sync(force=False):
                 "events":int(snap.get("events") or 0),
                 "host":snap.get("host"),
                 "publish_raw":bool(snap.get("publish_raw")),
+                "requested_symbols":frozenset(
+                    str(x).upper() for x in snap.get("requested_symbols",[]) or []
+                ),
+                "acknowledged_symbols":frozenset(
+                    str(x).upper() for x in snap.get("subscription_acknowledged_symbols",[]) or []
+                ),
             }
             valid+=1
         _redis_bridge_stats["micro_snapshot_sync_ok"]+=1
@@ -383,6 +389,61 @@ def _snapshot_micro_metrics(symbol):
         "snapshot_book_age_ms":book_age,
         "snapshot_transport_ms":max(trade_transport,book_transport),
     }
+
+
+def _subscription_telemetry(symbol, at_ms=None):
+    """End-to-end worker acknowledgement + genuine Binance event ages.
+
+    Requested is not subscribed. Only the Binance SUBSCRIBE acknowledgement
+    sets acknowledged; only a received event sets each event timestamp.
+    Never derive event age from a Redis snapshot or the scanner cycle clock.
+    """
+    _refresh_micro_snapshots_sync()
+    sym=str(symbol or "").upper()
+    now=int(time.time()*1000) if at_ms is None else int(at_ms)
+    result={"symbol":sym,"control_requested":sym in _distributed_micro_sticky_pool}
+    for role,cache in (("trade",_distributed_micro_trade),
+                       ("book",_distributed_micro_book)):
+        key=role.upper()
+        meta=_distributed_micro_meta.get(key) or {}
+        item=cache.get(sym) or {}
+        generated=int(meta.get("generated_ms") or 0)
+        transport_age=now-generated if generated>0 else -1
+        snapshot_valid=0<=transport_age<=3000
+        requested=snapshot_valid and sym in meta.get("requested_symbols",())
+        acknowledged=snapshot_valid and sym in meta.get("acknowledged_symbols",())
+        event_ms=int(item.get("last_"+role+"_ms") or 0)
+        event_age=now-event_ms if event_ms>0 else None
+        metric_valid=(snapshot_valid and int(item.get("_snapshot_ms") or 0)==generated)
+        result[role+"_requested"]=bool(requested)
+        result[role+"_acknowledged"]=bool(acknowledged)
+        result[role+"_snapshot_age_ms"]=transport_age if snapshot_valid else None
+        result[role+"_event_ms"]=event_ms if metric_valid and event_ms>0 else None
+        result[role+"_age_ms"]=event_age if metric_valid and event_age is not None and event_age>=0 else None
+        seq_key="sequence_verified" if role=="trade" else "book_sequence_verified"
+        result[role+"_sequence_verified"]=bool(metric_valid and item.get(seq_key))
+    ta=result["trade_age_ms"];ba=result["book_age_ms"]
+    if not result["control_requested"]:
+        reason="NOT_IN_CONTROL_POOL"
+    elif not result["trade_requested"] or not result["book_requested"]:
+        reason="WORKER_NOT_SUBSCRIBED"
+    elif not result["trade_acknowledged"] or not result["book_acknowledged"]:
+        reason="AWAIT_BINANCE_SUBSCRIBE_ACK"
+    elif ta is None:
+        reason="AWAIT_REAL_TRADE_EVENT"
+    elif ba is None:
+        reason="AWAIT_REAL_BOOK_EVENT"
+    elif ta>1200:
+        reason="STALE_TRADE_EVENT"
+    elif ba>1200:
+        reason="STALE_BOOK_EVENT"
+    elif not result["trade_sequence_verified"] or not result["book_sequence_verified"]:
+        reason="SEQUENCE_WARMUP"
+    else:
+        reason="TRADE_BOOK_ALIGNED"
+    result["status"]=reason
+    result["evidence_aligned"]=reason=="TRADE_BOOK_ALIGNED"
+    return result
 
 
 def _snapshot_current_symbol_price(symbol):
@@ -3307,8 +3368,10 @@ async def strategy_loop():
 
 _distributed_micro_sticky_pool = []
 _distributed_micro_pool_epoch = 0
-REDIS_MICRO_PRIORITY_SLOTS = max(
-    8, min(int(os.getenv("PSI_MICRO_PRIORITY_SLOTS", "24")), REDIS_MICRO_POOL_SIZE)
+REDIS_MICRO_PRIORITY_SLOTS = min(
+    REDIS_MICRO_POOL_SIZE,
+    max(min(36, REDIS_MICRO_POOL_SIZE),
+        int(os.getenv("PSI_MICRO_PRIORITY_SLOTS", "40"))),
 )
 REDIS_MICRO_ROTATION_SLOTS = max(
     2, min(int(os.getenv("PSI_MICRO_ROTATION_SLOTS", "8")), REDIS_MICRO_POOL_SIZE)
