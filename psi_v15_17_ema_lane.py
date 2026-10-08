@@ -93,13 +93,31 @@ def print_board(*args, **kwargs):
     if CORE is None:
         return original
     records = []
-    for symbol, row in list(CORE._results.items()):
-        for item in row.get("ema_signal_lane") or []:
-            records.append((symbol, item))
+    covered = 0
+    now = time.time()
+    # Discovery is independent: use every fresh cached Binance candle snapshot,
+    # including symbols excluded from the normal structural top list.
+    for symbol, frames in list(CORE._cache.items()):
+        if not isinstance(frames, dict):
+            continue
+        for tf, _, _ in FRAMES:
+            frame = frames.get(tf) or {}
+            snap = frame.get("snap")
+            if isinstance(snap, dict) and num(frame.get("updated")) > 0:
+                covered += 1
+                # Discovery-only telemetry does not grant execution authority.
+                for item in evaluate(snap, tf, num(frame.get("updated")), now, {}, {}):
+                    records.append((symbol, item))
+    # Overlay exact execution-grade decisions when their safety evidence exists.
+    evidence = {(symbol, item["timeframe"], item["ema_period"]): item
+                for symbol, row in list(CORE._results.items())
+                for item in row.get("ema_signal_lane") or []}
+    records = [(symbol, evidence.get((symbol, item["timeframe"], item["ema_period"]), item))
+               for symbol, item in records]
     touches = [r for r in records if r[1]["touch"]]
     buys = [r for r in touches if r[1]["status"] == "BUY NOW — EMA"]
     print(
-        f"Ψ-V15.17 EMA_SIGNAL_LANE evaluated={len(records)} "
+        f"Ψ-V15.17 EMA_SIGNAL_LANE candleFrames={covered} evaluated={len(records)} "
         f"touches={len(touches)} buys={len(buys)} "
         f"approaching={len(records)-len(touches)}",
         flush=True,
