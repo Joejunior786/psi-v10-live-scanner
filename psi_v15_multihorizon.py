@@ -1130,7 +1130,7 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers, entry_plan=Non
     if bool(structural.get("anti_chase")) or location == "CHASING":
         return "DO NOT CHASE", False, ["ANTI_CHASE"]
 
-    if opp["target_pct"] < MIN_TRADE_TARGET_PCT:
+    if _f(opp.get("target_pct")) < MIN_TRADE_TARGET_PCT:
         return "REJECT", False, ["TARGET_BELOW_10_PERCENT"]
     ready_model = opp["samples"] >= MIN_MODEL_SAMPLES or (
         opp["model_source"] not in {"LEARNING"} and opp["samples"] >= MIN_SPECIALIST_SAMPLES
