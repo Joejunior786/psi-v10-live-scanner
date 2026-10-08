@@ -17,6 +17,7 @@ import psi_v14_pinpoint as upgrade_v14
 import psi_v14_perf_fix as upgrade_v14_perf
 import psi_v15_multihorizon as upgrade_v15
 import psi_v15_17_ema_lane as upgrade_v1517
+import psi_v15_21_signal_delivery as signal_v1521
 from psi_runtime_liveness import install_start_once
 
 OUTCOME_LEARNING_RUNTIME = "validated-clean-entry-v2"
@@ -58,6 +59,7 @@ async def main():
     upgrade_v14_perf.install(upgrade_v14)
     upgrade_v15.install(core, upgrade_v13, outcome_learning, upgrade_v14)
     upgrade_v1517.install(core)
+    signal_v1521.install(core, upgrade_v1517)
 
     # Bind the existing aiohttp server immediately so Railway's /live probe
     # reflects process liveness, while the inherited scanner bootstraps in
@@ -95,6 +97,9 @@ async def main():
     )
     control_threads.append(
         _start_async_daemon("psi-v15-17-ema-report", upgrade_v1517.reporting_supervisor)
+    )
+    control_threads.append(
+        _start_async_daemon("psi-v15-21-live-feed", signal_v1521.supervisor_loop)
     )
     print(
         "PSI-CONTROL-PLANE isolated threads="
