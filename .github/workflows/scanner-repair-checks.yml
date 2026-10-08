@@ -1,0 +1,20 @@
+name: Scanner repair checks
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [repair/micro-liveness-20261008]
+  workflow_dispatch:
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python -m compileall -q psi_micro_worker.py psi_strategy_v12_entry.py test_micro_liveness.py
+      - run: python -m unittest -v test_micro_liveness.py test_micro_stability.py test_v12_execution_gate.py

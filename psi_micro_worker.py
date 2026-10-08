@@ -8,7 +8,7 @@ from typing import List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "12.3.4-distributed-micro-rotation5"
+WORKER_VERSION = "12.3.5-distributed-micro-liveness"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -518,6 +518,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     last_snapshot = 0.0
     last_control = 0.0
     last_rebalance = 0.0
+    last_inbound_at = time.monotonic()
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
     active = {str(s).upper() for s in symbols if str(s).upper().endswith("USDT")}
     activated_at = {sym: time.monotonic() for sym in active}
@@ -555,8 +556,25 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
         last_control=time.monotonic()
         last_rebalance=last_control
 
-        async for msg in ws:
+        # Keep subscriptions and telemetry alive even during quiet feeds.
+        while not ws.closed:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+            except asyncio.TimeoutError:
+                msg = None
             now = time.monotonic()
+            if msg is not None and msg.type == aiohttp.WSMsgType.TEXT:
+                last_inbound_at = now
+            # A connected socket without any inbound frames is not a healthy
+            # market feed. Reconnect to the next configured Binance host.
+            if now - last_inbound_at > 45.0:
+                raise RuntimeError(f"silent websocket role={ROLE} age={now-last_inbound_at:.1f}s")
+            if now - last_snapshot >= SNAPSHOT_INTERVAL:
+                await publish_snapshot(r, sorted(active), states, events, host)
+                last_snapshot = now
+            if now - last_hb >= 3.0:
+                await publish_heartbeat(r, sorted(active), events, host)
+                last_hb = now
 
             # A control-list refresh is only a request. The worker applies it
             # through a bounded churn circuit breaker so warm sequence/history
@@ -615,6 +633,8 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                     )
                 last_control=now
 
+            if msg is None:
+                continue
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     envelope = json.loads(msg.data)

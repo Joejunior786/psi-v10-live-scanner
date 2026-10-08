@@ -3436,7 +3436,23 @@ async def redis_control_loop():
                 )
                 _redis_bridge_stats["universe_symbols"] = len(universe)
 
+                # Prioritize active structural BUY setups for fresh risk candles.
+                # Otherwise discovery/monster candidates can exhaust the bounded
+                # RiskMap slots before the execution authority sees valid plans.
                 risk_symbols=[]
+                try:
+                    for row in _board():
+                        if not isinstance(row, dict) or str(row.get("state") or "").upper() != "BUY":
+                            continue
+                        sym=str(row.get("symbol") or "").upper()
+                        if sym.endswith("USDT") and sym not in risk_symbols:
+                            risk_symbols.append(sym)
+                        if len(risk_symbols)>=REDIS_RISK_CONTROL_SIZE:
+                            break
+                except Exception as exc:
+                    _redis_bridge_stats["risk_priority_errors"] = (
+                        _redis_bridge_stats.get("risk_priority_errors", 0) + 1
+                    )
                 try:
                     provider=getattr(legacy,"_monster_risk_priority",None)
                     if callable(provider):
@@ -3447,7 +3463,9 @@ async def redis_control_loop():
                             if len(risk_symbols)>=REDIS_RISK_CONTROL_SIZE:
                                 break
                 except Exception:
-                    risk_symbols=[]
+                    _redis_bridge_stats["monster_risk_priority_errors"] = (
+                        _redis_bridge_stats.get("monster_risk_priority_errors", 0) + 1
+                    )
                 # Formal/Monster risk priorities claim first slots, then
                 # fill the remaining local RiskMap capacity from the current
                 # execution micro pool. This changes scheduling only; RiskMap
