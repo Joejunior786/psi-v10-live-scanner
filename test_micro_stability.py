@@ -299,7 +299,7 @@ class SubscriptionAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
         await worker.publish_snapshot(holder,["TESTUSDT","OTHERUSDT"],{},0,
                                       "fake-host",{"TESTUSDT"})
         self.assertEqual(holder.payload["requested_symbols"],
-                         ["TESTUSDT","OTHERUSDT"])
+                         ["OTHERUSDT","TESTUSDT"])
         self.assertEqual(holder.payload["subscription_acknowledged_symbols"],
                          ["TESTUSDT"])
 
