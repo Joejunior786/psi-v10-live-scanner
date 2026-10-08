@@ -14,6 +14,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.seen_seed = set(v15._seen_seed)
         self.lane_stats = dict(v15._lane_stats)
         self.board = list(v15._board)
+        self.signal_journal = list(v15._signal_journal)
+        self.signal_seen = set(v15._signal_seen)
         self.core, self.v13, self.outcome, self.v14 = v15.CORE, v15.V13, v15.OUTCOME, v15.V14
         v15._models.clear()
         v15._pending.clear()
@@ -22,6 +24,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._seen_seed.clear()
         v15._lane_stats.clear()
         v15._board.clear()
+        v15._signal_journal.clear()
+        v15._signal_seen.clear()
 
     def tearDown(self):
         v15._models.clear(); v15._models.update(self.models)
@@ -31,6 +35,8 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._seen_seed.clear(); v15._seen_seed.update(self.seen_seed)
         v15._lane_stats.clear(); v15._lane_stats.update(self.lane_stats)
         v15._board[:] = self.board
+        v15._signal_journal[:] = self.signal_journal
+        v15._signal_seen.clear(); v15._signal_seen.update(self.signal_seen)
         v15.CORE, v15.V13, v15.OUTCOME, v15.V14 = self.core, self.v13, self.outcome, self.v14
 
     def sensor(self, now=1_000_000):
@@ -199,6 +205,53 @@ class V15MultiHorizonTests(unittest.TestCase):
             self.assertTrue(all(r["execution_ready"] for r in board[:10]))
         finally:
             v15._entry_action = original
+
+
+    def test_trade_scorecard_records_and_resolves_target_with_time_accuracy(self):
+        now = 2_000_000_000_000
+        row = {
+            "symbol": "AAAUSDT", "lane": "BEAST", "action": "ML BUY NOW",
+            "reference_entry": 100.0, "dynamic_stop": 97.0,
+            "selected_target_pct": 3.0, "selected_target_price": 103.0,
+            "selected_horizon": "4h", "expected_time_ms": 2 * 3600_000,
+            "expected_time_to_target": "2 hours", "expected_time_range": "1–4 hours",
+            "probability": .62, "expected_value_pct": 1.8, "model_samples": 100,
+            "model_source": "BEAST", "promotion_ready": True,
+        }
+        self.assertEqual(v15._record_trade_signals([row], now), 1)
+        v15.V13 = types.SimpleNamespace(_rows=lambda: [
+            dict(self.sensor(now + 3600_000), symbol="AAAUSDT", entry_reference=104.0)
+        ])
+        v15.CORE = types.SimpleNamespace(q=types.SimpleNamespace(latest={}))
+        self.assertEqual(v15._update_trade_scorecard(now + 3600_000), 1)
+        score = v15._trade_scorecard()["buy_now"]
+        self.assertEqual(score["resolved"], 1)
+        self.assertEqual(score["correct_target_hits"], 1)
+        self.assertEqual(score["target_hit_within_predicted_time"], 1)
+        self.assertEqual(score["win_rate"], 1.0)
+
+    def test_trade_scorecard_timeout_is_incorrect(self):
+        now = 2_100_000_000_000
+        row = {
+            "symbol": "BBBUSDT", "lane": "HTF_SWING", "action": "ML SHADOW BUY",
+            "reference_entry": 100.0, "dynamic_stop": 95.0,
+            "selected_target_pct": 10.0, "selected_target_price": 110.0,
+            "selected_horizon": "1h", "expected_time_ms": 30 * 60_000,
+            "expected_time_to_target": "30 min", "expected_time_range": "15 min–1 hours",
+            "probability": .55, "expected_value_pct": 2.0, "model_samples": 90,
+            "model_source": "HTF_SWING", "promotion_ready": False,
+        }
+        v15._record_trade_signals([row], now)
+        v15.V13 = types.SimpleNamespace(_rows=lambda: [
+            dict(self.sensor(now + 3600_000), symbol="BBBUSDT", entry_reference=101.0)
+        ])
+        v15.CORE = types.SimpleNamespace(q=types.SimpleNamespace(latest={}))
+        v15._update_trade_scorecard(now + 3600_000)
+        score = v15._trade_scorecard()["shadow_buy"]
+        self.assertEqual(score["resolved"], 1)
+        self.assertEqual(score["incorrect"], 1)
+        self.assertEqual(score["correct_target_hits"], 0)
+
 
 
 if __name__ == "__main__":
