@@ -3381,7 +3381,7 @@ REDIS_MICRO_ROTATION_PERIOD_S = max(
 )
 
 
-def _distributed_micro_symbols():
+def _distributed_micro_symbols(priority_snapshot=None):
     """Stable execution micro pool.
 
     Discovery remains full-universe. This pool is intentionally sticky so
@@ -3403,9 +3403,14 @@ def _distributed_micro_symbols():
 
     # Reserve real micro priority slots for ML and EMA before the inherited
     # structural pool. These affect subscriptions, NEVER buy authority.
-    # Keep all 36 specialist observation subscriptions, not only 16.
-    # Priority is capped by the actual micro pool; BUY approval stays separate.
-    for sym in list(globals().get("_signal_priority_symbols", []) or [])[:min(36, REDIS_MICRO_PRIORITY_SLOTS)]:
+    # Freeze the full priority cohort for each control transaction.
+    # The ML publishing thread may replace the global list at any instant.
+    # Selector and reconciliation must use the *same* immutable snapshot.
+    priority_snapshot = (
+        tuple(globals().get("_signal_priority_symbols", []) or [])
+        if priority_snapshot is None else tuple(priority_snapshot)
+    )
+    for sym in priority_snapshot[:min(36, REDIS_MICRO_PRIORITY_SLOTS)]:
         add_desired(sym)
     for sym in list(globals().get("_ema_priority_symbols", []) or [])[:6]:
         add_desired(sym)
@@ -3527,10 +3532,11 @@ async def redis_control_loop():
             last_logged_symbols = None
             last_priority_diag = 0.0
             while True:
-                symbols = _distributed_micro_symbols()
+                priority_snapshot=tuple(globals().get("_signal_priority_symbols",[]) or [])
+                symbols = _distributed_micro_symbols(priority_snapshot=priority_snapshot)
                 now_mono = time.monotonic()
                 if now_mono - last_priority_diag >= 10:
-                    monitored=list(globals().get("_signal_priority_symbols",[]) or [])
+                    monitored=list(priority_snapshot)
                     selected=set(symbols)
                     universe=set(getattr(q,"universe",[]) or [])
                     missing=[x for x in monitored if x not in selected]
