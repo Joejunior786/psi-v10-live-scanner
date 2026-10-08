@@ -257,6 +257,45 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(feed.read_live(1003300)["buy_structure_rows"],[])
         self.assertEqual(feed.read_live(1005000)["buy_structure_rows"],[])
 
+
+    def test_confirmed_v12_structure_via_ml_has_own_lane(self):
+        self.micro["spread_bps"]=None
+        self.core._board=lambda: []
+        ml=SimpleNamespace(_last_board_ms=1000000,_board=[
+            dict(symbol="TESTUSDT",setup_verification="UPSTREAM_STRUCTURAL",
+                 structural_state="BUY",setup="4H_SUPPORT_RECLAIM",
+                 timeframe="4H",price=100,entry_low=98,entry_high=102,
+                 invalidation=95,selected_target_price=115,
+                 action="REJECT",blockers=["MODEL_EV_BLOCK"]),
+            dict(symbol="SHADOWUSDT",setup_verification="PROVISIONAL_SENSOR",
+                 structural_state="BUY",setup="SENSOR_SHADOW",
+                 price=100,entry_low=98,entry_high=102,invalidation=95,
+                 selected_target_price=115)])
+        with patch.object(feed,"ML",ml):
+            feed.publish_once(1000000)
+            live=feed.read_live(1000000)
+        self.assertEqual(live["buy_structure_summary"]["structural_buy"],1)
+        self.assertEqual(len(live["buy_structure_rows"]),1)
+        row=live["buy_structure_rows"][0]
+        self.assertEqual(row["symbol"],"TESTUSDT")
+        self.assertEqual(row["source"],"V12_CONFIRMED_VIA_ML")
+        self.assertEqual(row["target_source"],"ML_MODEL_TARGET_NOT_V12_TP")
+        self.assertFalse(row["verified_buy_now"])
+        self.assertEqual(live["buy_count"],0)
+
+    def test_stale_ml_confirmation_is_not_a_structural_buy(self):
+        self.core._board=lambda: []
+        ml=SimpleNamespace(_last_board_ms=970000,_board=[
+            dict(symbol="TESTUSDT",setup_verification="UPSTREAM_STRUCTURAL",
+                 structural_state="BUY",setup="SUPPORT_RECLAIM",
+                 price=100,entry_low=98,entry_high=102,
+                 invalidation=95,selected_target_price=115)])
+        with patch.object(feed,"ML",ml):
+            feed.publish_once(1000000)
+            live=feed.read_live(1000000)
+        self.assertEqual(live["buy_structure_rows"],[])
+        self.assertEqual(live["buy_structure_summary"]["structural_buy"],0)
+
     def test_dashboard_has_separate_buy_structure_board(self):
         html=feed._DASHBOARD
         self.assertIn('id="buy-structure"',html)

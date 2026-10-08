@@ -370,6 +370,35 @@ def _buy_structure_report(now_ms):
         formal = list(CORE._board() or []) if CORE is not None else []
     except (AttributeError, TypeError, ValueError):
         formal = []
+    # ML's UPSTREAM_STRUCTURAL rows are backed by the *same real V12
+    # evaluator*, including its on-demand refresh from 1H/4H/Daily candles.
+    # They are a separate display source, not model-invented structure and
+    # never imply a V12 execution approval. No sensor shadow is admitted.
+    if ML is not None:
+        ml_time = int(EMA.num(getattr(ML, "_last_board_ms", 0)))
+        if 0 <= now_ms - ml_time <= SOURCE_DECISION_MAX_AGE_MS:
+            for candidate in list(getattr(ML, "_board", []) or []):
+                if not isinstance(candidate, dict) or (
+                    candidate.get("setup_verification") != "UPSTREAM_STRUCTURAL"
+                ):
+                    continue
+                formal.append({
+                    "symbol":candidate.get("symbol"),
+                    "state":candidate.get("structural_state"),
+                    "setup":candidate.get("setup"),
+                    "timeframe":candidate.get("timeframe"),
+                    "generated_ms":ml_time,
+                    "setup_strength":candidate.get("setup_strength"),
+                    "current":candidate.get("price"),
+                    "entry_low":candidate.get("entry_low"),
+                    "entry_high":candidate.get("entry_high"),
+                    "invalidation":candidate.get("invalidation"),
+                    "tp1":candidate.get("selected_target_price"),
+                    "execution_state":candidate.get("structural_execution_state"),
+                    "execution_blockers":candidate.get("blockers"),
+                    "setup_source":"V12_CONFIRMED_VIA_ML",
+                    "target_source":"ML_MODEL_TARGET_NOT_V12_TP",
+                })
     rows, seen = [], set()
     counts = {"BUY": 0, "ARMED": 0, "WATCH": 0}
     for item in formal:
@@ -399,6 +428,8 @@ def _buy_structure_report(now_ms):
             blockers = ["RISK_LEVELS_UNAVAILABLE"] + blockers
         rows.append({
             "symbol":symbol, "setup":setup,
+            "source":str(item.get("setup_source") or "V12_DIRECT"),
+            "target_source":str(item.get("target_source") or "V12_TP1"),
             "timeframe":str(item.get("timeframe") or "?"),
             "state":state, "status":"STRUCTURE "+state,
             "execution_state":str(item.get("execution_state") or "NOT_APPROVED"),
@@ -877,10 +908,10 @@ per-coin event timestamps confirm delivery. Quiet coins can have old trades.</p>
 <h2 id="buy-structure">BUY STRUCTURE · <span id="structureCount">0</span> setups</h2>
 <p>Independent V12 technical structure (BUY, ARMED, WATCH). A structural BUY is
 not an executable BUY NOW. Verified buys also appear above only after fresh
-read-time validation. Entry zones below are research references, not live quotes.</p>
+read-time validation. V12 formal TP1 and ML estimated targets are labelled separately. Entry zones below are research references, not live quotes.</p>
 <div id="structureNote" class="warn" role="status">Checking formal structure…</div>
 <div class="table-scroll"><table><thead><tr><th>Pair</th><th>State</th>
-<th>Setup / frame</th><th>Entry zone</th><th>Stop</th><th>TP1</th>
+<th>Setup / frame</th><th>Entry zone</th><th>Stop</th><th>Target (source)</th>
 <th>Potential</th><th>Evidence age</th><th>Execution blockers</th></tr></thead>
 <tbody id="structureRows"></tbody></table></div>
 <h2 id="qualification">ML qualification — current decision, not buy instructions</h2>
@@ -1043,7 +1074,8 @@ async function refresh(){
         cell(row,q.status+(q.verified_buy_now?" ✓":" — NOT EXECUTION APPROVED"));
         cell(row,q.setup+" / "+q.timeframe);
         cell(row,q.entry_low==null?"—":money(q.entry_low)+"–"+money(q.entry_high));
-        cell(row,money(q.stop));cell(row,money(q.tp1));
+        cell(row,money(q.stop));
+        cell(row,money(q.tp1)+" / "+(q.target_source==="V12_TP1"?"V12 TP1":"ML estimate"));
         cell(row,q.potential_pct==null?"—":q.potential_pct+"%");
         cell(row,q.source_age_ms==null?"—":q.source_age_ms+"ms");
         cell(row,q.verified_buy_now?"NONE":
