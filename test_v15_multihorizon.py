@@ -66,13 +66,12 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("STALE_TRADE", blockers)
 
-    def test_positive_ev_below_fifty_percent_can_buy(self):
-        x = v15._features_from_sensor(self.sensor(), {})
+    def _positive_ev_models(self, validated=False):
         p = 0.45
         bias = math.log(p / (1 - p))
         for h in v15.HORIZON_ORDER:
-            for t in v15.TARGETS:
-                m = v15._model("BEAST", h, t)
+            for target in v15.TARGETS:
+                m = v15._model("BEAST", h, target)
                 m["bias"] = bias
                 m["weights"] = [0.0] * v15.FEATURE_COUNT
                 m["trained"] = 40
@@ -82,14 +81,66 @@ class V15MultiHorizonTests(unittest.TestCase):
                 m["payoff_win_n"] = 18
                 m["payoff_loss_sum"] = 22 * 3.0
                 m["payoff_loss_n"] = 22
+                if validated:
+                    m["test_n"] = 30
+                    m["test_wins"] = 14
+                    m["test_losses"] = 16
+                    m["test_correct"] = 15
+                    m["test_brier_sum"] = 7.0
+                    m["test_payoff_win_sum"] = 14 * 15.0
+                    m["test_payoff_win_n"] = 14
+                    m["test_payoff_loss_sum"] = 16 * 3.0
+                    m["test_payoff_loss_n"] = 16
+
+    def test_positive_ev_without_holdout_is_shadow_buy(self):
+        x = v15._features_from_sensor(self.sensor(), {})
+        self._positive_ev_models(validated=False)
         opp = v15._opportunity("BEAST", x)
         self.assertLess(opp["probability"], 0.5)
         self.assertGreater(opp["expected_value_pct"], 0)
+        self.assertFalse(opp["promotion_validation"]["ready"])
+        action, ready, blockers = v15._entry_action(
+            self.sensor(), {}, opp, True, []
+        )
+        self.assertEqual(action, "ML SHADOW BUY")
+        self.assertFalse(ready)
+        self.assertIn("OUT_OF_SAMPLE_VALIDATION_PENDING", blockers)
+
+    def test_positive_ev_below_fifty_percent_can_buy_after_holdout_validation(self):
+        x = v15._features_from_sensor(self.sensor(), {})
+        self._positive_ev_models(validated=True)
+        opp = v15._opportunity("BEAST", x)
+        self.assertLess(opp["probability"], 0.5)
+        self.assertGreater(opp["expected_value_pct"], 0)
+        self.assertTrue(opp["promotion_validation"]["ready"])
         action, ready, blockers = v15._entry_action(
             self.sensor(), {}, opp, True, []
         )
         self.assertEqual(action, "ML BUY NOW")
         self.assertTrue(ready)
+
+    def test_test_split_never_changes_train_or_calibration_state(self):
+        m = v15._new_model()
+        x = [0.1] * v15.FEATURE_COUNT
+        test_stamp = None
+        for day in range(40):
+            stamp = day * v15.DAY_MS
+            if v15._split(stamp) == "TEST":
+                test_stamp = stamp
+                break
+        self.assertIsNotNone(test_stamp)
+        before = (
+            list(m["weights"]), m["bias"], m["trained"], m["wins"], m["losses"],
+            dict(m["cal_bins"]), m["payoff_win_n"], m["payoff_loss_n"],
+        )
+        v15._update_model(m, x, True, test_stamp, 6.0)
+        after = (
+            list(m["weights"]), m["bias"], m["trained"], m["wins"], m["losses"],
+            dict(m["cal_bins"]), m["payoff_win_n"], m["payoff_loss_n"],
+        )
+        self.assertEqual(before, after)
+        self.assertEqual(m["test_n"], 1)
+        self.assertEqual(m["test_wins"], 1)
 
     def test_empirical_time_to_target_is_reported(self):
         for hours in (2, 3, 4, 5, 6, 7, 8, 9):
