@@ -582,7 +582,7 @@ def _sensor_rows():
             continue
         sym = str(row.get("symbol") or "").upper()
         if _eligible_spot_symbol(sym) and (not universe or sym in universe):
-            merged[sym] = dict(merged.get(sym) or {}, **row, symbol=sym)
+            merged[sym] = {**(merged.get(sym) or {}), **row, "symbol": sym}
     enriched = []
     for sym, x in merged.items():
         raw = raw_cache.get(sym) or {}
