@@ -14,5 +14,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: python -m compileall -q psi_v15_17_ema_lane.py psi_v12_3_runner.py
-      - run: python -m unittest -v test_v15_17_ema_lane.py test_v12_execution_gate.py test_v13_3_execution.py
+      - run: python -m compileall -q psi_v15_17_ema_lane.py psi_v15_21_signal_delivery.py psi_v12_3_runner.py app.py
+      - run: python -m unittest -v test_v15_21_signal_delivery.py test_v15_17_ema_lane.py test_v12_execution_gate.py test_v13_3_execution.py
