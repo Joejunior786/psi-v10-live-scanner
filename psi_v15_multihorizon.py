@@ -15,7 +15,7 @@ import time
 import redis.asyncio as redis_async
 from collections import defaultdict, deque
 
-REVISION = "15.29.0-verified-structural-ml-shortlist"
+REVISION = "15.29.1-fresh-v12-on-demand-structural-confirmation"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
 STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_10_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
@@ -800,15 +800,63 @@ def _verified_structural_setup(row):
     )
 
 
-def _structural_map():
+def _structural_map(extra_symbols=(), at=None):
+    """Existing V12 decisions, plus bounded verification from actual V12 MTF.
+
+    At restart V12's candle snapshots may be populated while its strategy
+    board has not completed a full cycle. Re-run the SAME V12 evaluator for
+    *fresh, complete* 1h/4h/1d snapshots only. No reconstructed structure,
+    invented candles or sensor shadow qualifies. Independent ML safety still
+    gates all approvals.
+    """
+    at = _now_ms() if at is None else int(at)
     try:
-        return {
+        out = {
             str(r.get("symbol") or "").upper(): r
             for r in (CORE._board() or [])
             if _verified_structural_setup(r) and r.get("symbol")
         }
     except Exception:
-        return {}
+        out = {}
+    evaluate = getattr(CORE, "evaluate_symbol", None)
+    cache = getattr(CORE, "_cache", {}) or {}
+    ttl = getattr(CORE, "TF_TTL", {}) or {}
+    attempts, confirmed, missing = 0, 0, 0
+    if callable(evaluate):
+        for raw_symbol in list(dict.fromkeys(extra_symbols or []))[:64]:
+            sym = str(raw_symbol or "").upper()
+            if sym in out or not _eligible_spot_symbol(sym):
+                continue
+            candles = cache.get(sym) or {}
+            ready = True
+            for tf in ("1h", "4h", "1d"):
+                item = candles.get(tf) or {}
+                updated = _f(item.get("updated"))
+                age = at / 1000.0 - updated
+                if (not item.get("snap") or updated <= 0
+                    or age < 0 or age > _f(ttl.get(tf))):
+                    ready = False
+                    break
+            if not ready:
+                missing += 1
+                continue
+            if attempts >= 24:
+                break
+            attempts += 1
+            try:
+                row = evaluate(sym)
+            except Exception:
+                _stats["structure_refresh_errors"] += 1
+                continue
+            if _verified_structural_setup(row):
+                out[sym] = dict(row, symbol=sym,
+                                setup_origin="FRESH_V12_MULTITIMEFRAME_EVALUATION")
+                confirmed += 1
+    _stats["structure_refresh_attempts"] = attempts
+    _stats["structure_refresh_confirmed"] = confirmed
+    _stats["structure_refresh_missing_snapshots"] = missing
+    _stats["formal_v12_board_size"] = len(out) - confirmed
+    return out
 
 
 def _eligible_spot_symbol(sym):
@@ -1725,8 +1773,15 @@ def _build_board(at=None):
     global _board, _last_board_ms
     explicit_time = at is not None
     at = _now_ms() if at is None else int(at)
-    structural = _structural_map()
     rows = _sensor_rows()
+    # Prefer subscribed ML targets, then the highest observed sensor anomalies.
+    # This is only a scheduling priority for the *formal* V12 evaluator.
+    subscribed = list(getattr(CORE, "_signal_priority_symbols", []) or [])
+    hot = sorted(rows,key=lambda r: _f(r.get("hazard_score")),reverse=True)
+    target_symbols = subscribed[:36] + [
+        str(r.get("symbol") or "").upper() for r in hot[:40]
+    ]
+    structural = _structural_map(target_symbols, at)
     priority = _decision_priority_symbols(structural)
     out = []
     for raw_sensor in rows:
@@ -1948,6 +2003,10 @@ def report():
             "available":int(_stats.get("structure_candidates_available") or 0),
             "displayed":int(_stats.get("structure_candidates_displayed") or 0),
             "formal_buy_displayed":int(_stats.get("structure_buy_displayed") or 0),
+            "v12_board_available":int(_stats.get("formal_v12_board_size") or 0),
+            "on_demand_evaluated":int(_stats.get("structure_refresh_attempts") or 0),
+            "on_demand_confirmed":int(_stats.get("structure_refresh_confirmed") or 0),
+            "candidates_missing_fresh_mtf":int(_stats.get("structure_refresh_missing_snapshots") or 0),
         },
         "live_decision_diagnostics": dict(_LIVE_DECISION_DIAG),
         "qualification_counts": {
