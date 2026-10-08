@@ -14,9 +14,9 @@ import statistics
 import time
 from collections import defaultdict, deque
 
-REVISION = "15.2.0-trade-scorecard-unlimited"
+REVISION = "15.3.0-context-entry-time-unlimited"
 AUTHORITY = "V15_ML_EXPECTED_VALUE_PLUS_HARD_SAFETY"
-STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_1_multihorizon.json")
+STATE_PATH = os.getenv("PSI_V15_STATE_PATH", "/data/psi_v15_3_multihorizon.json")
 TARGETS = (3.0, 5.0, 10.0, 20.0)
 HORIZONS_MS = {
     "15m": 15 * 60_000,
@@ -31,7 +31,7 @@ HORIZONS_MS = {
 }
 HORIZON_ORDER = tuple(HORIZONS_MS)
 LANES = ("BEAST", "EXHAUSTION", "BREAKOUT", "HTF_SWING")
-FEATURE_COUNT = 15
+FEATURE_COUNT = 26
 MIN_MODEL_SAMPLES = max(15, int(os.getenv("PSI_V15_MIN_MODEL_SAMPLES", "30")))
 MIN_SPECIALIST_SAMPLES = max(10, int(os.getenv("PSI_V15_MIN_SPECIALIST_SAMPLES", "20")))
 MIN_BUY_PROBABILITY = max(0.20, min(0.75, float(os.getenv("PSI_V15_MIN_BUY_PROBABILITY", "0.34"))))
@@ -41,6 +41,7 @@ MIN_PROMOTION_TEST_WINS = max(2, int(os.getenv("PSI_V15_MIN_PROMOTION_TEST_WINS"
 MIN_PROMOTION_TEST_EV_PCT = max(0.0, float(os.getenv("PSI_V15_MIN_PROMOTION_TEST_EV_PCT", "0.10")))
 ROUND_TRIP_FEE_PCT = max(0.0, min(1.0, float(os.getenv("PSI_V15_FEE_PCT", "0.20"))))
 SIGNAL_COOLDOWN_MS = max(30 * 60_000, int(os.getenv("PSI_V15_SIGNAL_COOLDOWN_MS", str(6 * 60 * 60_000))))
+SEED_DEDUP_MS = max(60 * 60_000, int(os.getenv("PSI_V15_SEED_DEDUP_MS", str(6 * 60 * 60_000))))
 MAX_PENDING = max(200, int(os.getenv("PSI_V15_MAX_PENDING", "1800")))
 MAX_RECENT = max(250, int(os.getenv("PSI_V15_MAX_RECENT", "3500")))
 MAX_SIGNAL_JOURNAL = max(500, int(os.getenv("PSI_V15_MAX_SIGNAL_JOURNAL", "5000")))
@@ -64,6 +65,7 @@ _pending = []
 _recent = deque(maxlen=MAX_RECENT)
 _last_signal = {}
 _seen_seed = set()
+_seed_buckets = set()
 _lane_stats = {}
 _board = []
 _last_board_ms = 0
@@ -257,6 +259,38 @@ def _target_time(lane, target, horizon_ms):
     return med, int(med * 0.55), horizon_ms, "HORIZON_PRIOR"
 
 
+def _stop_stat(lane):
+    key = f"STOP|{lane}"
+    row = _lane_stats.get(key)
+    if not isinstance(row, dict):
+        row = {"times_ms": [], "n": 0}
+        _lane_stats[key] = row
+    return row
+
+
+def _record_stop_time(lane, time_ms):
+    if time_ms <= 0:
+        return
+    row = _stop_stat(lane)
+    times = row.setdefault("times_ms", [])
+    times.append(int(time_ms))
+    if len(times) > 600:
+        del times[:-600]
+    row["n"] = int(row.get("n") or 0) + 1
+
+
+def _invalidation_time(lane, horizon_ms):
+    row = _stop_stat(lane)
+    times = sorted(int(x) for x in row.get("times_ms") or [] if int(x) > 0)
+    if len(times) < 8:
+        return None, None, None, "INSUFFICIENT"
+    med = int(statistics.median(times))
+    q1 = times[max(0, int(0.25 * (len(times) - 1)))]
+    q3 = times[min(len(times) - 1, int(0.75 * (len(times) - 1)))]
+    cap = max(int(horizon_ms), med)
+    return min(med, cap), min(q1, cap), min(q3, cap), "EMPIRICAL"
+
+
 def _duration(ms):
     seconds = max(0, int(ms // 1000))
     if seconds < 3600:
@@ -271,63 +305,169 @@ def _duration(ms):
     return f"{int(value) if value.is_integer() else value} days"
 
 
+def _duration_class(ms):
+    ms = max(0, int(ms or 0))
+    if ms <= 60 * 60_000:
+        return "SCALP"
+    if ms <= 12 * 60 * 60_000:
+        return "INTRADAY"
+    if ms <= 3 * DAY_MS:
+        return "SWING"
+    return "EXTENDED_SWING"
+
+
+def _regime_score(value):
+    text_value = str(value or "").upper()
+    if "FULL_BULLISH_ALIGNMENT" in text_value:
+        return 1.0
+    if "WEEKLY_BEARISH_OR_MIXED" in text_value:
+        return -1.0
+    if "BULL" in text_value:
+        return 0.6
+    if "BEAR" in text_value:
+        return -0.6
+    return 0.0
+
+
+def _timeframe_score(value):
+    text_value = str(value or "").upper()
+    if "W" in text_value and "1H" not in text_value:
+        return 1.0
+    if "1D" in text_value or "DAILY" in text_value:
+        return 0.85
+    if "4H" in text_value:
+        return 0.60
+    if "1H" in text_value:
+        return 0.40
+    if "15M" in text_value:
+        return 0.20
+    return 0.0
+
+
+def _state_score(value):
+    value = str(value or "").upper()
+    return 1.0 if value == "BUY" else 0.65 if value == "ARMED" else 0.25 if value == "WATCH" else 0.0
+
+
+def _entry_geometry(structural, current):
+    structural = structural or {}
+    current = _f(current)
+    low = _f(structural.get("entry_low"), _f(structural.get("entry")))
+    high = _f(structural.get("entry_high"), low)
+    if low > 0 and high <= 0:
+        high = low
+    if high > 0 and low <= 0:
+        low = high
+    if low > high > 0:
+        low, high = high, low
+    center = (low + high) / 2.0 if low > 0 and high > 0 else 0.0
+    distance = ((current / center - 1.0) * 100.0) if current > 0 and center > 0 else 0.0
+    risk_pct = _f(structural.get("risk_pct"))
+    invalidation = _f(structural.get("invalidation"))
+    if risk_pct <= 0 and center > 0 and 0 < invalidation < center:
+        risk_pct = (center - invalidation) / center * 100.0
+    return {
+        "entry_low": low,
+        "entry_high": high,
+        "entry_center": center,
+        "entry_distance_pct": distance,
+        "risk_pct": risk_pct,
+    }
+
+
+def _setup_context_flag(structural):
+    text_value = " ".join([
+        str(structural.get("setup") or ""),
+        " ".join(str(x.get("name") or "") for x in (structural.get("active_setups") or []) if isinstance(x, dict)),
+    ]).upper()
+    tokens = ("EMA", "WEEKLY", "DAILY", "RECLAIM", "SUPPORT", "PULLBACK", "BREAKOUT", "RETEST", "COMPRESSION", "RANGE_BOTTOM", "SWEEP")
+    return 1.0 if any(token in text_value for token in tokens) else 0.0
+
+
 def _features_from_sensor(row, structural=None):
     row = row or {}
     structural = structural or {}
+    current = _f(row.get("entry_reference"), _f(structural.get("current")))
+    geometry = _entry_geometry(structural, current)
+    size_shift = _f(row.get("trade_size_shift"), 1.0)
+    if size_shift <= 0:
+        size_shift = 1.0
+    flow_persistence = _f(row.get("flow_persistence"), _f(row.get("buy_ratio"), 0.5))
     return [
         _clamp(_f(row.get("hazard_score")) / 100.0, 0.0, 1.5),
         _clamp((_f(row.get("buy_ratio"), 0.5) - 0.5) * 2.0, -1.0, 1.0),
         _clamp(_f(row.get("relative_volume_10s")) / 10.0, 0.0, 2.0),
         _clamp(_f(row.get("relative_volume_30s")) / 10.0, 0.0, 2.0),
         _clamp(_f(row.get("trade_acceleration")) / 10.0, 0.0, 2.0),
+        _clamp((size_shift - 1.0) / 2.0, -1.0, 1.0),
+        _clamp((flow_persistence - 0.5) * 2.0, -1.0, 1.0),
         _clamp(_f(row.get("cvd_acceleration")), -1.0, 1.0),
         _clamp(_f(row.get("ofi")), -1.0, 1.0),
         _clamp(_f(row.get("ofi_acceleration")), -1.0, 1.0),
         _clamp(_f(row.get("obi")), -1.0, 1.0),
         _clamp(_f(row.get("ask_depletion")), -1.0, 1.0),
-        _clamp(_f(row.get("sequence_score")) / 100.0, 0.0, 1.0),
-        _clamp(_f(row.get("v128_probe_score")) / 100.0, 0.0, 1.0),
         _clamp(_f(row.get("spread_bps"), 100.0) / 20.0, 0.0, 5.0),
+        _clamp(_f(row.get("slippage_bps"), 100.0) / 35.0, 0.0, 5.0),
         _clamp(_f(structural.get("setup_strength")) / 100.0, 0.0, 1.0),
-        1.0 if (
-            structural.get("structural_support")
-            or structural.get("breakout")
-            or structural.get("breakout_near")
-            or structural.get("ma_reclaim_regime")
-        ) else 0.0,
+        _regime_score(structural.get("trend_regime")),
+        -1.0 if bool(structural.get("counter_trend")) else 0.0,
+        _clamp(geometry["risk_pct"] / 10.0, 0.0, 2.0),
+        _clamp(geometry["entry_distance_pct"] / 10.0, -2.0, 2.0),
+        _clamp(_f(structural.get("buy_setup_count")) / 5.0, 0.0, 2.0),
+        _clamp(_f(structural.get("armed_setup_count")) / 5.0, 0.0, 2.0),
+        _timeframe_score(structural.get("timeframe")),
+        1.0 if bool(structural.get("extension_blocked")) else 0.0,
+        1.0 if bool(structural.get("anti_chase")) else 0.0,
+        _state_score(structural.get("state")),
+        _setup_context_flag(structural),
     ]
 
 
 def _features_from_outcome(event):
     feat = event.get("features") or {}
+    entry = _f(event.get("entry_price"))
+    current = _f(event.get("observed_price_at_signal"), entry)
     structural = {
+        "setup": feat.get("setup") or event.get("setup"),
         "setup_strength": feat.get("setup_strength"),
-        "structural_support": feat.get("structural_support"),
-        "breakout": feat.get("breakout"),
-        "breakout_near": feat.get("breakout_near"),
-        "ma_reclaim_regime": feat.get("ma_reclaim_regime"),
+        "timeframe": feat.get("timeframe"),
+        "trend_regime": feat.get("trend_regime"),
+        "counter_trend": feat.get("counter_trend"),
+        "risk_pct": feat.get("risk_pct"),
+        "entry_low": feat.get("entry_low", entry),
+        "entry_high": feat.get("entry_high", entry),
+        "entry": entry,
+        "current": current,
+        "buy_setup_count": feat.get("buy_setup_count"),
+        "armed_setup_count": feat.get("armed_setup_count"),
+        "extension_blocked": feat.get("extension_blocked"),
+        "anti_chase": feat.get("anti_chase"),
+        "state": feat.get("structural_state"),
+        "active_setups": feat.get("active_setups") or [],
     }
     return _features_from_sensor(
         {
+            "entry_reference": current,
             "hazard_score": feat.get("early_hazard_score", feat.get("hazard_score")),
             "buy_ratio": feat.get("buy_ratio"),
             "relative_volume_10s": feat.get("relative_volume_10s"),
             "relative_volume_30s": feat.get("relative_volume_30s"),
             "trade_acceleration": feat.get("trade_acceleration"),
+            "trade_size_shift": feat.get("trade_size_shift", 1.0),
+            "flow_persistence": feat.get("flow_persistence", feat.get("buy_ratio", 0.5)),
             "cvd_acceleration": feat.get("cvd_accel", feat.get("cvd_acceleration")),
             "ofi": feat.get("ofi"),
             "ofi_acceleration": feat.get("ofi_accel", feat.get("ofi_acceleration")),
             "obi": feat.get("obi"),
             "ask_depletion": feat.get("ask_depletion"),
-            "sequence_score": feat.get("sequence_score"),
-            "v128_probe_score": feat.get("v128_probe_score"),
             "spread_bps": feat.get("spread_bps"),
+            "slippage_bps": feat.get("slippage_bps"),
         },
         structural,
     )
 
 
-def _classify_lane(structural=None, sensor=None, setup=None, features=None):
+def _classify_lane(def _classify_lane(structural=None, sensor=None, setup=None, features=None):
     structural = structural or {}
     sensor = sensor or {}
     features = features or {}
@@ -406,10 +546,26 @@ def _sensor_rows():
         rows = V13._rows() or []
     except Exception:
         rows = []
-    return [r for r in rows if isinstance(r, dict) and r.get("symbol")]
+    try:
+        sensor_module = getattr(V13, "SENSOR", None)
+        raw_cache = getattr(sensor_module, "_sensor_cache", {}) or {}
+    except Exception:
+        raw_cache = {}
+    enriched = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("symbol"):
+            continue
+        x = dict(row)
+        raw = raw_cache.get(str(x.get("symbol") or "").upper()) or {}
+        x["flow_persistence"] = _f(
+            raw.get("flow_persistence"),
+            _f(x.get("buy_ratio"), 0.5),
+        )
+        enriched.append(x)
+    return enriched
 
 
-def _prices():
+def _prices():def _prices():
     prices = {}
     for row in _sensor_rows():
         sym = str(row.get("symbol") or "").upper()
@@ -436,18 +592,27 @@ def _seed_from_outcome_memory():
     if OUTCOME is None:
         return 0
     added = 0
-    events = list(getattr(OUTCOME, "_recent", []) or [])
+    events = sorted(
+        [e for e in list(getattr(OUTCOME, "_recent", []) or []) if isinstance(e, dict)],
+        key=lambda e: int(_f(e.get("created_ms"), 0)),
+    )
     for event in events:
-        if not isinstance(event, dict):
-            continue
         eid = str(event.get("id") or f"{event.get('symbol')}|{event.get('created_ms')}")
         if eid in _seen_seed:
             continue
         created = int(_f(event.get("created_ms"), 0))
         if created <= 0:
+            _seen_seed.add(eid)
             continue
-        x = _features_from_outcome(event)
         lane = _classify_lane(setup=event.get("setup"), features=event.get("features") or {})
+        symbol = str(event.get("symbol") or "").upper()
+        dedup_key = f"{symbol}|{lane}|{created // SEED_DEDUP_MS}"
+        if dedup_key in _seed_buckets:
+            _seen_seed.add(eid)
+            _stats["seed_dedup_skipped"] += 1
+            continue
+
+        x = _features_from_outcome(event)
         first = event.get("first_target_ms") or {}
         stop_at = int(_f(event.get("stop_hit_ms"), 0))
         hret = event.get("horizon_returns") or {}
@@ -479,6 +644,10 @@ def _seed_from_outcome_memory():
                         _f(event.get("mfe_pct")), _f(event.get("mae_pct"))
                     )
                     recorded_targets.add(target_key)
+        if stop_at > created:
+            _record_stop_time(lane, stop_at - created)
+
+        _seed_buckets.add(dedup_key)
         _seen_seed.add(eid)
         added += 1
     if added:
@@ -486,7 +655,7 @@ def _seed_from_outcome_memory():
     return added
 
 
-def _collect_candidates(at=None):
+def _collect_candidates(def _collect_candidates(at=None):
     at = _now_ms() if at is None else int(at)
     structural = _structural_map()
     rows = _sensor_rows()
@@ -527,6 +696,7 @@ def _collect_candidates(at=None):
             "mae_pct": 0.0,
             "resolved_horizons": [],
             "stats_recorded_targets": [],
+            "stop_time_recorded": False,
         })
         _last_signal[cohort] = at
         added += 1
@@ -551,6 +721,9 @@ def _resolve_pending(at=None):
                     event["first_target_ms"][key] = at
             if not event.get("stop_at_ms") and ret <= -3.0:
                 event["stop_at_ms"] = at
+            if event.get("stop_at_ms") and not event.get("stop_time_recorded"):
+                _record_stop_time(event["lane"], int(event["stop_at_ms"]) - int(event["created_ms"]))
+                event["stop_time_recorded"] = True
 
         age = at - int(event["created_ms"])
         done = set(event.get("resolved_horizons") or [])
@@ -686,6 +859,7 @@ def _opportunity(lane, x):
     _, ev, p, target, horizon, model, source, samples, calibration, promotion = best
     avg_win, avg_loss = _payoffs(model, target, lane)
     med, lo, hi, time_source = _target_time(lane, target, HORIZONS_MS[horizon])
+    stop_med, stop_lo, stop_hi, stop_time_source = _invalidation_time(lane, HORIZONS_MS[horizon])
     lane_stat = _lane_stat(lane, target)
     nstat = int(lane_stat.get("n") or 0)
     mfe = _f(lane_stat.get("mfe_sum")) / nstat if nstat else avg_win
@@ -705,43 +879,112 @@ def _opportunity(lane, x):
         "time_low_ms": lo,
         "time_high_ms": hi,
         "time_source": time_source,
+        "expected_invalidation_time_ms": stop_med,
+        "invalidation_time_low_ms": stop_lo,
+        "invalidation_time_high_ms": stop_hi,
+        "invalidation_time_source": stop_time_source,
         "expected_mfe_pct": mfe,
         "expected_mae_pct": mae,
         "probabilities": probabilities,
     }
 
 
-def _entry_action(sensor, structural, opp, safe, safety_blockers):
-    anti_chase = bool(structural.get("anti_chase"))
+def _entry_plan(sensor, structural, lane, opp):
+    sensor = sensor or {}
+    structural = structural or {}
+    current = _f(sensor.get("entry_reference"), _f(structural.get("current")))
+    geometry = _entry_geometry(structural, current)
+    low = geometry["entry_low"]
+    high = geometry["entry_high"]
+    center = geometry["entry_center"]
+    source = "STRUCTURAL_ZONE" if center > 0 else "LIVE_ML_REFERENCE"
+    if center <= 0 and current > 0:
+        low = current * 0.9975
+        high = current * 1.0025
+        center = current
+
+    invalidation = _f(structural.get("invalidation"))
+    expected_loss = max(0.75, _f(opp.get("expected_loss_pct"), 3.0))
+    if invalidation <= 0 or (low > 0 and invalidation >= low):
+        invalidation = center * (1.0 - expected_loss / 100.0) if center > 0 else 0.0
+        invalidation_source = "LEARNED_EXPECTED_LOSS"
+    else:
+        invalidation_source = "STRUCTURAL"
+
+    max_chase = _f(structural.get("max_chase"))
+    if max_chase <= 0 and high > 0:
+        max_chase = high * 1.015
+
+    if current > 0 and invalidation > 0 and current <= invalidation:
+        location = "INVALIDATED"
+    elif current > 0 and max_chase > 0 and current > max_chase:
+        location = "CHASING"
+    elif current > 0 and low > 0 and current < low * 0.9975:
+        location = "BELOW_ZONE"
+    elif current > 0 and high > 0 and current > high * 1.0025:
+        location = "ABOVE_ZONE"
+    else:
+        location = "IN_ZONE"
+
+    return {
+        "current": current,
+        "entry_low": low or None,
+        "entry_high": high or None,
+        "entry_center": center or None,
+        "entry_zone_source": source,
+        "entry_location": location,
+        "entry_distance_pct": (
+            round((current / center - 1.0) * 100.0, 3)
+            if current > 0 and center > 0 else None
+        ),
+        "invalidation": invalidation or None,
+        "invalidation_source": invalidation_source,
+        "max_chase": max_chase or None,
+        "risk_pct": geometry["risk_pct"],
+    }
+
+
+def _entry_action(sensor, structural, opp, safe, safety_blockers, entry_plan=None):
+    structural = structural or {}
+    entry_plan = entry_plan or _entry_plan(
+        sensor, structural, _classify_lane(structural, sensor), opp
+    )
+    location = str(entry_plan.get("entry_location") or "")
+    if location == "INVALIDATED":
+        return "REJECT", False, ["ENTRY_STRUCTURE_INVALIDATED"]
+    if bool(structural.get("anti_chase")) or location == "CHASING":
+        return "DO NOT CHASE", False, ["ANTI_CHASE"]
+
     ready_model = opp["samples"] >= MIN_MODEL_SAMPLES or (
         opp["model_source"] not in {"LEARNING"} and opp["samples"] >= MIN_SPECIALIST_SAMPLES
     )
-    positive = opp["expected_value_pct"] >= MIN_EXPECTED_VALUE_PCT
-    probability_ok = opp["probability"] >= MIN_BUY_PROBABILITY
-
-    if anti_chase:
-        return "DO NOT CHASE", False, ["ANTI_CHASE"]
     if not ready_model:
         return "ML LEARNING", False, ["INSUFFICIENT_MULTI_HORIZON_HISTORY"]
-    if not positive:
+    if opp["expected_value_pct"] < MIN_EXPECTED_VALUE_PCT:
         return "REJECT", False, ["NEGATIVE_EXPECTED_VALUE"]
-    if not probability_ok:
+    if opp["probability"] < MIN_BUY_PROBABILITY:
         return "WAIT", False, ["PROBABILITY_BELOW_DYNAMIC_FLOOR"]
     if not safe:
         return "WAIT DATA", False, list(safety_blockers)
 
     lane = _classify_lane(structural, sensor)
-    if lane == "BREAKOUT" and structural.get("breakout_near") and not structural.get("breakout"):
+    setup = str(structural.get("setup") or "").upper()
+    state = str(structural.get("state") or "").upper()
+
+    if lane == "BREAKOUT" and (
+        state in {"ARMED", "WATCH"}
+        or ("BREAKOUT" in setup and "RETEST" not in setup and state != "BUY")
+    ):
         return "BUY BREAKOUT/RETEST", False, ["AWAIT_BREAKOUT_ACCEPTANCE"]
-    if lane in {"EXHAUSTION", "HTF_SWING"}:
-        support = bool(
-            structural.get("structural_support")
-            or structural.get("ma_reclaim_regime")
-            or structural.get("daily_touch")
-            or structural.get("weekly_touch")
-        )
-        if not support and _f(structural.get("setup_strength")) < 65:
-            return "BUY PULLBACK", False, ["PREFER_BETTER_LOCATION"]
+
+    if lane in {"EXHAUSTION", "HTF_SWING"} and location == "BELOW_ZONE":
+        return "BUY RECLAIM", False, ["AWAIT_RECLAIM_OF_ENTRY_ZONE"]
+
+    if location == "ABOVE_ZONE":
+        return "BUY PULLBACK", False, ["PREFER_PULLBACK_TO_ENTRY_ZONE"]
+
+    if location == "BELOW_ZONE":
+        return "WAIT ENTRY", False, ["AWAIT_ENTRY_ZONE"]
 
     if not bool((opp.get("promotion_validation") or {}).get("ready")):
         return "ML SHADOW BUY", False, ["OUT_OF_SAMPLE_VALIDATION_PENDING"]
@@ -749,9 +992,7 @@ def _entry_action(sensor, structural, opp, safe, safety_blockers):
     return "ML BUY NOW", True, []
 
 
-
-
-def _signal_id(row, at_ms):
+def _signal_id(def _signal_id(row, at_ms):
     bucket = int(at_ms // SIGNAL_REARM_MS)
     return "|".join((
         str(row.get("symbol") or "").upper(),
@@ -933,15 +1174,31 @@ def _build_board(at=None):
         x = _features_from_sensor(sensor, srow)
         opp = _opportunity(lane, x)
         safe, safety_blockers = _safety(sensor, at)
+        entry_plan = _entry_plan(sensor, srow, lane, opp)
         action, executable, action_blockers = _entry_action(
-            sensor, srow, opp, safe, safety_blockers
+            sensor, srow, opp, safe, safety_blockers, entry_plan
         )
         price = _f(sensor.get("entry_reference"))
         loss_pct = max(0.75, opp["expected_loss_pct"])
-        stop = price * (1.0 - loss_pct / 100.0) if price > 0 else None
-        target_price = price * (1.0 + opp["target_pct"] / 100.0) if price > 0 else None
+        learned_stop = price * (1.0 - loss_pct / 100.0) if price > 0 else None
+        planned_stop = _f(entry_plan.get("invalidation"))
+        stop = planned_stop if planned_stop > 0 and (price <= 0 or planned_stop < price) else learned_stop
+        target_basis = (
+            price if action in {"ML BUY NOW", "ML SHADOW BUY"}
+            else _f(entry_plan.get("entry_center"), price)
+        )
+        target_price = target_basis * (1.0 + opp["target_pct"] / 100.0) if target_basis > 0 else None
         expected_time = _duration(opp["expected_time_ms"])
         time_range = f"{_duration(opp['time_low_ms'])}–{_duration(opp['time_high_ms'])}"
+        invalidation_time = (
+            _duration(opp["expected_invalidation_time_ms"])
+            if opp.get("expected_invalidation_time_ms") is not None else None
+        )
+        invalidation_time_range = (
+            f"{_duration(opp['invalidation_time_low_ms'])}–{_duration(opp['invalidation_time_high_ms'])}"
+            if opp.get("invalidation_time_low_ms") is not None and opp.get("invalidation_time_high_ms") is not None
+            else None
+        )
         rank_score = (
             opp["expected_value_pct"]
             + 2.0 * opp["probability"]
@@ -957,14 +1214,28 @@ def _build_board(at=None):
             "authority": AUTHORITY,
             "price": price or None,
             "reference_entry": price or None,
+            "entry_low": entry_plan.get("entry_low"),
+            "entry_high": entry_plan.get("entry_high"),
+            "entry_center": entry_plan.get("entry_center"),
+            "entry_zone_source": entry_plan.get("entry_zone_source"),
+            "entry_location": entry_plan.get("entry_location"),
+            "entry_distance_pct": entry_plan.get("entry_distance_pct"),
+            "max_chase": entry_plan.get("max_chase"),
+            "invalidation": entry_plan.get("invalidation"),
+            "invalidation_source": entry_plan.get("invalidation_source"),
             "dynamic_stop": round(stop, 12) if stop else None,
             "selected_target_pct": opp["target_pct"],
+            "selected_target_basis_price": round(target_basis, 12) if target_basis else None,
             "selected_target_price": round(target_price, 12) if target_price else None,
             "selected_horizon": opp["horizon"],
             "expected_time_to_target": expected_time,
             "expected_time_range": time_range,
             "expected_time_ms": int(opp["expected_time_ms"]),
+            "trade_duration_class": _duration_class(opp["expected_time_ms"]),
             "time_model_source": opp["time_source"],
+            "expected_time_to_invalidation": invalidation_time,
+            "expected_invalidation_time_range": invalidation_time_range,
+            "invalidation_time_model_source": opp.get("invalidation_time_source"),
             "probability": round(opp["probability"], 4),
             "expected_value_pct": round(opp["expected_value_pct"], 3),
             "expected_mfe_pct": round(opp["expected_mfe_pct"], 3),
@@ -983,6 +1254,9 @@ def _build_board(at=None):
             "hard_safety_verified": safe,
             "blockers": list(dict.fromkeys(action_blockers + ([] if safe else safety_blockers)))[:10],
             "rank_score": round(rank_score, 5),
+            "setup": str(srow.get("setup") or ""),
+            "timeframe": str(srow.get("timeframe") or ""),
+            "trend_regime": str(srow.get("trend_regime") or ""),
             "setup_strength": _f(srow.get("setup_strength")),
             "anti_chase": bool(srow.get("anti_chase")),
         })
@@ -1027,6 +1301,11 @@ def report():
         "decision_rule": "positive empirical EV + setup-specific model + hard live-data safety",
         "fixed_50pct_gate_removed": True,
         "forced_top_five": True,
+        "feature_schema_version": 3,
+        "feature_count": FEATURE_COUNT,
+        "historical_seed_dedup_window": _duration(SEED_DEDUP_MS),
+        "entry_actions": ["ML BUY NOW", "ML SHADOW BUY", "BUY PULLBACK", "BUY RECLAIM", "BUY BREAKOUT/RETEST", "WAIT", "REJECT", "DO NOT CHASE"],
+        "time_to_invalidation_enabled": True,
         "buy_signal_cap": None,
         "qualified_buy_count_all": _qualified_total,
         "qualified_buy_symbols_all": list(_qualified_symbols),
@@ -1045,6 +1324,7 @@ def report():
             "recent_completed": len(_recent),
             "model_count": len(_models),
             "seeded_events": int(_stats.get("seeded_events") or 0),
+            "seed_dedup_skipped": int(_stats.get("seed_dedup_skipped") or 0),
             "captured": int(_stats.get("captured") or 0),
             "resolved_horizons": int(_stats.get("resolved_horizons") or 0),
         },
@@ -1070,6 +1350,8 @@ def _save(force=False):
             "recent": list(_recent)[-MAX_RECENT:],
             "last_signal": _last_signal,
             "seen_seed": list(_seen_seed)[-5000:],
+            "seed_buckets": list(_seed_buckets)[-5000:],
+            "feature_schema_version": 3,
             "lane_stats": _lane_stats,
             "stats": dict(_stats),
             "signal_journal": _signal_journal[-MAX_SIGNAL_JOURNAL:],
@@ -1099,6 +1381,8 @@ def _restore():
         _last_signal.update(payload.get("last_signal") or {})
         _seen_seed.clear()
         _seen_seed.update(payload.get("seen_seed") or [])
+        _seed_buckets.clear()
+        _seed_buckets.update(payload.get("seed_buckets") or [])
         _lane_stats.clear()
         _lane_stats.update(payload.get("lane_stats") or {})
         _stats.update(payload.get("stats") or {})
@@ -1167,16 +1451,22 @@ async def supervisor_loop():
                         {
                             k: r.get(k) for k in (
                                 "rank", "symbol", "lane", "action", "execution_ready",
-                                "price", "dynamic_stop", "selected_target_pct",
+                                "price", "entry_low", "entry_high", "entry_center",
+                                "entry_zone_source", "entry_location", "entry_distance_pct",
+                                "max_chase", "invalidation", "invalidation_source", "dynamic_stop",
+                                "selected_target_pct", "selected_target_basis_price",
                                 "selected_target_price", "selected_horizon",
                                 "expected_time_to_target", "expected_time_range",
-                                "time_model_source", "probability", "expected_value_pct",
+                                "trade_duration_class", "time_model_source",
+                                "expected_time_to_invalidation", "expected_invalidation_time_range",
+                                "invalidation_time_model_source",
+                                "probability", "expected_value_pct",
                                 "expected_mfe_pct", "expected_mae_pct", "model_samples",
                                 "model_source", "probability_calibration",
                                 "promotion_ready", "promotion_test_samples",
                                 "promotion_test_wins", "promotion_test_ev_pct",
                                 "promotion_test_brier",
-                                "hard_safety_verified", "blockers",
+                                "hard_safety_verified", "setup", "timeframe", "trend_regime", "blockers",
                             )
                         } for r in rows
                     ],
@@ -1216,7 +1506,7 @@ def install(core, v13, outcome=None, v14=None):
         + " horizons=15m,30m,1h,4h,12h,24h,2d,3d,7d"
         + " targets=3,5,10,20"
         + " fixed50Gate=REMOVED EV=DYNAMIC hardSafety=FAIL_CLOSED"
-        + " oosPromotion=REQUIRED"
+        + " oosPromotion=REQUIRED contextFeatures=HTF/REGIME/ENTRY_GEOMETRY seedDedup=6H"
         + f" minTest={MIN_PROMOTION_TEST_SAMPLES}/{MIN_PROMOTION_TEST_WINS}"
         + f" boardLimit={BOARD_LIMIT} buySignalCap=NONE"
         + " scorecard=TARGET_STOP_TIMEOUT_AND_TIME_ACCURACY"

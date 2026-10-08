@@ -185,6 +185,23 @@ def _features(symbol, structural, legacy):
         "trend_regime": str(
             structural.get("trend_regime") or legacy.get("trend_regime") or ""
         ),
+        "timeframe": str(structural.get("timeframe") or legacy.get("timeframe") or ""),
+        "counter_trend": bool(structural.get("counter_trend")),
+        "risk_pct": _f(structural.get("risk_pct")),
+        "entry_low": _f(structural.get("entry_low"), _f(structural.get("entry"))),
+        "entry_high": _f(structural.get("entry_high"), _f(structural.get("entry"))),
+        "current": _f(structural.get("current")),
+        "buy_setup_count": int(_f(structural.get("buy_setup_count"))),
+        "armed_setup_count": int(_f(structural.get("armed_setup_count"))),
+        "active_setups": [
+            {
+                "name": str(x.get("name") or ""),
+                "state": str(x.get("state") or ""),
+                "timeframe": str(x.get("timeframe") or ""),
+            }
+            for x in (structural.get("active_setups") or [])[:10]
+            if isinstance(x, dict)
+        ],
         "anti_chase": bool(structural.get("anti_chase")) or ("ANTI_CHASE" in blockers),
         "extension_blocked": "CUMULATIVE_EXTENSION_GUARD" in blockers,
         "blockers": blockers[:32],
@@ -208,6 +225,7 @@ def _features(symbol, structural, legacy):
         "relative_volume_30s": _f(mm.get("relative_volume_30s")),
         "trade_acceleration": _f(mm.get("trade_acceleration")),
         "trade_size_shift": _f(mm.get("trade_size_shift")),
+        "flow_persistence": _f(mm.get("flow_persistence"), _f(tape.get("buy_ratio_1s"), 0.5)),
         "vwap_reclaim": bool(mm.get("vwap_reclaim")),
         "price_velocity_5s_pct": _f(tape.get("price_velocity_5s_pct")),
     }

@@ -12,6 +12,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.recent = list(v15._recent)
         self.last_signal = dict(v15._last_signal)
         self.seen_seed = set(v15._seen_seed)
+        self.seed_buckets = set(v15._seed_buckets)
         self.lane_stats = dict(v15._lane_stats)
         self.board = list(v15._board)
         self.signal_journal = list(v15._signal_journal)
@@ -22,6 +23,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._recent.clear()
         v15._last_signal.clear()
         v15._seen_seed.clear()
+        v15._seed_buckets.clear()
         v15._lane_stats.clear()
         v15._board.clear()
         v15._signal_journal.clear()
@@ -33,6 +35,7 @@ class V15MultiHorizonTests(unittest.TestCase):
         v15._recent.clear(); v15._recent.extend(self.recent)
         v15._last_signal.clear(); v15._last_signal.update(self.last_signal)
         v15._seen_seed.clear(); v15._seen_seed.update(self.seen_seed)
+        v15._seed_buckets.clear(); v15._seed_buckets.update(self.seed_buckets)
         v15._lane_stats.clear(); v15._lane_stats.update(self.lane_stats)
         v15._board[:] = self.board
         v15._signal_journal[:] = self.signal_journal
@@ -252,6 +255,77 @@ class V15MultiHorizonTests(unittest.TestCase):
         self.assertEqual(score["incorrect"], 1)
         self.assertEqual(score["correct_target_hits"], 0)
 
+
+
+    def test_feature_vector_contains_htf_regime_and_entry_geometry(self):
+        sensor = self.sensor()
+        bull = {
+            "setup": "DAILY_EMA200_REJECTION", "state": "BUY",
+            "setup_strength": 90, "timeframe": "1D",
+            "trend_regime": "FULL_BULLISH_ALIGNMENT",
+            "counter_trend": False, "risk_pct": 2.5,
+            "entry_low": 99, "entry_high": 101,
+            "buy_setup_count": 2, "armed_setup_count": 1,
+        }
+        bear = dict(bull, trend_regime="WEEKLY_BEARISH_OR_MIXED", counter_trend=True)
+        xb = v15._features_from_sensor(sensor, bull)
+        xr = v15._features_from_sensor(sensor, bear)
+        self.assertEqual(len(xb), v15.FEATURE_COUNT)
+        self.assertEqual(v15.FEATURE_COUNT, 26)
+        self.assertNotEqual(xb, xr)
+
+    def test_historical_seed_deduplicates_correlated_same_lane_window(self):
+        created = 3_000_000_000_000
+        base = {
+            "symbol": "AAAUSDT", "setup": "breakout",
+            "features": {"setup": "breakout", "buy_ratio": .6},
+            "first_target_ms": {"3": created + 10 * 60_000},
+            "stop_hit_ms": 0, "horizon_returns": {"15m": 3.2, "1h": 4.0},
+            "entry_price": 100.0, "observed_price_at_signal": 100.0,
+            "mfe_pct": 4.0, "mae_pct": -0.5,
+        }
+        e1 = dict(base, id="d1", created_ms=created)
+        e2 = dict(base, id="d2", created_ms=created + 30 * 60_000)
+        v15.OUTCOME = types.SimpleNamespace(_recent=[e1, e2])
+        self.assertEqual(v15._seed_from_outcome_memory(), 1)
+        self.assertEqual(len(v15._seed_buckets), 1)
+        self.assertGreaterEqual(v15._stats.get("seed_dedup_skipped", 0), 1)
+
+    def test_entry_location_actions_include_reclaim_and_pullback(self):
+        opp = {
+            "samples": 80, "model_source": "HTF_SWING",
+            "expected_value_pct": 2.0, "probability": .62,
+            "expected_loss_pct": 3.0,
+            "promotion_validation": {"ready": True},
+        }
+        structural = {
+            "setup": "DAILY_EMA200_RETEST_RECLAIM", "state": "ARMED",
+            "entry_low": 100.0, "entry_high": 102.0,
+            "entry": 101.0, "invalidation": 94.0, "max_chase": 110.0,
+            "setup_strength": 84,
+        }
+        below = dict(self.sensor(), entry_reference=98.0)
+        plan = v15._entry_plan(below, structural, "HTF_SWING", opp)
+        action, ready, blockers = v15._entry_action(below, structural, opp, True, [], plan)
+        self.assertEqual(plan["entry_location"], "BELOW_ZONE")
+        self.assertEqual(action, "BUY RECLAIM")
+        self.assertFalse(ready)
+
+        above = dict(self.sensor(), entry_reference=104.0)
+        plan = v15._entry_plan(above, structural, "HTF_SWING", opp)
+        action, ready, blockers = v15._entry_action(above, structural, opp, True, [], plan)
+        self.assertEqual(plan["entry_location"], "ABOVE_ZONE")
+        self.assertEqual(action, "BUY PULLBACK")
+        self.assertFalse(ready)
+
+    def test_time_to_invalidation_is_empirical_after_eight_stops(self):
+        for hours in (1, 2, 2, 3, 3, 4, 5, 6):
+            v15._record_stop_time("BEAST", hours * 3600_000)
+        med, lo, hi, source = v15._invalidation_time("BEAST", v15.HORIZONS_MS["12h"])
+        self.assertEqual(source, "EMPIRICAL")
+        self.assertIsNotNone(med)
+        self.assertGreater(med, 0)
+        self.assertIn("hours", v15._duration(med))
 
 
 if __name__ == "__main__":
