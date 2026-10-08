@@ -1801,15 +1801,30 @@ def _build_board(at=None):
     approved = [r for r in out if r["execution_ready"]]
     remaining = [r for r in out if not r["execution_ready"]]
     slots = max(0, BOARD_LIMIT - len(approved))
-    if len(remaining) > slots and slots >= 5:
-        core_slots = max(1, slots // 2)
-        research_top = remaining[:core_slots]
-        pool = remaining[core_slots:]
-        rotation = (at // max(1, int(POLL_SECONDS * 1000))) % len(pool)
-        research_rotated = (pool[rotation:] + pool[:rotation])[:slots-core_slots]
-        selected = approved + research_top + research_rotated
+    # The previous research rotation changed 15 of 30 ML pairs every few
+    # seconds, faster than Binance worker subscriptions could warm. Keep
+    # currently-requested pairs on the ML board while evaluating all other
+    # discovered pairs independently. Retain their ORIGINAL ML decisions:
+    # no research symbol becomes execution-ready by virtue of subscription.
+    requested = set(str(x).upper() for x in
+                    list(getattr(CORE,"_signal_priority_symbols",[]) or []))
+    monitored = [r for r in remaining if r["symbol"] in requested]
+    other = [r for r in remaining if r["symbol"] not in requested]
+    if slots and monitored:
+        selected = approved + monitored[:slots]
+        slots_left = max(0,slots-len(monitored[:slots]))
+        if slots_left:
+            selected += other[:slots_left]
+    elif len(other) > slots and slots >= 5:
+        # Bootstrap only. Once the feed requests these pairs, the tracked
+        # shortlist becomes stable and worker ACKs can be attained.
+        top = max(1,slots//2)
+        pool = other[top:]
+        rotation = (at//max(1,int(POLL_SECONDS*1000)))%len(pool)
+        selected = approved + other[:top] + (
+            pool[rotation:]+pool[:rotation])[:slots-top]
     else:
-        selected = approved + remaining[:slots]
+        selected = approved + other[:slots]
     for idx, row in enumerate(selected, 1):
         row["rank"] = idx
     _board = selected[:BOARD_LIMIT]
@@ -1832,7 +1847,7 @@ def report():
         "specialists": list(LANES),
         "targets_pct": list(TARGETS),
         "minimum_ml_trade_target_pct": MIN_TRADE_TARGET_PCT,
-        "ranking_policy": "calibrated EV, broad cached-sensor discovery, research rotation, approved picks never displaced",
+        "ranking_policy": "calibrated EV, full-universe discovery, monitored shortlist retained until worker warm-up, approved picks never displaced",
         "candidate_source": "V13 plus eligible cached sensors; 4-lane setup probes shadow only pending structural verification",
         "setup_probe_policy": "Two observed corroborating factors, independent structure confirmation required for BUY",
         "daily_trade_limit": None,
