@@ -952,6 +952,39 @@ details.advanced h2{margin-top:19px}
  .legend span{white-space:normal}
 }
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+
+/* Lime and grey presentation palette only. No layout or behaviour changes. */
+:root{
+ --base:#e5e7eb;
+ --paper:#f3f4f6;
+ --text:#283036;
+ --muted:#616d74;
+ --line:#b7c0c5;
+ --ink:#30393d;
+ --accent:#4d760d;
+ --green:#47750d;
+}
+.header-pill{background-color:#e8f5ca;border-color:#a3e635;color:#41650a}
+#status,#authority,#quote{background-color:var(--paper);border-color:#afb9bf}
+.summary-line span{background-color:#eceff1;border-color:#bdc5c9}
+.legend{background-color:#edf2e6;border-color:#a3e635}
+.quick a{background-color:#eceff1;border-color:#b8c2c6}
+.quick a:first-child{background-color:#e8f5ca;border-color:#9bd62b;color:#41650a}
+.quick a:hover,.quick a:focus-visible{border-color:#91c927;background-color:#eaf6d2}
+section.approved{border-color:#9bd62b;background-color:var(--paper)}
+.strategy-lane h2{color:#456c0b}
+.table-scroll{border-color:#b3c9a0;background-color:var(--paper)}
+table{background-color:var(--paper)}
+th,th:first-child{background-color:#dee3e5;color:#4a565b}
+td{border-bottom-color:#cbd2d6}
+th:first-child,td:first-child{box-shadow:1px 0 0 #b9c4b4}
+tbody tr:nth-child(even) td,tbody tr:nth-child(even) td:first-child{background-color:#e9edef}
+tbody tr:hover td,tbody tr:hover td:first-child{background-color:#eaf5d3}
+tbody td:first-child{background-color:var(--paper)}
+button{color:#263d06;background-color:#a3e635;border-color:#83b925}
+button:hover:not(:disabled){background-color:#b8ee68}
+details.advanced{background-color:var(--paper);border-color:#b8c2c6}
+:focus-visible{outline-color:#81b521}
 </style></head><body>
 <header class="app-top"><div><h1>Live Crypto Scanner</h1><p class="app-kicker">Binance Spot • Simple coin tables • Auto-refreshing</p></div><span class="header-pill">Market watch</span></header>
 <div id="status" role="status" aria-live="polite">Connecting to market prices…</div>
