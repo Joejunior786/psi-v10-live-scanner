@@ -429,6 +429,10 @@ def _subscription_telemetry(symbol, at_ms=None):
         result[role+"_requested"]=bool(requested)
         result[role+"_acknowledged"]=bool(acknowledged)
         result[role+"_snapshot_age_ms"]=transport_age if snapshot_valid else None
+        # Raw diagnostic only: unreadable or clock-ahead worker telemetry
+        # is NOT proof that a Binance subscription was removed.
+        result[role+"_snapshot_lag_ms"]=transport_age if generated>0 else None
+        result[role+"_snapshot_valid"]=bool(snapshot_valid)
         result[role+"_event_ms"]=event_ms if metric_valid and event_ms>0 else None
         result[role+"_age_ms"]=event_age if metric_valid and event_age is not None and event_age>=0 else None
         seq_key="sequence_verified" if role=="trade" else "book_sequence_verified"
@@ -438,6 +442,8 @@ def _subscription_telemetry(symbol, at_ms=None):
         reason="CONTROL_SNAPSHOT_STALE"
     elif not result["control_requested"]:
         reason="NOT_IN_CONTROL_POOL"
+    elif not result["trade_snapshot_valid"] or not result["book_snapshot_valid"]:
+        reason="WORKER_SNAPSHOT_UNAVAILABLE"
     elif not result["trade_requested"] or not result["book_requested"]:
         reason="WORKER_NOT_SUBSCRIBED"
     elif not result["trade_acknowledged"] or not result["book_acknowledged"]:

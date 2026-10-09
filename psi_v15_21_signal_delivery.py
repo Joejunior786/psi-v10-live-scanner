@@ -328,15 +328,32 @@ def _stable_market_priorities(candidates, at):
 
 
 def _subscription_coverage(at):
-    """Full shortlisted ML universe: control, Binance ACK, real event ages."""
+    """Measure acknowledgement coverage against the snapshot read-time clock.
+
+    The scan may have begun before a newer Redis worker snapshot was published.
+    Comparing that newer snapshot to scan START time incorrectly marks the
+    worker unsubscribed (negative snapshot age). Refresh the worker metadata
+    first, then sample one real wall-clock time for all 30 records. This only
+    affects diagnostic reporting: executable quotes are revalidated separately.
+    """
     samples=[]
     status_counts={}
     rank=list(getattr(ML,"_board",[]) or [])[:30] if ML is not None else []
+    refresher=getattr(CORE,"_refresh_micro_snapshots_sync",None)
+    if callable(refresher):
+        try:
+            refresher()
+        except Exception:
+            pass
+    # Tests and historical replay can supply an explicit earlier timestamp;
+    # never allow snapshot publication AFTER scan start to appear "future".
+    read_at=_ms()
+    sample_at=max(int(at),read_at)
     getter=getattr(CORE,"_subscription_telemetry",None)
     for item in rank:
         sym=str(item.get("symbol") or "").upper()
         try:
-            data=getter(sym, at) if callable(getter) else {}
+            data=getter(sym, sample_at) if callable(getter) else {}
         except Exception:
             data={}
         status=data.get("status") or "NO_WORKER_SUBSCRIPTION_TELEMETRY"
@@ -349,6 +366,8 @@ def _subscription_coverage(at):
             "book_ack":bool(data.get("book_acknowledged")),
             "trade_age_ms":data.get("trade_age_ms"),
             "book_age_ms":data.get("book_age_ms"),
+            "trade_snapshot_lag_ms":data.get("trade_snapshot_lag_ms"),
+            "book_snapshot_lag_ms":data.get("book_snapshot_lag_ms"),
             "trade_sequence_verified":bool(data.get("trade_sequence_verified")),
             "book_sequence_verified":bool(data.get("book_sequence_verified")),
             "setup_confirmation":item.get("setup_verification"),
@@ -356,6 +375,7 @@ def _subscription_coverage(at):
         })
     return {
         "shortlisted":len(samples),
+        "coverage_checked_ms":sample_at,
         "control_requested":sum(x["requested"] for x in samples),
         "both_acknowledged":sum(x["trade_ack"] and x["book_ack"] for x in samples),
         "event_aligned":status_counts.get("TRADE_BOOK_ALIGNED",0),
