@@ -8,7 +8,7 @@ from typing import List, Tuple
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "15.28-subscription-ack-observability"
+WORKER_VERSION = "15.32-retry-missing-subscription-ack"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -42,6 +42,8 @@ STATE_RETENTION_SECONDS = max(
     120.0, float(os.getenv("PSI_WORKER_STATE_RETENTION_SECONDS", "300"))
 )
 RECONNECT_BACKOFF = max(0.5, float(os.getenv("PSI_WORKER_RECONNECT_BACKOFF", "1.5")))
+ACK_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PSI_WORKER_ACK_TIMEOUT_SECONDS", "8")))
+ACK_MAX_RETRIES = max(1, min(int(os.getenv("PSI_WORKER_ACK_MAX_RETRIES", "2")), 4))
 
 if ROLE not in {"TRADE", "BOOK"}:
     raise RuntimeError(f"Unsupported PSI_WORKER_ROLE={ROLE}; expected TRADE or BOOK")
@@ -517,16 +519,42 @@ def _apply_exchange_subscription_reply(envelope, pending, confirmed):
     command=pending.pop(envelope.get("id"),None)
     if not command:
         return False
-    method,names=command
+    method,names=command[:2]
     if "result" in envelope and envelope.get("result") is None:
         if method=="SUBSCRIBE":
             confirmed.update(names)
         elif method=="UNSUBSCRIBE":
             confirmed.difference_update(names)
     else:
+        # Keep rejected changes pending for a bounded retry/reconnect cycle.
+        attempts=command[3] if len(command)>3 else 0
+        pending[envelope.get("id")]=(method,names,time.monotonic()-ACK_TIMEOUT_SECONDS,attempts)
         print(f"PSI-MICRO SUBSCRIPTION_REJECTED role={ROLE} "
               f"operation={method} size={len(names)}",flush=True)
     return True
+
+
+async def _retry_subscription_acks(ws,pending,active,confirmed,request_id,now_mono):
+    """Recover an individually missing Binance ACK without faking subscription success."""
+    for old_id, command in list(pending.items()):
+        method,names=command[:2]
+        started=command[2] if len(command)>2 else now_mono
+        attempts=command[3] if len(command)>3 else 0
+        if now_mono-started<ACK_TIMEOUT_SECONDS:
+            continue
+        pending.pop(old_id,None)
+        needed=(set(names)&set(active)-set(confirmed) if method=="SUBSCRIBE"
+                else set(names)-set(active)&set(confirmed))
+        if not needed:
+            continue
+        if attempts>=ACK_MAX_RETRIES:
+            raise RuntimeError(f"subscription_ack_timeout role={ROLE} method={method} "
+                               f"symbols={len(needed)} attempts={attempts}")
+        pending[request_id]=(method,needed,now_mono,attempts+1)
+        request_id=await _subscription_change(ws,method,needed,request_id)
+        print(f"PSI-MICRO ACK_RETRY role={ROLE} method={method} "
+              f"symbols={len(needed)} attempt={attempts+1}",flush=True)
+    return request_id
 
 
 async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], host: str):
@@ -539,6 +567,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     last_snapshot = 0.0
     last_control = 0.0
     last_rebalance = 0.0
+    last_ack_review = 0.0
     last_inbound_at = time.monotonic()
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
     active = {str(s).upper() for s in symbols if str(s).upper().endswith("USDT")}
@@ -567,7 +596,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             "id":request_id,
         })
         request_id+=1
-        pending_subscriptions[request_id] = ("SUBSCRIBE",set(active))
+        pending_subscriptions[request_id] = ("SUBSCRIBE",set(active),time.monotonic(),0)
         request_id=await _subscription_change(ws,"SUBSCRIBE",active,request_id)
         print(
             f"PSI-DISTRIBUTED-MICRO connected role={ROLE} symbols={len(active)} "
@@ -593,6 +622,10 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             # market feed. Reconnect to the next configured Binance host.
             if now - last_inbound_at > 45.0:
                 raise RuntimeError(f"silent websocket role={ROLE} age={now-last_inbound_at:.1f}s")
+            if now-last_ack_review>=2.0:
+                request_id=await _retry_subscription_acks(
+                    ws,pending_subscriptions,active,subscription_confirmed,request_id,now)
+                last_ack_review=now
             if now - last_snapshot >= SNAPSHOT_INTERVAL:
                 await publish_snapshot(r, sorted(active), states, events, host, subscription_confirmed)
                 last_snapshot = now
@@ -614,12 +647,12 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                             now,
                         )
                         if removed:
-                            pending_subscriptions[request_id]=("UNSUBSCRIBE",set(removed))
+                            pending_subscriptions[request_id]=("UNSUBSCRIBE",set(removed),now,0)
                             request_id=await _subscription_change(
                                 ws,"UNSUBSCRIBE",removed,request_id
                             )
                         if added:
-                            pending_subscriptions[request_id]=("SUBSCRIBE",set(added))
+                            pending_subscriptions[request_id]=("SUBSCRIBE",set(added),now,0)
                             request_id=await _subscription_change(
                                 ws,"SUBSCRIBE",added,request_id
                             )

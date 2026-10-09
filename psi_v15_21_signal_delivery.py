@@ -11,6 +11,7 @@ import re
 from collections import deque
 from threading import Lock
 from aiohttp import web
+from psi_v15_32_continuity import OpportunityJournal
 
 CORE = None
 EMA = None
@@ -40,6 +41,8 @@ _EVENTS = deque(maxlen=MAX_HISTORY)
 _ACTIVE = set()
 _NEXT_ID = 0
 _STATUS = {"cycles": 0, "errors": 0, "last_error": ""}
+_OPPORTUNITIES = OpportunityJournal(os.environ.get(
+    "PSI_OPPORTUNITY_STATE_PATH", "/data/psi_v15_32_opportunities.json"))
 
 
 def _ms():
@@ -263,7 +266,11 @@ def _candidate_authorities(now_ms):
         sym = str(sym or "").upper()
         if re.fullmatch(r"[A-Z0-9]{2,24}USDT",sym) and sym not in wanted:
             wanted.append(sym)
-    structural = sorted(locals().get("structural_rows", []),
+    try:
+        structural_rows = list(CORE._board() or []) if CORE is not None else []
+    except (AttributeError, TypeError, ValueError):
+        structural_rows = []
+    structural = sorted(structural_rows,
         key=lambda r: (r.get("execution_state") == "BUY NOW",
             r.get("state") == "BUY",r.get("state") == "ARMED",
             EMA.num(r.get("setup_strength"))),reverse=True)
@@ -624,6 +631,8 @@ def _publish_once_unlocked(now_ms=None):
         (v["symbol"],v["authority"],v.get("lane")) for v in foreign_approved
     }
     with _LOCK:
+        # Journal only proven source observations; it cannot grant BUY approval.
+        _OPPORTUNITIES.update(now_ms, buy_structure_rows, eligible)
         for key in sorted(new_active - _ACTIVE):
             if key in buys:
                 normalized = dict(buys[key], authority="EMA", lane="EMA")
@@ -678,6 +687,7 @@ def _publish_once_unlocked(now_ms=None):
             "buy_structure_summary": buy_structure_summary,
             "subscription_summary": subscription_summary,
             "subscription_rows": subscription_rows,
+            "opportunity_tracking_stats": _OPPORTUNITIES.stats(now_ms),
             "missed_rallies": list(_MISSED_MOVES)[-10:][::-1],
             "missed_rally_count": sum(not x["had_approved_buy"] for x in _MISSED_MOVES),
             "live_evidence_checked": live_checked,
@@ -741,6 +751,7 @@ def read_live(now_ms=None):
     approved = _fresh_buy_rows(snap, now_ms) if current else []
     v12_approved = {(str(r.get("symbol")), str(r.get("setup")))
                     for r in approved if r.get("authority") == "V12_PINPOINT"}
+    continuity = _OPPORTUNITIES.view(now_ms, current)
     structure = []
     if current:
         for item in snap.get("buy_structure_rows") or []:
@@ -762,6 +773,10 @@ def read_live(now_ms=None):
                    "NO_VERIFIED_BUY" if current else "DATA_STALE"),
         "buy_count": len(approved),
         "buy_signals": approved,
+        "opportunity_tracking": continuity,
+        "opportunity_tracking_stats": _OPPORTUNITIES.stats(now_ms),
+        "uk_spot_account_status": "ACCOUNT_NOT_CONNECTED_UNVERIFIED",
+        "uk_spot_account_tradability_verified": False,
         "verified_lanes": _group_verified_signals(approved),
         "verified_lane_counts": {k:len(v) for k,v in _group_verified_signals(approved).items()},
         "authority_diagnostics": snap.get("authority_diagnostics", {}) if current else {},
@@ -817,8 +832,11 @@ async def http_quote(request):
              "quotes": [], "order_placement": False},
             status=400, headers={"Cache-Control": "no-store"}
         )
-    # An on-demand request cannot depend on the previous reporter tick.
-    await asyncio.to_thread(publish_once)
+    # Use the current independent live snapshot whenever it is fresh.
+    # Only rebuild a stale snapshot, avoiding unnecessary quote latency.
+    live = await asyncio.to_thread(read_live)
+    if not live["fresh"]:
+        await asyncio.to_thread(publish_once)
     checked_ms = _ms()
     with _LOCK:
         snap = dict(_SNAPSHOT)
@@ -849,6 +867,8 @@ async def http_quote(request):
         "status": ("VERIFIED_AT_READ" if quotes else
                    "NO_VERIFIED_BUY" if active else "DATA_STALE"),
         "buy_count": len(quotes), "quotes": quotes,
+        "uk_spot_account_status": "ACCOUNT_NOT_CONNECTED_UNVERIFIED",
+        "uk_spot_account_tradability_verified": False,
         "order_placement": False,
         "disclaimer": "Read-only observation; venue conditions can change before an order.",
     }, headers={"Cache-Control": "no-store, max-age=0"})
@@ -1053,6 +1073,11 @@ Research entries are <b>not</b> approved trades.</div>
 <p>One full table of chart patterns. A chart marked BUY here is <b>not yet a verified BUY NOW</b> unless it also appears in the approved section.</p>
 <div id="structureNote" role="status">Checking coin setups…</div>
 <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Pattern / timeframe</th><th>Entry zone</th><th>Stop-loss</th><th>Target</th><th>Upside</th><th>Data age</th><th>Why not approved?</th></tr></thead><tbody id="structureRows"></tbody></table></div>
+<h2 id="tracking-section">Continuously tracked opportunities <span class="muted">· <span id="trackingCount">0</span></span></h2>
+<p>Chart and EMA setups remain visible after a brief quote expiry. <b>Revalidation required</b> means no current BUY authorisation. After restart, stored setups must receive fresh evidence.</p>
+<div id="trackingNote" class="note">Loading tracked opportunities…</div>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Current monitoring</th><th>Setup</th><th>Observed entry</th><th>Target estimate</th><th>Last seen</th></tr></thead><tbody id="trackingRows"></tbody></table></div>
+<p class="note">UK Spot account permissions are not verified without an authorised account connection. A structural BUY or fresh quote is not a trade instruction.</p>
 <h2 id="research-section">EMA watchlist</h2>
 <p>Coins approaching important moving averages. WATCH means monitor, not buy.</p>
 <div id="researchNote" role="status">Checking EMA watchlist…</div>
@@ -1086,6 +1111,9 @@ const verifiedSummary=document.getElementById("verifiedSummary");
 const laneGroups={EMA:{body:signals,count:document.getElementById("emaCount")},
   ML:{body:mlSignals,count:document.getElementById("mlCount")},
   V12:{body:v12Signals,count:document.getElementById("v12Count")}};
+const trackingRows=document.getElementById("trackingRows");
+const trackingNote=document.getElementById("trackingNote");
+const trackingCount=document.getElementById("trackingCount");
 const structureRows=document.getElementById("structureRows");
 const structureNote=document.getElementById("structureNote");
 const structureCount=document.getElementById("structureCount");
@@ -1132,6 +1160,23 @@ function friendlyBlocker(code){
  "ENTRY_STRUCTURE_INVALIDATED":"Chart setup no longer valid",
  "PROBABILITY_BELOW_DYNAMIC_FLOOR":"Model confidence is too low"};
  return labels[code]||friendlyPattern(code);
+}
+function showTracking(d){
+ clear(trackingRows);
+ const list=d.opportunity_tracking||[];
+ trackingCount.textContent=String(list.length);
+ trackingNote.textContent=list.length ? "Continuously refreshed when the scanner has valid source evidence. Expired quotes never become automatic orders." : "No source-confirmed opportunities have been tracked yet.";
+ if(!list.length){const r=trackingRows.insertRow();cell(r,"No tracked setups yet").colSpan=6;return;}
+ for(const q of list){
+  const r=trackingRows.insertRow();
+  cell(r,q.symbol);
+  const state=cell(r,q.live_monitoring?q.display_state:"REVALIDATION REQUIRED");
+  state.className=q.live_monitoring?"state-armed":"bad";
+  cell(r,friendlyPattern(q.setup)+" / "+q.timeframe);
+  cell(r,q.entry_low==null?"Research only":money(q.entry_low)+"–"+money(q.entry_high));
+  cell(r,money(q.tp1));
+  cell(r,Math.floor((q.last_observed_age_ms||0)/1000)+"s ago");
+ }
 }
 function resetDisplayLanes(note){
  for(const lane of Object.values(setupLanes)){clear(lane.body);lane.count.textContent="0";
@@ -1201,8 +1246,8 @@ async function verify(symbol){
       +" | "+(q.authority||"EMA")+" | Entry "+money(q.entry)+" | Stop "+money(q.stop)+" | TP1 "+money(q.tp1)
       +" | TP2 "+money(q.tp2)+" | TP3 "+money(q.tp3)
       +" | Quote lease remaining "+Math.floor(lease)+"ms"
-      +" | Recheck the exchange before submitting. No order has been placed.";
-    setTimeout(()=>{quote.textContent="QUOTE EXPIRED: verify again before considering any order.";},lease);
+      +" | UK Spot account permission unverified; recheck on Binance. No order has been placed.";
+    setTimeout(()=>{quote.textContent="LIVE QUOTE EXPIRED: underlying opportunity stays tracked; verify a new quote before trading.";},lease);
   }catch(e){quote.textContent="QUOTE UNAVAILABLE: "+String(e.message)+"; no order permission.";}
 }
 async function refresh(){
@@ -1336,6 +1381,7 @@ async function refresh(){
       qualNote.textContent="Evidence unavailable";
       moverNote.textContent="Tracking unavailable";
     }
+    showTracking(d);
     clear(research);clear(rotating);
     if(valid){
       const count=d.research_eligible_count||0;
@@ -1366,8 +1412,13 @@ async function refresh(){
     invalidate();clear(research);clear(rotating);clear(subRows);clear(qualRows);clear(moverRows);
     subNote.textContent="Disconnected";qualNote.textContent="Disconnected";moverNote.textContent="Disconnected";
     researchNote.textContent="Connection lost — no fresh research";}
-  finally{requestPending=false;setTimeout(refresh,850);}
+  finally{requestPending=false;setTimeout(refresh,1250);}
 }
+// Server-pushed BUY changes accelerate the existing polling fallback.
+try { const alerts=new EventSource("/signals/events");
+ alerts.addEventListener("buy",()=>{if(!document.hidden)refresh();});
+ alerts.addEventListener("snapshot",()=>{if(!document.hidden)refresh();});
+} catch(e) { /* Regular no-cache polling remains active. */ }
 setInterval(()=>{if(aliveUntil&&performance.now()>=aliveUntil){
   status.className="bad";metricFeed.textContent="Stale";lastUpdated.textContent="Expired";status.textContent="EXPIRED — refreshing; no active quote";
   invalidate();}},150);
@@ -1470,6 +1521,7 @@ def signal_tick_line(snapshot, live, cycle_ms=0):
         "buy_structure_summary": live.get("buy_structure_summary", {}),
         "buy_structure_rows": live.get("buy_structure_rows", [])[:20],
         "subscription_summary": live.get("subscription_summary", {}),
+        "opportunity_tracking_stats": live.get("opportunity_tracking_stats", {}),
         "subscription_rows": live.get("subscription_rows", [])[:30],
         "missed_rally_count": live.get("missed_rally_count", 0),
         "technical_ready": live.get("technical_ready_symbols", []),
