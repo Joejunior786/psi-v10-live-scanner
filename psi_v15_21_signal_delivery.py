@@ -926,6 +926,89 @@ button{min-height:36px}
  .table-scroll table{min-width:675px}
  .strategy-lane table{min-width:730px}
 }
+
+/* iPhone display fixes only. Original desktop dashboard and scanner remain unchanged. */
+@media(max-width:760px){
+ html{scroll-padding-top:79px}
+ body{
+  width:100%;max-width:100%;margin:0;
+  padding:14px max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));
+  font-size:15px;overflow-x:hidden
+ }
+ h1{font-size:1.45rem;line-height:1.25}
+ h2{font-size:1.08rem;line-height:1.4;margin:24px 0 10px}
+ h3{font-size:.98rem;line-height:1.4}
+ p{font-size:.9rem;line-height:1.65;overflow-wrap:anywhere}
+ #status,#authority,#quote,.note,#subNote,#structureNote,#qualNote,#researchNote,#moverNote{
+  overflow-wrap:anywhere;word-break:normal;font-size:.86rem;line-height:1.6
+ }
+ .summary-line{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 10px}
+ .summary-line span{min-width:0}
+ .summary-line #lastUpdated{grid-column:1/-1;color:#a7c3d0;font-size:.82rem}
+ .legend{font-size:.85rem;line-height:1.8}
+ .legend span{white-space:normal}
+ .quick{
+  position:sticky;z-index:10;top:0;
+  display:flex;flex-wrap:nowrap;gap:8px;
+  margin:16px -12px 18px;padding:10px 12px 11px;
+  overflow-x:auto;overflow-y:hidden;
+  background:#0e1620;border-top:1px solid #273a4b;border-bottom:1px solid #273a4b;
+  -webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;scrollbar-width:thin
+ }
+ .quick a{
+  display:inline-flex;flex:none;align-items:center;justify-content:center;
+  padding:10px 14px;min-height:44px;
+  border-radius:7px;font-size:.89rem;line-height:1.25
+ }
+ .approved{padding:13px}
+ .approved table,.strategy-lane table,.table-scroll table{min-width:0!important}
+ .table-scroll{overflow:visible;max-width:100%}
+ .table-scroll table,table{display:block;width:100%;max-width:100%;min-width:0!important}
+ thead{display:none}
+ tbody{display:block;width:100%;max-width:100%}
+ tbody tr{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px 12px;width:100%;min-width:0;
+  margin:0 0 9px;padding:12px;
+  background:#152330;border:1px solid #2c4051;border-radius:7px
+ }
+ .approved tbody tr{background:#163035;border-color:#346057}
+ tbody td{
+  display:flex;flex-direction:column;justify-content:center;align-items:flex-start;
+  min-width:0;width:auto;max-width:100%;padding:2px 0;
+  margin:0;border:0!important;line-height:1.4;
+  font-size:.9rem!important;overflow-wrap:anywhere;white-space:normal!important
+ }
+ tbody td::before{
+  display:block;content:attr(data-label);text-transform:uppercase;
+  color:#a4bccb;font-weight:700;font-size:.65rem;letter-spacing:.045em;
+  line-height:1.3;overflow-wrap:anywhere
+ }
+ tbody td:first-child{
+  grid-column:1/-1;display:flex;padding:0 0 8px!important;
+  border-bottom:1px solid #2c4152!important;
+  color:#eaf7f9;font-weight:750;font-size:1.05rem!important
+ }
+ tbody td:first-child::before{content:"Coin";font-size:.65rem}
+ tbody td[colspan]{grid-column:1/-1;font-size:.85rem!important;border:0!important;padding:2px!important}
+ tbody td[colspan]::before{display:none}
+ tbody td[data-label="Verify"],tbody td[data-label="Check"],tbody td[data-label="What is missing"],
+ tbody td[data-label="What's missing"],tbody td[data-label="Why it cannot be bought yet"],
+ tbody td[data-label="Primary blocker"],tbody td[data-label="Current status"]{
+  grid-column:1/-1
+ }
+ tbody td button{width:100%;min-height:44px;text-align:center;font-size:.9rem;white-space:normal}
+ .strategy-lane{margin-bottom:20px}
+ .footer{text-align:center}
+}
+@media(max-width:350px){
+ body{padding-left:10px;padding-right:10px}
+ tbody tr{gap:8px}
+ tbody td{font-size:.84rem!important}
+ .summary-line{gap:7px}
+ .quick{margin-left:-10px;margin-right:-10px;padding-left:10px}
+}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
 </head><body>
 <h1>Live Scanner · V15.31</h1>
