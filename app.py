@@ -1028,7 +1028,12 @@ async def diagnostics_endpoint(request):
 
 
 async def start_http_server():
-    app=web.Application(); app.router.add_get("/",health); app.router.add_get("/live",liveness); app.router.add_get("/health",health); app.router.add_get("/scan",scan_endpoint); app.router.add_get("/diagnostics",diagnostics_endpoint)
+    app=web.Application()
+    # The public homepage should show the live scanner app, not the JSON status
+    # endpoint. All API and health paths keep their existing handlers.
+    dashboard_handler = globals().get("fast_dashboard_handler")
+    app.router.add_get("/", dashboard_handler if callable(dashboard_handler) else health)
+    app.router.add_get("/live",liveness); app.router.add_get("/health",health); app.router.add_get("/scan",scan_endpoint); app.router.add_get("/diagnostics",diagnostics_endpoint)
     # Only registered when the latest installed read-only signal worker supplies handlers.
     # Never allow a stale legacy /scan response to masquerade as execution-ready.
     if callable(globals().get("fast_signal_handler")):
