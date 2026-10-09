@@ -955,7 +955,7 @@ details.advanced h2{margin-top:19px}
 
 /* Lime and grey presentation palette only. No layout or behaviour changes. */
 :root{
- --base:#e5e7eb;
+ --base:#b9eb8b;
  --paper:#f3f4f6;
  --text:#283036;
  --muted:#616d74;
