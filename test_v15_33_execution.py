@@ -97,6 +97,14 @@ class ControlContractTests(unittest.TestCase):
         self.assertNotIn("A0USDT",remove)
         self.assertTrue(add.issubset(set(pinned)))
 
+    def test_priority_recovery_only_when_reserved_symbols_missing(self):
+        stable=[f"PIN{i}USDT" for i in range(36)]
+        research=[f"RESEARCH{i}USDT" for i in range(44)]
+        self.assertFalse(worker._priority_missing(set(stable),stable+research))
+        self.assertFalse(worker._priority_missing(set(stable),stable+research[:3]))
+        self.assertTrue(worker._priority_missing(set(stable[1:]),stable+research))
+        self.assertFalse(worker._priority_missing(set(),[],36))
+
     def test_depth_worker_uses_diff_not_partial_stream(self):
         original=worker.ROLE
         try:

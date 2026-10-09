@@ -37,6 +37,9 @@ CONTROL_MAX_REPLACEMENTS = max(
 CONTROL_REBALANCE_SECONDS = max(
     5.0, float(os.getenv("PSI_WORKER_CONTROL_REBALANCE_SECONDS", "8"))
 )
+PRIORITY_RECOVERY_SECONDS = max(
+    2.0, float(os.getenv("PSI_WORKER_PRIORITY_RECOVERY_SECONDS", "2"))
+)
 CONTROL_MIN_HOLD_SECONDS = max(
     30.0, float(os.getenv("PSI_WORKER_MIN_HOLD_SECONDS", "90"))
 )
@@ -433,6 +436,17 @@ def stream_name(symbol: str) -> str:
     return f"{s}@aggTrade" if ROLE == "TRADE" else f"{s}@depth@100ms"
 
 
+def _priority_missing(active, wanted_list, pinned_slots=36):
+    """True only when an actual reserved symbol has no active subscription.
+
+    An urgent repair is bounded by the normal 8-12 replacement circuit
+    breaker and is never triggered solely by research-only rotation.
+    """
+    active_set={str(sym).upper() for sym in active}
+    wanted=[str(sym).upper() for sym in wanted_list or []]
+    return any(sym not in active_set for sym in wanted[:max(0,pinned_slots)])
+
+
 def _bounded_control_plan(
     active,
     wanted_list,
@@ -582,6 +596,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     last_snapshot = 0.0
     last_control = 0.0
     last_rebalance = 0.0
+    last_priority_recovery = 0.0
     last_ack_review = 0.0
     last_inbound_at = time.monotonic()
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
@@ -713,7 +728,11 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             if now-last_control>=CONTROL_POLL_SECONDS:
                 wanted_list=await selected_symbols(r)
                 if wanted_list:
-                    if now-last_rebalance>=CONTROL_REBALANCE_SECONDS:
+                    urgent_missing=_priority_missing(active,wanted_list)
+                    normal_due=now-last_rebalance>=CONTROL_REBALANCE_SECONDS
+                    recovery_due=(urgent_missing and
+                        now-last_priority_recovery>=PRIORITY_RECOVERY_SECONDS)
+                    if normal_due or recovery_due:
                         next_active, added, removed, diag = _bounded_control_plan(
                             active,
                             wanted_list,
@@ -745,6 +764,8 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                                 inactive_since.pop(sym,None)
                             active=next_active
                             last_rebalance=now
+                            if urgent_missing:
+                                last_priority_recovery=now
                             print(
                                 f"PSI-DISTRIBUTED-MICRO guarded_update role={ROLE} "
                                 f"symbols={len(active)} appliedAdd={len(added)} "
