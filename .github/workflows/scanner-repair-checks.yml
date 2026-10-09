@@ -16,5 +16,5 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - run: python -m compileall -q psi_micro_worker.py psi_v15_32_continuity.py psi_strategy_v12_entry.py test_micro_liveness.py test_v15_32_continuity.py
-      - run: python -m unittest -v test_micro_liveness.py test_micro_stability.py test_v12_execution_gate.py test_v15_32_continuity.py
+      - run: python -m compileall -q psi_micro_worker.py psi_v15_32_continuity.py psi_v15_33_integrity.py psi_strategy_v12_entry.py psi_v15_21_signal_delivery.py test_micro_liveness.py test_v15_32_continuity.py test_v15_33_integrity.py test_v15_33_execution.py
+      - run: python -m unittest -v test_micro_liveness.py test_micro_stability.py test_v12_execution_gate.py test_v15_32_continuity.py test_v15_33_integrity.py test_v15_33_execution.py

@@ -5,10 +5,12 @@ import time
 from collections import defaultdict, deque
 from typing import List, Tuple
 
+from psi_v15_33_integrity import SyncedDepthBook, DepthGap
+
 import aiohttp
 import redis.asyncio as redis
 
-WORKER_VERSION = "15.32-retry-missing-subscription-ack"
+WORKER_VERSION = "15.33-synced-depth-stable-control"
 ROLE = os.getenv("PSI_WORKER_ROLE", "TRADE").strip().upper()
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 CONTROL_KEY = os.getenv("PSI_MICRO_CONTROL_KEY", "psi:v12:selected").strip()
@@ -289,7 +291,7 @@ def _record_book(state, data):
 
     prev_bids=list(state.get("bids") or [])
     prev_asks=list(state.get("asks") or [])
-    ts=now_ms()
+    ts=int(data.get("_received_ms") or now_ms())
 
     bid_notional=_depth_notional(bids)
     ask_notional=_depth_notional(asks)
@@ -356,6 +358,9 @@ def _book_metrics(state, now):
     return {
         "last_book_ms":last_ms,
         "book_age_ms":age_ms,
+        "best_bid": state["bids"][0][0] if state.get("bids") else None,
+        "best_ask": state["asks"][0][0] if state.get("asks") else None,
+        "quote_mid": ((state["bids"][0][0]+state["asks"][0][0])/2.0) if state.get("bids") and state.get("asks") else None,
         "book_fresh":bool(last_ms>0 and age_ms<=5000),
         "book_sequence_verified":bool(state.get("sequence_ok",False) and int(state.get("sequence_samples",0))>=3),
         "book_sequence_samples":int(state.get("sequence_samples",0)),
@@ -425,7 +430,7 @@ async def selected_symbols(r) -> List[str]:
 
 def stream_name(symbol: str) -> str:
     s = symbol.lower()
-    return f"{s}@aggTrade" if ROLE == "TRADE" else f"{s}@depth20@100ms"
+    return f"{s}@aggTrade" if ROLE == "TRADE" else f"{s}@depth@100ms"
 
 
 def _bounded_control_plan(
@@ -457,11 +462,16 @@ def _bounded_control_plan(
 
     wanted_set = set(wanted)
     additions = [sym for sym in wanted if sym not in active]
+    # The first 30 slots are execution-priority subscriptions. Both workers
+    # receive the same ordering. Protect those names from research rotation.
+    pinned = set(wanted[:min(30,max_symbols)])
+    urgent = [sym for sym in additions if sym in pinned]
+    budget = max(max_replacements,8) if urgent else max_replacements
+    budget = min(budget,12)
 
-    # Fill spare capacity gradually without evicting any warm symbol.
     spare = max(0, max_symbols - len(active))
     if spare:
-        add = additions[: min(spare, max_replacements)]
+        add = additions[: min(spare,budget)]
         return active | set(add), set(add), set(), {
             "raw_add": len(additions),
             "raw_remove": len(active - wanted_set),
@@ -469,19 +479,23 @@ def _bounded_control_plan(
         }
 
     removable = [
-        sym for sym in active
-        if sym not in wanted_set
-        and now_mono - float(activated_at.get(sym, now_mono)) >= min_hold_seconds
+        sym for sym in active if sym not in pinned
+        and (
+            (sym not in wanted_set and now_mono-float(activated_at.get(sym,now_mono))>=min_hold_seconds)
+            or bool(urgent)
+        )
     ]
-    removable.sort(key=lambda sym: float(activated_at.get(sym, 0.0)))
-    count = min(max_replacements, len(additions), len(removable))
-    add = set(additions[:count])
-    remove = set(removable[:count])
-    next_active = (active - remove) | add
-    return next_active, add, remove, {
-        "raw_add": len(additions),
-        "raw_remove": len(active - wanted_set),
-        "held_for_dwell": max(0, len(active - wanted_set) - len(removable)),
+    # Evict symbols absent from current control first; do not churn current
+    # research-only symbols unless a new top-30 subscription is waiting.
+    removable.sort(key=lambda sym: (sym in wanted_set,float(activated_at.get(sym,0.0)),sym))
+    count=min(budget,len(additions),len(removable))
+    add=set(additions[:count])
+    remove=set(removable[:count])
+    next_active=(active-remove)|add
+    return next_active,add,remove,{
+        "raw_add":len(additions),
+        "raw_remove":len(active-wanted_set),
+        "held_for_dwell":max(0,len(active-wanted_set)-len([x for x in removable if x not in wanted_set])),
     }
 
 
@@ -570,6 +584,11 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     last_ack_review = 0.0
     last_inbound_at = time.monotonic()
     states = defaultdict(_trade_state_factory if ROLE=="TRADE" else _book_state_factory)
+    depth_books = {}
+    depth_tasks = {}
+    depth_last_attempt = {}
+    depth_fetch_lock = asyncio.Lock()
+    depth_last_fetch = [0.0]
     active = {str(s).upper() for s in symbols if str(s).upper().endswith("USDT")}
     activated_at = {sym: time.monotonic() for sym in active}
     inactive_since = {}
@@ -577,6 +596,55 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
     subscription_confirmed = set()
     pending_subscriptions = {}
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=12, sock_read=30)
+
+    async def _bootstrap_depth(sym, book):
+        # Binance requires a websocket event buffered before the REST snapshot.
+        # Each request is paced so the service does not flood the REST API.
+        for attempt in range(4):
+            if sym not in active or depth_books.get(sym) is not book:
+                return
+            try:
+                async with depth_fetch_lock:
+                    delta = time.monotonic()-depth_last_fetch[0]
+                    if delta < 0.4:
+                        await asyncio.sleep(0.4-delta)
+                    depth_last_fetch[0]=time.monotonic()
+                    async with session.get(
+                        "https://data-api.binance.vision/api/v3/depth",
+                        params={"symbol":sym,"limit":100},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response:
+                        response.raise_for_status()
+                        snapshot=await response.json()
+                if sym not in active or depth_books.get(sym) is not book:
+                    return
+                initial=book.seed(snapshot)
+                if book.synced:
+                    # Buffered historical events retain their original RECEIVE
+                    # timestamps; seeding never fabricates a fresh book tick.
+                    for item in initial:
+                        _record_book(states[sym],item)
+                    return
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError) as exc:
+                print(f"PSI-V15.33 DEPTH_BOOTSTRAP_RETRY symbol={sym} "
+                      f"attempt={attempt+1} error={type(exc).__name__}: {exc}",flush=True)
+            await asyncio.sleep(min(5,1.0+attempt))
+        print(f"PSI-V15.33 DEPTH_UNVERIFIED symbol={sym} fail_closed=1",flush=True)
+
+    def _schedule_depth(sym):
+        if ROLE != "BOOK" or sym not in active:
+            return
+        book=depth_books.get(sym)
+        if not book or book.synced or not book.buffer:
+            return
+        task=depth_tasks.get(sym)
+        if task is not None and not task.done():
+            return
+        now=time.monotonic()
+        if now-depth_last_attempt.get(sym,0)<3:
+            return
+        depth_last_attempt[sym]=now
+        depth_tasks[sym]=asyncio.create_task(_bootstrap_depth(sym,book))
 
     async with session.ws_connect(
         url,
@@ -608,6 +676,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
         await publish_heartbeat(r, sorted(active), events, host)
         last_control=time.monotonic()
         last_rebalance=last_control
+        ws_opened=last_control
 
         # Keep subscriptions and telemetry alive even during quiet feeds.
         while not ws.closed:
@@ -622,6 +691,8 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
             # market feed. Reconnect to the next configured Binance host.
             if now - last_inbound_at > 45.0:
                 raise RuntimeError(f"silent websocket role={ROLE} age={now-last_inbound_at:.1f}s")
+            if now - ws_opened >= 23*3600:
+                raise RuntimeError(f"scheduled websocket renewal role={ROLE}")
             if now-last_ack_review>=2.0:
                 request_id=await _retry_subscription_acks(
                     ws,pending_subscriptions,active,subscription_confirmed,request_id,now)
@@ -659,6 +730,12 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                         if added or removed:
                             for sym in removed:
                                 inactive_since[sym]=now
+                                # Never reuse previous stream sequence integrity.
+                                states.pop(sym,None)
+                                depth_books.pop(sym,None)
+                                old_task=depth_tasks.pop(sym,None)
+                                if old_task is not None:
+                                    old_task.cancel()
                             for sym in added:
                                 activated_at[sym]=now
                                 inactive_since.pop(sym,None)
@@ -714,9 +791,25 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                             continue
                         accepted=_record_trade(states[symbol],data)
                     else:
-                        if not (data.get("bids") or data.get("b")) or not (data.get("asks") or data.get("a")):
+                        if "U" not in data or "u" not in data:
                             continue
-                        accepted=_record_book(states[symbol],data)
+                        depth=depth_books.setdefault(symbol,SyncedDepthBook())
+                        try:
+                            checked=depth.receive(data,now_ms())
+                        except DepthGap:
+                            # Missing U/u IDs invalidate all previous book metrics.
+                            states.pop(symbol,None)
+                            _schedule_depth(symbol)
+                            continue
+                        if not depth.synced:
+                            _schedule_depth(symbol)
+                            continue
+                        if checked is None:
+                            continue
+                        accepted=_record_book(states[symbol],checked)
+                        if accepted:
+                            # Existing Redis readers expect complete best-20 levels.
+                            data=checked
                     if not accepted:
                         continue
 
