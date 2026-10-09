@@ -294,18 +294,31 @@ def _candidate_authorities(now_ms):
 
 
 def _stable_market_priorities(candidates, at):
-    """Hold real worker subscriptions for 120s instead of churning each tick."""
+    """Reserve all current execution candidates BEFORE old research leases.
+
+    Historical leases may consume only the remaining slots. A 3-minute
+    research hold must never evict a newly ranked top-30 coin from worker
+    subscriptions. Executable status is NOT conferred by this scheduling.
+    """
     for symbol, expires in list(_PRIORITY_LEASES.items()):
         if expires <= at:
             del _PRIORITY_LEASES[symbol]
-    for symbol in candidates or []:
-        symbol = str(symbol or "").upper()
-        if len(_PRIORITY_LEASES) >= MICRO_PRIORITY_SLOTS:
+    current=[]
+    for value in candidates or []:
+        sym=str(value or "").upper()
+        if (re.fullmatch(r"[A-Z0-9]{2,24}USDT",sym) and sym not in current):
+            current.append(sym)
+        if len(current)>=MICRO_PRIORITY_SLOTS:
             break
-        if (re.fullmatch(r"[A-Z0-9]{2,24}USDT",symbol)
-                and symbol not in _PRIORITY_LEASES):
-            _PRIORITY_LEASES[symbol] = at + PRIORITY_HOLD_MS
-    return list(_PRIORITY_LEASES)
+    for sym in current:
+        _PRIORITY_LEASES[sym]=at+PRIORITY_HOLD_MS
+    overflow=[sym for sym in _PRIORITY_LEASES if sym not in current]
+    out=(current+overflow)[:MICRO_PRIORITY_SLOTS]
+    # Drop old leases that cannot fit; avoid starving later top-rank arrivals.
+    _PRIORITY_LEASES.clear()
+    for sym in out:
+        _PRIORITY_LEASES[sym]=at+PRIORITY_HOLD_MS
+    return out
 
 
 def _subscription_coverage(at):
@@ -340,6 +353,8 @@ def _subscription_coverage(at):
         "control_requested":sum(x["requested"] for x in samples),
         "both_acknowledged":sum(x["trade_ack"] and x["book_ack"] for x in samples),
         "event_aligned":status_counts.get("TRADE_BOOK_ALIGNED",0),
+        "quote_ready":(status_counts.get("TRADE_BOOK_ALIGNED",0)+
+                       status_counts.get("QUIET_TRADE_LIVE_BOOK",0)),
         "status_counts":status_counts
     },samples
 

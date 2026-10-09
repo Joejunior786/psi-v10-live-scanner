@@ -378,6 +378,11 @@ def _snapshot_micro_metrics(symbol):
         "spread_bps":book.get("spread_bps"),
         "slippage_bps":book.get("slippage_bps"),
         "last_price":float(trade.get("last_price") or 0.0),
+        # Research/display quote only. Never substitute book mid for a
+        # live aggressive trade or confer BUY execution authority.
+        "best_bid":book.get("best_bid"),
+        "best_ask":book.get("best_ask"),
+        "book_mid":book.get("quote_mid"),
         "relative_ranks":ranks,
         "relative_flow":relative_flow,
         "relative_book":relative_book,
@@ -434,7 +439,14 @@ def _subscription_telemetry(symbol, at_ms=None):
     elif ba is None:
         reason="AWAIT_REAL_BOOK_EVENT"
     elif ta>1200:
-        reason="STALE_TRADE_EVENT"
+        # A quiet trade feed is not a broken websocket. This is telemetry
+        # only: no execution approval is granted by the quiet-market state.
+        if ba is not None and 0 <= ba <= 1200 and ta <= 15000 and (
+            result["trade_sequence_verified"] and result["book_sequence_verified"]
+        ):
+            reason="QUIET_TRADE_LIVE_BOOK"
+        else:
+            reason="STALE_TRADE_EVENT"
     elif ba>1200:
         reason="STALE_BOOK_EVENT"
     elif not result["trade_sequence_verified"] or not result["book_sequence_verified"]:
@@ -442,6 +454,7 @@ def _subscription_telemetry(symbol, at_ms=None):
     else:
         reason="TRADE_BOOK_ALIGNED"
     result["status"]=reason
+    result["quote_ready"]=reason in ("TRADE_BOOK_ALIGNED","QUIET_TRADE_LIVE_BOOK")
     result["evidence_aligned"]=reason=="TRADE_BOOK_ALIGNED"
     return result
 
@@ -3533,7 +3546,7 @@ async def redis_control_loop():
             last_priority_diag = 0.0
             while True:
                 priority_snapshot=tuple(globals().get("_signal_priority_symbols",[]) or [])
-                symbols = _distributed_micro_symbols()
+                symbols = _distributed_micro_symbols(priority_snapshot=priority_snapshot)
                 now_mono = time.monotonic()
                 if now_mono - last_priority_diag >= 10:
                     monitored=list(priority_snapshot)
