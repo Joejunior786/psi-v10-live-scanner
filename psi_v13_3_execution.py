@@ -313,7 +313,10 @@ def _attach_wrapper(symbol, structural_row):
     return row
 
 
-def _micro_symbols():
+def _micro_symbols(priority_snapshot=None):
+    # This is the outermost installed execution-pool selector. Accept the
+    # frozen priority cohort from Redis control, rather than rejecting it or
+    # allowing the original structural/radar wrappers to displace top-30.
     base = list(_ORIGINAL_MICRO() or [])
     universe = set(str(s).upper() for s in list(getattr(CORE.q, "universe", []) or []))
     pool_size = int(getattr(CORE, "REDIS_MICRO_POOL_SIZE", max(40, len(base) or 40)))
@@ -343,6 +346,9 @@ def _micro_symbols():
             seen.add(sym)
             out.append(sym)
 
+    if priority_snapshot is not None:
+        for sym in tuple(priority_snapshot)[:min(36,pool_size)]:
+            add(sym)
     for row in structural:
         add(row.get("symbol"))
     for row in early:

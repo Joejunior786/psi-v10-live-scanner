@@ -1,9 +1,11 @@
 import os
 import unittest
+from types import SimpleNamespace
 os.environ.setdefault("REDIS_URL","redis://localhost:6379/0")
 
 import psi_micro_worker as worker
 import psi_v15_21_signal_delivery as delivery
+import psi_v13_3_execution as outer
 
 
 class ControlContractTests(unittest.TestCase):
@@ -44,6 +46,27 @@ class ControlContractTests(unittest.TestCase):
             max_replacements=4,min_hold_seconds=90,max_symbols=80,force_priority=True)
         self.assertTrue({"A0USDT","A1USDT"}.issubset(result))
         self.assertFalse({"A0USDT","A1USDT"}.intersection(remove))
+
+    def test_outermost_selector_accepts_frozen_controller_priorities(self):
+        keys=("CORE","EARLY","V13","_ORIGINAL_MICRO")
+        old={k:getattr(outer,k) for k in keys}
+        try:
+            high=[f"TOP{i}USDT" for i in range(30)]
+            base=[f"OLD{i}USDT" for i in range(60)]
+            universe=high+base
+            outer.CORE=SimpleNamespace(
+                q=SimpleNamespace(universe=universe),
+                REDIS_MICRO_POOL_SIZE=64,
+                _board=lambda:[])
+            outer.EARLY=SimpleNamespace(early_candidates=lambda *a,**kw:[])
+            outer.V13=SimpleNamespace(five=lambda:[])
+            outer._ORIGINAL_MICRO=lambda:base
+            selection=outer._micro_symbols(priority_snapshot=tuple(high))
+            self.assertEqual(selection[:30],high)
+            self.assertEqual(len(set(selection)),len(selection))
+        finally:
+            for k,v in old.items():
+                setattr(outer,k,v)
 
     def test_depth_worker_uses_diff_not_partial_stream(self):
         original=worker.ROLE
