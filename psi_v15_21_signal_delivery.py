@@ -310,6 +310,13 @@ def _stable_market_priorities(candidates, at):
             current.append(sym)
         if len(current)>=MICRO_PRIORITY_SLOTS:
             break
+    if len(current) < 30:
+        # Short watchlists keep the established 3-minute retention behavior;
+        # only a FULL execution shortlist can preempt research leases.
+        for sym in current:
+            if sym not in _PRIORITY_LEASES:
+                _PRIORITY_LEASES[sym]=at+PRIORITY_HOLD_MS
+        return list(_PRIORITY_LEASES)[:MICRO_PRIORITY_SLOTS]
     for sym in current:
         _PRIORITY_LEASES[sym]=at+PRIORITY_HOLD_MS
     overflow=[sym for sym in _PRIORITY_LEASES if sym not in current]
