@@ -1,4 +1,7 @@
+import os
 import tempfile
+os.environ.setdefault('REDIS_URL','redis://localhost:6379/0')
+import psi_micro_worker as worker
 import unittest
 from pathlib import Path
 from psi_v15_32_continuity import OpportunityJournal
@@ -48,3 +51,34 @@ class JournalTests(unittest.TestCase):
             row=book.view(106001,True)[0]
             self.assertEqual(row["display_state"],"BUY")
             self.assertFalse(row["verified_buy_now"])
+
+class DummySocket:
+    def __init__(self):
+        self.sent=[]
+
+    async def send_json(self,payload):
+        self.sent.append(payload)
+
+
+class AckRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_ack_retries_and_uses_exchange_confirmation(self):
+        ws=DummySocket()
+        pending={1:("SUBSCRIBE",{"TESTUSDT"},0,0)}
+        next_id=await worker._retry_subscription_acks(
+            ws,pending,{"TESTUSDT"},set(),5,worker.ACK_TIMEOUT_SECONDS+1)
+        self.assertEqual(next_id,6)
+        self.assertEqual(ws.sent[0]["method"],"SUBSCRIBE")
+        confirmed=set()
+        worker._apply_exchange_subscription_reply(
+            {"id":5,"result":None},pending,confirmed)
+        self.assertEqual(confirmed,{"TESTUSDT"})
+        self.assertEqual(pending,{})
+
+    async def test_exhausted_retries_force_reconnect(self):
+        ws=DummySocket()
+        pending={1:("SUBSCRIBE",{"TESTUSDT"},0,worker.ACK_MAX_RETRIES)}
+        with self.assertRaisesRegex(RuntimeError,"subscription_ack_timeout"):
+            await worker._retry_subscription_acks(
+                ws,pending,{"TESTUSDT"},set(),5,
+                worker.ACK_TIMEOUT_SECONDS+1)
+
