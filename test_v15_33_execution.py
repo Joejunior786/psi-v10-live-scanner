@@ -158,5 +158,55 @@ class PublishedControlTelemetryTests(unittest.TestCase):
             core._distributed_micro_book.clear()
             core._distributed_micro_book.update(old_book)
 
+
+class TimeAlignedTelemetryTests(unittest.TestCase):
+    def test_snapshot_read_time_not_earlier_scan_start_controls_diagnostics(self):
+        from unittest.mock import patch
+        observed=[]
+        events=[]
+        base=1_000_000
+        original=(delivery.CORE,delivery.ML)
+        try:
+            delivery.ML=SimpleNamespace(_board=[{"symbol":"TESTUSDT"}])
+            delivery.CORE=SimpleNamespace(
+                _refresh_micro_snapshots_sync=lambda:events.append("REFRESH"),
+                _subscription_telemetry=lambda sym,at:(
+                    observed.append((sym,at,list(events))) or
+                    {"status":"TRADE_BOOK_ALIGNED",
+                     "control_requested":True,"trade_acknowledged":True,
+                     "book_acknowledged":True})
+            )
+            with patch.object(delivery,"_ms",return_value=base+700):
+                summary,rows=delivery._subscription_coverage(base)
+            self.assertEqual(summary["coverage_checked_ms"],base+700)
+            self.assertEqual(observed[0][1],base+700)
+            self.assertEqual(observed[0][2],["REFRESH"])
+            self.assertEqual(summary["both_acknowledged"],1)
+        finally:
+            delivery.CORE,delivery.ML=original
+
+    def test_future_timestamp_does_not_create_a_fake_subscription_ack(self):
+        import psi_strategy_v12_entry as core
+        from unittest.mock import patch
+        now=1_000_000
+        previous=(core._published_micro_control,
+                  dict(core._distributed_micro_meta))
+        try:
+            core._published_micro_control=(now,frozenset({"TESTUSDT"}))
+            for role in ("TRADE","BOOK"):
+                core._distributed_micro_meta[role]={
+                    "generated_ms":now+150,
+                    "requested_symbols":frozenset({"TESTUSDT"}),
+                    "acknowledged_symbols":frozenset({"TESTUSDT"})}
+            with patch.object(core,"_refresh_micro_snapshots_sync",return_value=True):
+                row=core._subscription_telemetry("TESTUSDT",now)
+            self.assertEqual(row["status"],"WORKER_SNAPSHOT_UNAVAILABLE")
+            self.assertEqual(row["trade_snapshot_lag_ms"],-150)
+            self.assertFalse(row["book_acknowledged"])
+        finally:
+            core._published_micro_control=previous[0]
+            core._distributed_micro_meta.clear()
+            core._distributed_micro_meta.update(previous[1])
+
 if __name__ == "__main__":
     unittest.main()
