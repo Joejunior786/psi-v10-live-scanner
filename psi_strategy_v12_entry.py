@@ -406,7 +406,13 @@ def _subscription_telemetry(symbol, at_ms=None):
     _refresh_micro_snapshots_sync()
     sym=str(symbol or "").upper()
     now=int(time.time()*1000) if at_ms is None else int(at_ms)
-    result={"symbol":sym,"control_requested":sym in _distributed_micro_sticky_pool}
+    # V15.33: report the last control list actually written to Redis,
+    # not a mutable tentative selector pool modified by other scan lanes.
+    published_ms, published_symbols = _published_micro_control
+    control_valid = published_ms > 0 and 0 <= now-published_ms <= 12000
+    result={"symbol":sym,
+            "control_requested":bool(control_valid and sym in published_symbols),
+            "control_snapshot_ms":published_ms if control_valid else None}
     for role,cache in (("trade",_distributed_micro_trade),
                        ("book",_distributed_micro_book)):
         key=role.upper()
@@ -428,7 +434,9 @@ def _subscription_telemetry(symbol, at_ms=None):
         seq_key="sequence_verified" if role=="trade" else "book_sequence_verified"
         result[role+"_sequence_verified"]=bool(metric_valid and item.get(seq_key))
     ta=result["trade_age_ms"];ba=result["book_age_ms"]
-    if not result["control_requested"]:
+    if not control_valid:
+        reason="CONTROL_SNAPSHOT_STALE"
+    elif not result["control_requested"]:
         reason="NOT_IN_CONTROL_POOL"
     elif not result["trade_requested"] or not result["book_requested"]:
         reason="WORKER_NOT_SUBSCRIBED"
@@ -3381,6 +3389,9 @@ async def strategy_loop():
 
 _distributed_micro_sticky_pool = []
 _distributed_micro_pool_epoch = 0
+# Atomically replaced only AFTER Redis accepts the published controller state.
+# Never use the mutable selector's tentative pool for execution telemetry.
+_published_micro_control = (0, frozenset())
 REDIS_MICRO_PRIORITY_SLOTS = min(
     REDIS_MICRO_POOL_SIZE,
     max(min(36, REDIS_MICRO_POOL_SIZE),
@@ -3523,6 +3534,7 @@ def _distributed_micro_symbols(priority_snapshot=None):
 
 
 async def redis_control_loop():
+    global _published_micro_control
     if not REDIS_URL:
         _redis_bridge_stats["control_disabled"] = 1
         return
@@ -3571,6 +3583,9 @@ async def redis_control_loop():
                     separators=(",", ":"),
                 )
                 await client.set(REDIS_CONTROL_KEY, payload, ex=120)
+                _published_micro_control = (
+                    json.loads(payload)["generated_ms"], frozenset(symbols)
+                )
                 _redis_bridge_stats["control_symbols"] = len(symbols)
 
                 universe = list(getattr(q, "universe", []) or [])

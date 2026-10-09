@@ -113,5 +113,50 @@ class ControlContractTests(unittest.TestCase):
         finally:
             worker.ROLE=original
 
+
+class PublishedControlTelemetryTests(unittest.TestCase):
+    def test_telemetry_uses_published_redis_control_not_mutating_proposal(self):
+        import psi_strategy_v12_entry as core
+        from unittest.mock import patch
+        now=1_000_000
+        original=(core._published_micro_control,
+                  list(core._distributed_micro_sticky_pool),
+                  dict(core._distributed_micro_meta),
+                  dict(core._distributed_micro_trade),
+                  dict(core._distributed_micro_book))
+        try:
+            core._published_micro_control=(now,frozenset({"LIVEUSDT"}))
+            # Simulate a concurrent selector cycle updating the tentative pool.
+            core._distributed_micro_sticky_pool=["OTHERUSDT"]
+            for role,cache in (("TRADE",core._distributed_micro_trade),
+                               ("BOOK",core._distributed_micro_book)):
+                cache.clear()
+                cache["LIVEUSDT"]={
+                    "_snapshot_ms":now,"last_"+role.lower()+"_ms":now-200,
+                    "sequence_verified":True,"book_sequence_verified":True}
+                core._distributed_micro_meta[role]={
+                    "generated_ms":now,
+                    "requested_symbols":frozenset({"LIVEUSDT"}),
+                    "acknowledged_symbols":frozenset({"LIVEUSDT"})}
+            with patch.object(core,"_refresh_micro_snapshots_sync",return_value=True):
+                verified=core._subscription_telemetry("LIVEUSDT",now)
+                unrelated=core._subscription_telemetry("OTHERUSDT",now)
+                expired=core._subscription_telemetry("LIVEUSDT",now+12001)
+            self.assertTrue(verified["control_requested"])
+            self.assertEqual(verified["status"],"TRADE_BOOK_ALIGNED")
+            self.assertFalse(unrelated["control_requested"])
+            self.assertEqual(unrelated["status"],"NOT_IN_CONTROL_POOL")
+            self.assertFalse(expired["control_requested"])
+            self.assertEqual(expired["status"],"CONTROL_SNAPSHOT_STALE")
+        finally:
+            (core._published_micro_control,old_sticky,old_meta,old_trade,old_book)=original
+            core._distributed_micro_sticky_pool=old_sticky
+            core._distributed_micro_meta.clear()
+            core._distributed_micro_meta.update(old_meta)
+            core._distributed_micro_trade.clear()
+            core._distributed_micro_trade.update(old_trade)
+            core._distributed_micro_book.clear()
+            core._distributed_micro_book.update(old_book)
+
 if __name__ == "__main__":
     unittest.main()
