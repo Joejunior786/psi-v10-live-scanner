@@ -29,7 +29,7 @@ class ControlContractTests(unittest.TestCase):
         before={x:100.0 for x in active}
         result,add,remove,diag=worker._bounded_control_plan(
             active,wanted,before,110.0,max_replacements=4,
-            min_hold_seconds=90,max_symbols=80)
+            min_hold_seconds=90,max_symbols=80,force_priority=True)
         self.assertEqual(len(result),80)
         self.assertGreaterEqual(len(add),8)
         self.assertTrue(add.issubset(set(wanted[:30])))
@@ -41,7 +41,7 @@ class ControlContractTests(unittest.TestCase):
         wanted=priority+[f"REST{i}USDT" for i in range(50)]
         result,add,remove,diag=worker._bounded_control_plan(
             active,wanted,{sym:0 for sym in active},200,
-            max_replacements=4,min_hold_seconds=90,max_symbols=80)
+            max_replacements=4,min_hold_seconds=90,max_symbols=80,force_priority=True)
         self.assertTrue({"A0USDT","A1USDT"}.issubset(result))
         self.assertFalse({"A0USDT","A1USDT"}.intersection(remove))
 

@@ -441,6 +441,7 @@ def _bounded_control_plan(
     max_replacements=CONTROL_MAX_REPLACEMENTS,
     min_hold_seconds=CONTROL_MIN_HOLD_SECONDS,
     max_symbols=MAX_SYMBOLS,
+    force_priority=False,
 ):
     """Return a bounded subscription change plan.
 
@@ -464,7 +465,7 @@ def _bounded_control_plan(
     additions = [sym for sym in wanted if sym not in active]
     # The first 30 slots are execution-priority subscriptions. Both workers
     # receive the same ordering. Protect those names from research rotation.
-    pinned = set(wanted[:min(30,max_symbols)])
+    pinned = set(wanted[:min(30,max_symbols)]) if force_priority else set()
     urgent = [sym for sym in additions if sym in pinned]
     budget = max(max_replacements,8) if urgent else max_replacements
     budget = min(budget,12)
@@ -716,6 +717,7 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                             wanted_list,
                             activated_at,
                             now,
+                            force_priority=True,
                         )
                         if removed:
                             pending_subscriptions[request_id]=("UNSUBSCRIBE",set(removed),now,0)
