@@ -992,6 +992,58 @@ code{word-break:break-word}
  tbody tr{gap:9px}
 }
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important}}
+
+/* Presentation-only improvements: onboarding, setup lanes and mobile cards. */
+:root{--bg:#090f19;--surface:#121e2b;--surface-2:#1a2a3b;--edge:#2a3e50;--mint:#69e7bd;--amber:#ffd18a}
+body{background:radial-gradient(ellipse at 14% 0,rgba(61,135,146,.12),transparent 420px),#090f19}
+.topbar{min-height:82px}.brand-mark{background:linear-gradient(135deg,#174447,#12323a)}
+.hero h2{max-width:760px}.hero p{font-size:14px}
+.panel{border-radius:17px;box-shadow:0 8px 30px rgba(0,0,0,.10)}
+.start-here{margin:20px 0 6px;padding:23px;border-radius:18px;background:linear-gradient(135deg,#18333a,#11202f 65%);border:1px solid #346064}
+.start-here h2{font-size:22px;margin:4px 0 10px}.start-here>p{font-size:12px;margin:10px 0 0}
+.guide-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:15px}
+.guide-card{padding:14px;border-radius:12px;background:rgba(11,23,33,.65);border:1px solid rgba(145,196,207,.15)}
+.guide-card strong{font-size:13px;display:block;margin-bottom:4px}.guide-card p{font-size:12px;margin:0}
+.guide-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--mint)}
+.guide-card.arm .guide-dot{background:var(--amber)}
+.guide-card.watch .guide-dot{background:#9db7d2}
+.quick{margin:16px 0 9px}.quick a{border-radius:999px;padding:10px 15px}
+.lane-links{display:flex;gap:8px;overflow-x:auto;padding:7px 0 19px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.lane-links::-webkit-scrollbar{display:none}
+.lane-links a{display:inline-flex;flex:none;align-items:center;white-space:nowrap;text-decoration:none;background:#1a2b3b;color:#b9d0de;border:1px solid #314a5f;padding:8px 13px;border-radius:999px;font-size:12px;font-weight:700}
+.lane-links a:hover,.lane-links a:focus-visible{color:#fff;background:#234356}
+.lane-card{border-left:3px solid #689bc6}.lane-card.beast{border-left-color:#dcb37c}.lane-card.ema{border-left-color:#78bcdc}
+.lane-card.exhaustion{border-left-color:#c4a7e5}.lane-card.breakout{border-left-color:#72ceac}.lane-card.pullback{border-left-color:#d8c482}
+.lane-card .lane-intro{font-size:13px;max-width:900px}
+.lane-count{color:#c9e6ea;font-variant-numeric:tabular-nums}
+.simple-stage{font-weight:750;color:#edc886}
+.simple-stage.verified-stage{color:var(--mint)}
+.advanced-panel{padding:15px 20px}.advanced-panel summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px;font-weight:750;color:#ddeaf2;min-height:36px}
+.advanced-panel summary::-webkit-details-marker{display:none}
+.advanced-panel summary:after{content:"+";font-weight:500;font-size:24px;color:#9bc2d0}
+.advanced-panel[open] summary:after{content:"−"}
+.advanced-panel summary small{margin-left:auto;color:#91aebf;font-size:11px;font-weight:600}
+.advanced-panel .section-header{margin-top:13px}
+.section-heading-caption{font-size:11px;color:#96b2c4;font-weight:500}
+.empty-reason{font-size:12px;color:#9fbacc}
+#verified{scroll-margin-top:85px}
+@media(max-width:700px){
+ .topbar{min-height:70px}.header-meta .header-market{font-size:9px}
+ .hero{padding:22px 2px 18px}.hero h2{font-size:28px}
+ .start-here{padding:16px 14px;margin:13px 0 5px;border-radius:14px}
+ .start-here h2{font-size:19px}
+ .guide-grid{grid-template-columns:1fr;gap:7px;margin-top:12px}
+ .guide-card{padding:10px 12px}
+ .guide-card strong{font-size:12px;margin:0 0 3px}
+ .guide-card p{font-size:11px}
+ .quick{grid-template-columns:repeat(5,minmax(0,1fr));margin:0}
+ .lane-links{padding:11px 0 16px;gap:6px}
+ .lane-links a{font-size:11px;padding:9px 11px}
+ .lane-card .lane-intro{font-size:12px}
+ .advanced-panel{padding:13px}
+ .lane-card tbody tr td[data-label="What's missing"]{grid-column:1/-1}
+ .lane-card tbody tr td[data-label="Pattern"]{grid-column:1/-1}
+}
 </style></head><body><div class="app-shell">
 <header class="topbar">
  <div class="brand"><div class="brand-mark" aria-hidden="true"></div>
@@ -1001,25 +1053,34 @@ code{word-break:break-word}
 <main>
 <section class="hero" aria-label="Scanner overview"><div>
  <div class="kicker">REAL-TIME MARKET OVERVIEW</div>
- <h2>Clarity in every signal.</h2>
- <p>Independent EMA, structural and ML analysis, with verified trade and order-book integrity. Signals are informational only: this scanner does not place orders.</p>
+ <h2>Find promising coins. Understand every signal.</h2>
+ <p>See coins grouped by trading setup, spot early opportunities and check which signals are actually verified. Made for beginners. This app never places trades.</p>
 </div><div class="hero-stamp">LIVE MARKET MONITOR · READ ONLY</div></section>
 <section class="metrics" aria-label="Live scan metrics">
  <article class="metric"><div class="metric-label">Verified BUY NOW</div><div class="metric-value" id="metricVerified">0</div><div class="metric-detail">Read-time approved entries</div></article>
- <article class="metric"><div class="metric-label">Buy structure</div><div class="metric-value" id="metricStructure">0</div><div class="metric-detail">Research setups only</div></article>
- <article class="metric"><div class="metric-label">ML verified</div><div class="metric-value" id="metricMl">0</div><div class="metric-detail">Independent ML approvals</div></article>
- <article class="metric"><div class="metric-label">Data integrity</div><div class="metric-value" id="metricFeed">Checking</div><div class="metric-detail">Freshness-aware live check</div></article>
+ <article class="metric"><div class="metric-label">Developing setups</div><div class="metric-value" id="metricStructure">0</div><div class="metric-detail">Research setups only</div></article>
+ <article class="metric"><div class="metric-label">AI verified buys</div><div class="metric-value" id="metricMl">0</div><div class="metric-detail">Independent ML approvals</div></article>
+ <article class="metric"><div class="metric-label">Live data</div><div class="metric-value" id="metricFeed">Checking</div><div class="metric-detail">Freshness-aware live check</div></article>
 </section>
 <div class="connection-panel">
  <div id="status" role="status" aria-live="polite">Connecting to market feed…</div>
  <div id="authority" role="status">Checking independent strategy authorities…</div>
 </div>
-<nav class="quick" aria-label="Dashboard sections">
- <a href="#verified">Verified</a><a href="#buy-structure">Structure</a><a href="#qualification">ML review</a><a href="#research-section">Research</a><a href="#feed">Live feed</a>
+<section class="start-here" id="guide" aria-labelledby="start-title">
+ <div class="kicker">YOUR QUICK GUIDE</div><h2 id="start-title">What does each signal mean?</h2>
+ <div class="guide-grid">
+  <div class="guide-card"><strong><i class="guide-dot" aria-hidden="true"></i>Verified BUY NOW</strong><p>A trade has passed the scanner’s latest checks. Tap <b>Verify quote</b> before any decision; prices and approvals expire.</p></div>
+  <div class="guide-card arm"><strong><i class="guide-dot" aria-hidden="true"></i>Almost ready (ARMED)</strong><p>A promising pattern is forming, but still needs more confirmation. Not permission to buy.</p></div>
+  <div class="guide-card watch"><strong><i class="guide-dot" aria-hidden="true"></i>Watch / Research</strong><p>Worth monitoring. Price zones and possible gains are estimates, not verified trade entries or guarantees.</p></div>
+ </div><p><strong>New here?</strong> Start with <b>Verified buys</b>, then browse the setup categories below. Technical diagnostics are tucked away at the bottom.</p>
+</section>
+<nav class="quick" aria-label="Main dashboard sections">
+ <a href="#guide">Start</a><a href="#verified">Buy now</a><a href="#beast-lane">BEAST</a><a href="#ema-lane">EMA</a><a href="#more-lanes">More</a>
 </nav>
+<nav class="lane-links" aria-label="More trading setup categories"><a href="#exhaustion-lane">Seller exhaustion</a><a href="#breakout-lane">Breakouts</a><a href="#pullback-lane">Pullbacks</a><a href="#other-lane">Other setups</a><a href="#ema-watch">EMA watchlist</a><a href="#qualification">AI review</a><a href="#feed">Data health</a></nav>
 <section class="approved panel" id="verified">
  <div class="section-header"><h2>Verified BUY NOW · <span class="inline-number" id="verifiedCount">0</span> active</h2><span class="section-tag tag-mint">Execution-grade check</span></div>
- <p>Only read-time verified signals are shown here. A technical BUY structure alone is not an approved BUY NOW. Verify a fresh quote before considering an order.</p>
+ <p>These are the <b>only</b> entries that have passed the scanner’s live checks. Other categories below are <b>watchlists, not buy instructions</b>. Always press Verify quote before considering a trade.</p>
  <div id="verifiedSummary" class="note" aria-live="polite">Checking live approvals…</div>
  <h3>EMA verified lane · <span id="emaCount">0</span></h3>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Frame</th><th>Entry</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Verify</th></tr></thead><tbody id="signals"></tbody></table></div>
@@ -1033,38 +1094,71 @@ code{word-break:break-word}
  <p>Select Verify on an approved signal. Quotes expire quickly and are never orders.</p>
  <div id="quote" class="note" aria-live="polite">Select Verify on an active signal.</div>
 </section>
-<section class="panel" id="feed">
+<div id="more-lanes" aria-label="Browse different setup types">
+<section class="panel lane-card beast" id="beast-lane">
+ <div class="section-header"><h2>BEAST · Powerful setups <span class="lane-count" id="beastCount">0</span></h2><span class="section-tag">High-conviction patterns</span></div>
+ <p class="lane-intro">Coins the scanner identifies in its BEAST strategy lane. These may have strong technical patterns but are <b>not</b> approved trades unless they appear in Verified BUY NOW.</p>
+ <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Pattern</th><th>Entry area*</th><th>Possible upside*</th><th>Stop*</th><th>What's missing</th></tr></thead><tbody id="beastRows"></tbody></table></div>
+</section>
+<section class="panel lane-card ema" id="ema-lane">
+ <div class="section-header"><h2>EMA · Moving-average setups <span class="lane-count" id="emaSetupCount">0</span></h2><span class="section-tag">Trend &amp; support</span></div>
+ <p class="lane-intro"><b>EMA</b> is a trend-following line. These coins are near, reclaiming or reacting to an important EMA. For earlier watch candidates, open the <a href="#ema-watch">EMA watchlist</a> below.</p>
+ <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Pattern</th><th>Entry area*</th><th>Possible upside*</th><th>Stop*</th><th>What's missing</th></tr></thead><tbody id="emaSetupRows"></tbody></table></div>
+</section>
+<section class="panel lane-card exhaustion" id="exhaustion-lane">
+ <div class="section-header"><h2>Seller exhaustion <span class="lane-count" id="exhaustionCount">0</span></h2><span class="section-tag">Possible reversal</span></div>
+ <p class="lane-intro">Selling pressure may be fading and buyers may be returning. A slowdown in selling alone does not confirm a reversal.</p>
+ <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Pattern</th><th>Entry area*</th><th>Possible upside*</th><th>Stop*</th><th>What's missing</th></tr></thead><tbody id="exhaustionRows"></tbody></table></div>
+</section>
+<section class="panel lane-card breakout" id="breakout-lane">
+ <div class="section-header"><h2>Breakout candidates <span class="lane-count" id="breakoutCount">0</span></h2><span class="section-tag">Resistance &amp; momentum</span></div>
+ <p class="lane-intro">Coins testing or recovering important price levels. Breakouts can fail, so the scanner still checks confirmation and fresh market data.</p>
+ <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Pattern</th><th>Entry area*</th><th>Possible upside*</th><th>Stop*</th><th>What's missing</th></tr></thead><tbody id="breakoutRows"></tbody></table></div>
+</section>
+<section class="panel lane-card pullback" id="pullback-lane">
+ <div class="section-header"><h2>Pullback opportunities <span class="lane-count" id="pullbackCount">0</span></h2><span class="section-tag">Price returning to support</span></div>
+ <p class="lane-intro">Coins that may be retracing towards a better-priced area rather than being chased after a rally. Entry zones are research references only.</p>
+ <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Pattern</th><th>Entry area*</th><th>Possible upside*</th><th>Stop*</th><th>What's missing</th></tr></thead><tbody id="pullbackRows"></tbody></table></div>
+</section>
+<section class="panel lane-card" id="other-lane">
+ <div class="section-header"><h2>Other chart patterns <span class="lane-count" id="otherCount">0</span></h2><span class="section-tag">Additional setups</span></div>
+ <p class="lane-intro">Other structural patterns that do not clearly belong to the categories above. Nothing is silently discarded.</p>
+ <div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Pattern</th><th>Entry area*</th><th>Possible upside*</th><th>Stop*</th><th>What's missing</th></tr></thead><tbody id="otherRows"></tbody></table></div>
+</section>
+<p class="detail-note">*Entry, stop and upside values come from the existing scanner research. They may be stale or unconfirmed and are not trade instructions.</p>
+</div>
+<details class="panel advanced-panel" id="feed"><summary class="advanced-toggle">Live data health <small>Advanced</small></summary>
  <div class="section-header"><h2>Live trade &amp; book delivery</h2><span class="section-tag">Data integrity</span></div>
  <p>All shortlisted symbols. A requested subscription is not an acknowledged subscription; live event ages and sequence validation determine feed readiness.</p>
  <div id="subNote" class="note">Checking worker subscriptions…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Trade ACK</th><th>Book ACK</th><th>Trade age</th><th>Book age</th><th>Delivery status</th></tr></thead><tbody id="subRows"></tbody></table></div>
-</section>
-<section class="panel" id="buy-structure">
+</details>
+<details class="panel advanced-panel" id="buy-structure"><summary class="advanced-toggle">All technical setups and full detail <small>Advanced</small></summary>
  <div class="section-header"><h2>BUY STRUCTURE · <span class="inline-number" id="structureCount">0</span> setups</h2><span class="section-tag">Independent V12 lane</span></div>
  <p>BUY, ARMED and WATCH structures remain separate from executable BUY NOW approvals. Entry zones are research references; formal V12 TP1 and ML estimated targets have different sources.</p>
  <div id="structureNote" class="note" role="status">Checking formal structure…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>State</th><th>Setup / frame</th><th>Entry zone</th><th>Stop</th><th>Target (source)</th><th>Potential</th><th>Evidence age</th><th>Execution blockers</th></tr></thead><tbody id="structureRows"></tbody></table></div>
-</section>
-<section class="panel" id="qualification">
+</details>
+<details class="panel advanced-panel" id="qualification"><summary class="advanced-toggle">AI decisions and reasons <small>Advanced</small></summary>
  <div class="section-header"><h2>Machine Learning qualification</h2><span class="section-tag">Decision audit</span></div>
  <p>NEAR BUY, DATA BLOCKED and MODEL REJECTED are diagnostics, not trade approvals.</p>
  <div id="qualNote" class="note">Checking qualification evidence…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Engine</th><th>Status</th><th>Target</th><th>Primary blocker</th></tr></thead><tbody id="qualRows"></tbody></table></div>
-</section>
-<section class="panel" id="rallies">
+</details>
+<details class="panel advanced-panel" id="rallies"><summary class="advanced-toggle">Previous 10%+ moves <small>Advanced</small></summary>
  <div class="section-header"><h2>Observed 10%+ rallies</h2><span class="section-tag">Learning audit</span></div>
  <p>Verified monitored moves without a prior approval, not a full exchange gainer list. Tracking resets on scanner restart.</p>
  <div id="moverNote" class="note">Waiting for verified tracking observations…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Observed rise</th><th>Tracking start</th><th>Earlier state</th></tr></thead><tbody id="moverRows"></tbody></table></div>
-</section>
-<section class="panel">
- <div class="section-header"><h2 id="research-section">Developing setups</h2><span class="section-tag">Ranked research</span></div>
+</details>
+<section class="panel" id="ema-watch">
+ <div class="section-header"><h2 id="research-section">EMA early watchlist</h2><span class="section-tag">Ranked research</span></div>
  <p>Highest-ranked near-EMA setups based on cached 1H/4H/daily candles, not live execution quotes. Unchanged snapshots can repeat.</p>
  <div id="researchNote" class="note" role="status">Checking source updates…</div>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead><tbody id="research"></tbody></table></div>
 </section>
 <section class="panel" id="rotating-section">
- <div class="section-header"><h2>Rotating near-EMA watch</h2><span class="section-tag">Opportunity monitor</span></div>
+ <div class="section-header"><h2>More EMA coins to watch (rotating)</h2><span class="section-tag">Opportunity monitor</span></div>
  <p>Up to 10 other eligible symbols rotate every 20 seconds. WATCH and near-touch states are not verified BUY signals.</p>
  <div class="table-scroll"><table><thead><tr><th>Pair</th><th>Stage</th><th>Frame</th><th>EMA</th><th>Distance</th><th>Candle age</th><th>Changed</th></tr></thead><tbody id="rotating"></tbody></table></div>
 </section>
@@ -1100,6 +1194,64 @@ const metricStructure=document.getElementById("metricStructure");
 const metricMl=document.getElementById("metricMl");
 const metricFeed=document.getElementById("metricFeed");
 const lastUpdated=document.getElementById("lastUpdated");
+
+/* Display-only categories; do not modify any backend engine decision. */
+const setupLanes={
+ beast:{body:document.getElementById("beastRows"),count:document.getElementById("beastCount")},
+ ema:{body:document.getElementById("emaSetupRows"),count:document.getElementById("emaSetupCount")},
+ exhaustion:{body:document.getElementById("exhaustionRows"),count:document.getElementById("exhaustionCount")},
+ breakout:{body:document.getElementById("breakoutRows"),count:document.getElementById("breakoutCount")},
+ pullback:{body:document.getElementById("pullbackRows"),count:document.getElementById("pullbackCount")},
+ other:{body:document.getElementById("otherRows"),count:document.getElementById("otherCount")}
+};
+function classifyForDisplay(q,officialLane){
+ const lane=String(q.lane||officialLane||"").toUpperCase(),pattern=String(q.setup||"").toUpperCase();
+ if(lane.includes("BEAST"))return "beast";
+ if(/EMA|GOLDEN_CROSS|MOVING_AVERAGE|\bMA200\b|\bMA50\b/.test(pattern)||lane.includes("EMA"))return "ema";
+ if(lane.includes("EXHAUST")||/EXHAUST|FAILED_BREAKDOWN|REVERSAL|SELLER/.test(pattern))return "exhaustion";
+ if(lane.includes("BREAKOUT")||/BREAKOUT|SQUEEZE|COIL/.test(pattern))return "breakout";
+ if(lane.includes("PULLBACK")||/PULLBACK|SUPPORT|RETEST/.test(pattern))return "pullback";
+ return "other";
+}
+function friendlyPattern(code){return String(code||"Chart setup").replace(/_/g," ").toLowerCase().replace(/\b[a-z]/g,c=>c.toUpperCase());}
+function friendlyBlocker(code){
+ const labels={"ANTI_CHASE":"Price too far from entry","STALE_TRADE":"Trade updates delayed",
+ "STALE_BOOK":"Order-book updates delayed","HARD_SENSOR_SAFETY":"Live-data safety check pending",
+ "NEGATIVE_EXPECTED_VALUE":"Risk vs reward not good enough",
+ "RISK_LEVELS_UNAVAILABLE":"Entry or stop levels missing",
+ "ENTRY_STRUCTURE_INVALIDATED":"Chart setup no longer valid",
+ "PROBABILITY_BELOW_DYNAMIC_FLOOR":"Model confidence is too low"};
+ return labels[code]||friendlyPattern(code);
+}
+function resetDisplayLanes(note){
+ for(const lane of Object.values(setupLanes)){clear(lane.body);lane.count.textContent="0";
+  const row=lane.body.insertRow();cell(row,note||"No matching setups in this live scan").colSpan=7;}
+}
+function showDisplayLanes(data){
+ const laneMap=new Map();
+ for(const q of (data.subscription_rows||[]))if(q.symbol&&q.lane)laneMap.set(q.symbol,q.lane);
+ for(const q of (data.qualification_rows||[]))if(q.symbol&&q.lane)laneMap.set(q.symbol,q.lane);
+ const buckets={beast:[],ema:[],exhaustion:[],breakout:[],pullback:[],other:[]};
+ for(const q of (data.buy_structure_rows||[])){
+  buckets[classifyForDisplay(q,laneMap.get(q.symbol))].push(q);
+ }
+ for(const [key,lane] of Object.entries(setupLanes)){
+  clear(lane.body);lane.count.textContent=String(buckets[key].length);
+  if(!buckets[key].length){const row=lane.body.insertRow();cell(row,"No "+key+" setups currently identified").colSpan=7;continue;}
+  for(const q of buckets[key]){
+   const row=lane.body.insertRow();
+   cell(row,q.symbol);
+   const stage=cell(row,q.verified_buy_now?"Verified in Buy now":q.status==="ARMED"?"Almost ready":q.status==="WATCH"?"Watch":"Research only");
+   stage.className="simple-stage"+(q.verified_buy_now?" verified-stage":"");
+   cell(row,friendlyPattern(q.setup)+" · "+(q.timeframe||"—"));
+   cell(row,q.entry_low==null?"Not available":money(q.entry_low)+" – "+money(q.entry_high));
+   cell(row,q.potential_pct==null?"Not available":q.potential_pct+"% est.");
+   cell(row,money(q.stop));
+   cell(row,q.verified_buy_now?"Check verified quote above":((q.blockers||[]).slice(0,2).map(friendlyBlocker).join(" · ")||"Waiting for live confirmation"));
+  }
+ }
+}
+
 let aliveUntil=0, token=0, requestPending=false;
 function cell(row,value){const td=document.createElement("td");
   td.textContent=value==null?"—":String(value);
@@ -1112,6 +1264,7 @@ function invalidate(){
   aliveUntil=0;verifiedCount.textContent="0";
   metricVerified.textContent="0";metricStructure.textContent="0";metricMl.textContent="0";metricFeed.textContent="Offline";
   clear(structureRows);structureCount.textContent="0";
+  resetDisplayLanes("Live data not confirmed yet");
   structureNote.textContent="Structure evidence unavailable or expired";
   verifiedSummary.textContent="No currently verified signal; previous approvals are expired.";
   for(const group of Object.values(laneGroups)){
@@ -1204,7 +1357,9 @@ async function refresh(){
     clear(subRows);clear(qualRows);clear(moverRows);clear(structureRows);
     structureCount.textContent="0";
     structureNote.textContent="Structure evidence unavailable";
+    resetDisplayLanes(valid?"No matching setups in this scan":"Live data is stale");
     if(valid){
+      showDisplayLanes(d);
       const bs=d.buy_structure_summary||{};
       const structural=d.buy_structure_rows||[];
       structureCount.textContent=String(structural.length);
