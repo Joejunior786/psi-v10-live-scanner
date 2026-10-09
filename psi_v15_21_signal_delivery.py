@@ -856,268 +856,191 @@ async def http_quote(request):
 
 _DASHBOARD = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0e1620">
-<title>Live Scanner</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f7f8fa">
+<title>Live Crypto Scanner</title>
 <style>
-:root{color-scheme:dark;font-family:system-ui,sans-serif}
-body{background:#0e1620;color:#e9f1f5;margin:auto;max-width:1100px;padding:22px}
-h1{font-size:1.5rem}h2{font-size:1.05rem;margin-top:26px}
-p{color:#b7c6d0}table{width:100%;border-collapse:collapse;font-size:0.9rem}
-td,th{border-bottom:1px solid #293746;text-align:left;padding:9px 7px}
-button{cursor:pointer;padding:8px 12px;background:#183c54;border:1px solid #6b97b0;
-color:#fff;border-radius:6px}button:disabled{opacity:.4;cursor:default}
-.good{color:#75e5bb}.warn{color:#ffcd77}.bad{color:#ff9696}
-code{word-break:break-word}#status,#quote{padding:12px;background:#182635;border-radius:7px}
-.quick{display:flex;flex-wrap:wrap;gap:9px;margin:18px 0}
-.quick a{padding:8px 11px;background:#193346;border:1px solid #34566d;border-radius:7px;color:#cfe9f5;text-decoration:none}
-.approved{border:1px solid #3a8672;padding:16px;border-radius:12px;margin-top:18px;background:#12252a}
-.approved h2{margin:0 0 8px}.approved h3{margin:22px 0 9px;font-size:1rem}
-.approved h3 span{font-variant-numeric:tabular-nums;color:#9ee2bc}
-.table-scroll{overflow-x:auto}
-.approved table{min-width:710px}.approved tbody tr{background:#193039}
-#verifiedSummary{margin:10px 0;padding:8px 0}
-@media(max-width:650px){body{padding:14px}.approved{padding:12px}}
-
-
-/* Historical pre-mobile-redesign layout retained. Readability helpers only. */
+:root{color-scheme:light;--base:#f7f8fa;--paper:#fff;--text:#24292f;--muted:#65727b;--line:#e3e7eb;--ink:#26343b;--accent:#146b5c;--green:#127154;--amber:#ab6900;--yellow:#857300;--red:#ad4040;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,system-ui,sans-serif}
 *{box-sizing:border-box}
-html{scroll-behavior:smooth;scroll-padding-top:18px}
-body{min-width:280px;line-height:1.5;-webkit-text-size-adjust:100%}
-h1{margin:0 0 8px}h2{font-weight:700}
-h3{margin-top:20px}
-p{font-size:0.9rem;line-height:1.55}
-#authority{padding:10px 12px;color:#b3cad8}
-#status{margin-top:16px}
-.summary-line{padding:10px 0;display:flex;gap:7px 22px;flex-wrap:wrap;color:#bbcbd5;font-size:0.85rem;border-bottom:1px solid #293746}
-.summary-line strong{color:#e7f4fa;font-variant-numeric:tabular-nums}
-.legend{border-left:3px solid #4b8794;padding:9px 12px;background:#152430;color:#c8d8e2;margin:14px 0;font-size:0.87rem}
-.legend span{white-space:nowrap}
-.legend .ready{color:#75e5bb;font-weight:700}.legend .pending{color:#ffcd77;font-weight:700}.legend .watch{color:#e8d585;font-weight:700}
-.quick{margin:18px 0 20px}
-.quick a{font-size:0.87rem;font-weight:650}
-.quick a:hover,.quick a:focus-visible{background:#23465d;border-color:#729ab0}
-section.strategy-lane{margin:0 0 22px;padding:0 0 12px;border-bottom:1px solid #293746}
-.strategy-lane h2{margin-top:22px}
-.strategy-lane table{min-width:700px}
-.strategy-lane td:first-child{font-weight:700;color:#eaf7f9}
-.strategy-lane td{font-size:.82rem}
-.lane-context{color:#91bac9}
-.note{background:#182635;padding:10px 12px;border-radius:7px;color:#c4d4de;font-size:.85rem;margin:10px 0}
-.text-mint,.state-buy{color:#75e5bb}.state-armed{color:#ffcd77}.state-watch{color:#e8d585}
-.state-buy,.state-armed,.state-watch{font-weight:700}
-#structureRows td,#qualRows td{font-size:.82rem}
-#subNote,#qualNote,#moverNote,#structureNote,#researchNote{margin:10px 0;color:#b7cbd8}
-#verifiedSummary{font-weight:650}
-table{font-variant-numeric:tabular-nums} th{color:#b9cbd5;white-space:nowrap}
-.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
-.table-scroll table{min-width:650px}
-button{min-height:36px}
-:focus-visible{outline:2px solid #9cd4e7;outline-offset:2px}
-.footer{font-size:.75rem;color:#91aabd;padding:22px 0 14px}
-@media(max-width:650px){
- body{padding:14px}
- h1{font-size:1.4rem}
- p{font-size:.85rem}
- .summary-line{gap:6px 15px}
- .quick{gap:6px}
- .quick a{padding:7px 9px;font-size:.82rem}
- .approved{padding:12px}
- .table-scroll table{min-width:675px}
- .strategy-lane table{min-width:730px}
-}
-
-/* iPhone display fixes only. Original desktop dashboard and scanner remain unchanged. */
-@media(max-width:760px){
- html{scroll-padding-top:79px}
- body{
-  width:100%;max-width:100%;margin:0;
-  padding:14px max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));
-  font-size:15px;overflow-x:hidden
- }
- h1{font-size:1.45rem;line-height:1.25}
- h2{font-size:1.08rem;line-height:1.4;margin:24px 0 10px}
- h3{font-size:.98rem;line-height:1.4}
- p{font-size:.9rem;line-height:1.65;overflow-wrap:anywhere}
- #status,#authority,#quote,.note,#subNote,#structureNote,#qualNote,#researchNote,#moverNote{
-  overflow-wrap:anywhere;word-break:normal;font-size:.86rem;line-height:1.6
- }
- .summary-line{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 10px}
- .summary-line span{min-width:0}
- .summary-line #lastUpdated{grid-column:1/-1;color:#a7c3d0;font-size:.82rem}
- .legend{font-size:.85rem;line-height:1.8}
+html{scroll-behavior:smooth;scroll-padding-top:78px}
+body{margin:0 auto;padding:26px 25px 55px;max-width:1340px;background:var(--base);color:var(--text);font-size:14px;line-height:1.48;-webkit-text-size-adjust:100%}
+header{margin:0 0 14px}
+h1{font-size:26px;letter-spacing:-.035em;margin:0 0 4px;line-height:1.3;color:var(--ink)}
+h2{font-size:18px;color:var(--ink);letter-spacing:-.015em;margin:29px 0 8px}
+h3{font-size:14px;color:var(--ink);font-weight:700;margin:19px 0 9px}
+p{margin:5px 0 12px;line-height:1.55;color:var(--muted);font-size:13px}
+p b{color:var(--ink)}
+.muted,.footer{color:var(--muted)}
+.app-kicker{font-size:12px;color:var(--muted);margin:0}
+.app-top{display:flex;align-items:start;justify-content:space-between;gap:18px}
+.header-pill{font-size:11px;font-weight:700;color:var(--accent);border:1px solid #d3e2df;border-radius:6px;padding:7px 9px;white-space:nowrap;background:var(--paper)}
+#status,#authority{display:block;border:1px solid var(--line);padding:9px 12px;border-radius:6px;background:var(--paper);color:var(--muted);margin:7px 0;overflow-wrap:anywhere;font-size:12px}
+#status.good{color:var(--green)}#status.bad{color:var(--red)}
+.good,.state-buy{color:var(--green)}.warn,.state-armed{color:var(--amber)}.bad{color:var(--red)}.state-watch{color:var(--yellow)}
+.summary-line{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:16px 0}
+.summary-line span{background:var(--paper);border:1px solid var(--line);padding:11px 14px;border-radius:7px;font-size:12px;color:var(--muted);min-width:0}
+.summary-line strong{font-size:19px;color:var(--ink);display:block;margin-top:5px;font-variant-numeric:tabular-nums}
+.summary-line #lastUpdated{grid-column:1/-1;border:0;background:transparent;padding:1px;font-size:11px}
+.legend{background:var(--paper);border:1px solid var(--line);border-radius:7px;color:var(--muted);padding:10px 12px;font-size:12px;margin:16px 0}
+.legend b{color:var(--ink)}.legend .ready{color:var(--green);font-weight:700}.legend .pending{color:var(--amber);font-weight:700}.legend .watch{color:var(--yellow);font-weight:700}
+.quick{display:flex;gap:8px;flex-wrap:wrap;padding:13px 0;margin-bottom:9px;border-bottom:1px solid var(--line)}
+.quick a{color:#48565f;text-decoration:none;font-weight:600;font-size:12px;border:1px solid #d9dfe4;padding:8px 11px;border-radius:6px;background:var(--paper);white-space:nowrap;transition:border-color .15s}
+.quick a:hover,.quick a:focus-visible{border-color:#9ebdb4;color:var(--accent)}
+.quick a:first-child{border-color:#b5d6c8;color:var(--green)}
+section{margin:0}
+section.approved{padding:14px 17px 7px;border:1px solid #dce4e2;background:var(--paper);border-radius:8px}
+section.approved h2{margin-top:4px}
+.strategy-lane{margin:0 0 19px;padding:9px 0 3px}
+.strategy-lane h2{margin-top:10px}
+.strategy-lane p{margin:0 0 11px}
+.lane-context{display:none}
+.table-scroll{position:relative;max-width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;border:1px solid var(--line);border-radius:7px;background:var(--paper)}
+table{border-collapse:separate;border-spacing:0;width:100%;min-width:650px;font-size:12px;background:var(--paper);font-variant-numeric:tabular-nums}
+th{background:#f4f6f7;color:#5c6871;font-weight:700;text-align:left;white-space:nowrap;padding:11px 12px;border-bottom:1px solid var(--line);font-size:11px}
+td{padding:11px 12px;text-align:left;vertical-align:middle;color:var(--text);border-bottom:1px solid #edf0f2;white-space:nowrap;font-size:12px}
+td:nth-child(3),td:nth-child(7),td:nth-child(9){max-width:270px;white-space:normal;min-width:110px;overflow-wrap:anywhere}
+td:first-child{font-weight:700;color:var(--ink);min-width:96px}
+tr:last-child td{border-bottom:0}
+tbody tr:nth-child(even) td{background:#fbfcfd}
+tbody tr:hover td{background:#f3f8f5}
+th:first-child,td:first-child{position:sticky;left:0;z-index:1;background:var(--paper);box-shadow:1px 0 0 var(--line)}
+th:first-child{z-index:2;background:#f4f6f7}
+tbody tr:nth-child(even) td:first-child{background:#fbfcfd}
+tbody tr:hover td:first-child{background:#f3f8f5}
+button{font:inherit;font-weight:650;color:var(--accent);background:var(--paper);border:1px solid #bad3ca;border-radius:6px;padding:8px 10px;cursor:pointer;min-height:36px}
+button:disabled{opacity:.5;cursor:default}
+button:hover:not(:disabled){background:#edf6f1}
+.note{color:var(--muted);font-size:12px;padding:10px 0;margin-bottom:7px}
+#quote{padding:12px;background:var(--paper);border:1px solid var(--line);border-radius:6px;font-size:12px;overflow-wrap:anywhere}
+#structureNote,#qualNote,#subNote,#moverNote,#researchNote{color:var(--muted);font-size:12px;margin:0 0 9px}
+#verifiedSummary{font-size:12px;color:var(--muted);margin:4px 0 7px}
+#verifiedSummary.good{color:var(--green)}
+details.advanced{margin-top:24px;background:var(--paper);border:1px solid var(--line);border-radius:7px;padding:0 16px 16px}
+details.advanced>summary{cursor:pointer;padding:13px 0;font-size:14px;font-weight:700;color:var(--ink)}
+details.advanced>summary::marker{color:var(--accent)}
+details.advanced h2{margin-top:19px}
+.footer{font-size:11px;margin:18px 0 0;text-align:center}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(max-width:740px){
+ body{padding:16px max(12px,env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));max-width:100%;overflow-x:hidden}
+ h1{font-size:22px}
+ .app-top{gap:6px}
+ .header-pill{font-size:10px;padding:6px}
+ .summary-line{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ .summary-line span{padding:9px 10px;font-size:11px}
+ .summary-line strong{font-size:17px}
+ .quick{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;position:sticky;top:0;z-index:10;background:var(--base);padding:10px 0 12px;margin:10px -2px 12px}
+ .quick a{min-height:43px;display:inline-flex;align-items:center;flex-shrink:0;font-size:12px}
+ section.approved{padding:11px 10px 8px}
+ h2{font-size:16px;margin-top:25px}
+ h3{font-size:13px}
+ p{font-size:12px}
+ .table-scroll{overflow-x:auto;touch-action:pan-x pan-y}
+ .table-scroll::before{content:"Swipe table →";position:sticky;left:8px;display:block;width:max-content;padding:5px 0 4px;font-size:10px;color:#78858c}
+ table{display:table!important;table-layout:auto;min-width:720px!important;width:max-content;max-width:none;font-size:12px}
+ thead{display:table-header-group!important}
+ tbody{display:table-row-group!important}
+ tbody tr{display:table-row!important;background:transparent!important;border:0!important}
+ th,td{display:table-cell!important;min-width:unset;grid-column:auto!important;border-radius:0!important}
+ th{padding:10px 10px;font-size:11px}
+ td{padding:10px 10px;font-size:12px!important}
+ td::before{display:none!important;content:none!important}
+ tbody td:first-child{font-size:12px!important;padding:10px!important;border-bottom:1px solid #edf0f2!important}
+ tbody td[colspan]{display:table-cell!important;font-size:12px!important}
+ tbody td button{min-width:96px;min-height:43px}
+ .legend{line-height:1.8}
  .legend span{white-space:normal}
- .quick{
-  position:sticky;z-index:10;top:0;
-  display:flex;flex-wrap:nowrap;gap:8px;
-  margin:16px -12px 18px;padding:10px 12px 11px;
-  overflow-x:auto;overflow-y:hidden;
-  background:#0e1620;border-top:1px solid #273a4b;border-bottom:1px solid #273a4b;
-  -webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;scrollbar-width:thin
- }
- .quick a{
-  display:inline-flex;flex:none;align-items:center;justify-content:center;
-  padding:10px 14px;min-height:44px;
-  border-radius:7px;font-size:.89rem;line-height:1.25
- }
- .approved{padding:13px}
- .approved table,.strategy-lane table,.table-scroll table{min-width:0!important}
- .table-scroll{overflow:visible;max-width:100%}
- .table-scroll table,table{display:block;width:100%;max-width:100%;min-width:0!important}
- thead{display:none}
- tbody{display:block;width:100%;max-width:100%}
- tbody tr{
-  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:8px 12px;width:100%;min-width:0;
-  margin:0 0 9px;padding:12px;
-  background:#152330;border:1px solid #2c4051;border-radius:7px
- }
- .approved tbody tr{background:#163035;border-color:#346057}
- tbody td{
-  display:flex;flex-direction:column;justify-content:center;align-items:flex-start;
-  min-width:0;width:auto;max-width:100%;padding:2px 0;
-  margin:0;border:0!important;line-height:1.4;
-  font-size:.9rem!important;overflow-wrap:anywhere;white-space:normal!important
- }
- tbody td::before{
-  display:block;content:attr(data-label);text-transform:uppercase;
-  color:#a4bccb;font-weight:700;font-size:.65rem;letter-spacing:.045em;
-  line-height:1.3;overflow-wrap:anywhere
- }
- tbody td:first-child{
-  grid-column:1/-1;display:flex;padding:0 0 8px!important;
-  border-bottom:1px solid #2c4152!important;
-  color:#eaf7f9;font-weight:750;font-size:1.05rem!important
- }
- tbody td:first-child::before{content:"Coin";font-size:.65rem}
- tbody td[colspan]{grid-column:1/-1;font-size:.85rem!important;border:0!important;padding:2px!important}
- tbody td[colspan]::before{display:none}
- tbody td[data-label="Verify"],tbody td[data-label="Check"],tbody td[data-label="What is missing"],
- tbody td[data-label="What's missing"],tbody td[data-label="Why it cannot be bought yet"],
- tbody td[data-label="Primary blocker"],tbody td[data-label="Current status"]{
-  grid-column:1/-1
- }
- tbody td button{width:100%;min-height:44px;text-align:center;font-size:.9rem;white-space:normal}
- .strategy-lane{margin-bottom:20px}
- .footer{text-align:center}
-}
-@media(max-width:350px){
- body{padding-left:10px;padding-right:10px}
- tbody tr{gap:8px}
- tbody td{font-size:.84rem!important}
- .summary-line{gap:7px}
- .quick{margin-left:-10px;margin-right:-10px;padding-left:10px}
 }
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-</style>
-</head><body>
-<h1>Live Scanner · V15.31</h1>
-<p>Simple crypto market scanner for Binance Spot. Browse coins by setup, see possible entry areas and understand what is still missing. <b>This page does not place trades.</b></p>
-<div id="status" role="status" aria-live="polite">Connecting to current market data…</div>
-<div id="authority" role="status">Checking signal approvals…</div>
-<div class="summary-line" aria-label="Market overview">
-<span>Verified buys: <strong id="metricVerified">0</strong></span>
-<span>Chart setups: <strong id="metricStructure">0</strong></span>
-<span>AI-approved buys: <strong id="metricMl">0</strong></span>
-<span>Data: <strong id="metricFeed">Checking</strong></span>
+</style></head><body>
+<header class="app-top"><div><h1>Live Crypto Scanner</h1><p class="app-kicker">Binance Spot • Simple coin tables • Auto-refreshing</p></div><span class="header-pill">Market watch</span></header>
+<div id="status" role="status" aria-live="polite">Connecting to market prices…</div>
+<div id="authority" role="status">Checking live signal approvals…</div>
+<div class="summary-line" aria-label="At a glance">
+<span>Ready to buy<strong id="metricVerified">0</strong></span>
+<span>Coin setups<strong id="metricStructure">0</strong></span>
+<span>AI approved<strong id="metricMl">0</strong></span>
+<span>Market connection<strong id="metricFeed">Checking</strong></span>
 <span id="lastUpdated">Connecting…</span>
 </div>
-<div class="legend"><b>Quick guide:</b>
-<span class="ready">Green = verified BUY NOW</span> ·
-<span class="pending">Orange = ARMED (almost ready)</span> ·
-<span class="watch">Yellow = WATCH (not ready)</span>.
-A chart pattern labelled BUY is <b>not</b> a verified entry. You must check the live quote first.
-</div>
-<nav class="quick" aria-label="Scanner sections">
-<a href="#verified">Verified BUY NOW</a>
-<a href="#beast-lane">BEAST</a>
-<a href="#ema-lane">EMA</a>
-<a href="#exhaustion-lane">Seller exhaustion</a>
-<a href="#breakout-lane">Breakouts</a>
-<a href="#pullback-lane">Pullbacks</a>
-<a href="#other-lane">Other setups</a>
-<a href="#buy-structure">All technical setups</a>
-<a href="#qualification">AI review</a>
-<a href="#research-section">EMA watchlist</a>
-<a href="#feed">Data connection</a>
+<div class="legend"><b>Signal guide:</b>
+<span class="ready">Green = verified BUY NOW</span> · <span class="pending">Orange = ARMED</span> · <span class="watch">Yellow = WATCH</span>.
+Research entries are <b>not</b> approved trades.</div>
+<nav class="quick" aria-label="Trading sections">
+<a href="#verified">Ready to buy</a><a href="#beast-lane">BEAST</a><a href="#ema-lane">EMA</a>
+<a href="#exhaustion-lane">Seller exhaustion</a><a href="#breakout-lane">Breakouts</a><a href="#pullback-lane">Pullbacks</a>
+<a href="#other-lane">Other</a><a href="#buy-structure">All coins</a><a href="#research-section">EMA watch</a>
 </nav>
 <section class="approved" id="verified">
-<h2>VERIFIED BUY NOW · <span id="verifiedCount">0</span> active</h2>
-<p>Only signals approved by the scanner's live checks appear here. <b>Never confuse research setups with verified BUY NOW.</b> Tap <b>Verify quote</b> for a fresh check before considering a trade.</p>
-<div id="verifiedSummary" class="good" aria-live="polite">Checking verified entries…</div>
-<h3>EMA verified buys · <span id="emaCount">0</span></h3>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Timeframe</th><th>Entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th><th>Target 3</th><th>Check</th></tr></thead><tbody id="signals"></tbody></table></div>
-<h3>AI (Machine Learning) verified buys · <span id="mlCount">0</span></h3>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Setup / hold time</th><th>Entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th><th>Target 3</th><th>Check</th></tr></thead><tbody id="mlSignals"></tbody></table></div>
-<h3>Technical analysis verified buys · <span id="v12Count">0</span></h3>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Pattern / timeframe</th><th>Entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th><th>Target 3</th><th>Check</th></tr></thead><tbody id="v12Signals"></tbody></table></div>
+<h2>Verified BUY NOW <span class="muted">· <span id="verifiedCount">0</span> coins</span></h2>
+<p>Only coins confirmed by the scanner's current live checks. These are separate from the developing ideas below. Recheck the quote before placing any trade.</p>
+<div id="verifiedSummary" class="good" aria-live="polite">Checking approved entries…</div>
+<h3>EMA approved <span class="muted">· <span id="emaCount">0</span></span></h3>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Timeframe</th><th>Entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th><th>Target 3</th><th>Check price</th></tr></thead><tbody id="signals"></tbody></table></div>
+<h3>Machine Learning approved <span class="muted">· <span id="mlCount">0</span></span></h3>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Setup / hold time</th><th>Entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th><th>Target 3</th><th>Check price</th></tr></thead><tbody id="mlSignals"></tbody></table></div>
+<h3>Chart-pattern approved <span class="muted">· <span id="v12Count">0</span></span></h3>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Pattern / timeframe</th><th>Entry</th><th>Stop loss</th><th>Target 1</th><th>Target 2</th><th>Target 3</th><th>Check price</th></tr></thead><tbody id="v12Signals"></tbody></table></div>
+<h3>Fresh price check</h3><div id="quote" aria-live="polite">Tap Verify on an approved coin to check its latest price.</div>
 </section>
-<h2>Verify a current entry</h2>
-<p>The market moves fast. Tap <b>Verify quote</b> above to check whether an approved entry is still current. It never places an order.</p>
-<div id="quote" aria-live="polite">Select Verify on an approved buy signal.</div>
-<h2>Trading opportunities by setup (research)</h2>
-<p>Every lane below shows patterns the scanner has already found. A suggested entry or target is an <b>estimate, not a guaranteed result or a live BUY NOW approval.</b> A setup can appear here while still waiting for evidence.</p>
+<h2>Coin opportunities <span class="muted">· developing</span></h2>
+<p>Each coin appears in its relevant table. Entry prices and potential gains are estimates, not guaranteed results.</p>
 <section class="strategy-lane" id="beast-lane">
-<h2>BEAST candidates · <span id="beastCount">0</span></h2>
-<p>Strong patterns found by the scanner's BEAST strategy. These are not live BUY orders. <span class="lane-context">(Potential fast moves)</span></p>
-<div class="table-scroll"><table aria-label="BEAST candidates"><thead><tr>
-<th>Coin</th><th>Stage</th><th>Pattern / timeframe</th><th>Entry zone*</th><th>Estimated upside*</th><th>Stop*</th><th>What is missing</th>
-</tr></thead><tbody id="beastRows"></tbody></table></div></section>
+<h2>BEAST <span class="muted">· <span id="beastCount">0</span> coins</span></h2>
+<p>Possible bigger movers. <b>Research only</b> — not a verified buy.</p>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Setup / timeframe</th><th>Entry zone*</th><th>Possible upside*</th><th>Stop-loss*</th><th>Still needed</th></tr></thead><tbody id="beastRows"></tbody></table></div>
+</section>
 <section class="strategy-lane" id="ema-lane">
-<h2>EMA candidates · <span id="emaSetupCount">0</span></h2>
-<p>Coins testing or recovering a moving-average line. EMA is a price trend line that can act as support. <span class="lane-context">(Trend / EMA support)</span></p>
-<div class="table-scroll"><table aria-label="EMA candidates"><thead><tr>
-<th>Coin</th><th>Stage</th><th>Pattern / timeframe</th><th>Entry zone*</th><th>Estimated upside*</th><th>Stop*</th><th>What is missing</th>
-</tr></thead><tbody id="emaSetupRows"></tbody></table></div></section>
+<h2>EMA <span class="muted">· <span id="emaSetupCount">0</span> coins</span></h2>
+<p>Near important moving averages. <b>Research only</b> — not a verified buy.</p>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Setup / timeframe</th><th>Entry zone*</th><th>Possible upside*</th><th>Stop-loss*</th><th>Still needed</th></tr></thead><tbody id="emaSetupRows"></tbody></table></div>
+</section>
 <section class="strategy-lane" id="exhaustion-lane">
-<h2>Seller exhaustion · <span id="exhaustionCount">0</span></h2>
-<p>Coins showing signs that heavy selling may be slowing. Buyers still need to confirm a recovery. <span class="lane-context">(Selling may be fading)</span></p>
-<div class="table-scroll"><table aria-label="Seller exhaustion"><thead><tr>
-<th>Coin</th><th>Stage</th><th>Pattern / timeframe</th><th>Entry zone*</th><th>Estimated upside*</th><th>Stop*</th><th>What is missing</th>
-</tr></thead><tbody id="exhaustionRows"></tbody></table></div></section>
+<h2>Seller exhaustion <span class="muted">· <span id="exhaustionCount">0</span> coins</span></h2>
+<p>Selling pressure may be slowing. <b>Research only</b> — not a verified buy.</p>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Setup / timeframe</th><th>Entry zone*</th><th>Possible upside*</th><th>Stop-loss*</th><th>Still needed</th></tr></thead><tbody id="exhaustionRows"></tbody></table></div>
+</section>
 <section class="strategy-lane" id="breakout-lane">
-<h2>Breakout candidates · <span id="breakoutCount">0</span></h2>
-<p>Coins approaching or retesting levels where price might start a stronger rise. False breakouts remain possible. <span class="lane-context">(Potential breakout)</span></p>
-<div class="table-scroll"><table aria-label="Breakout candidates"><thead><tr>
-<th>Coin</th><th>Stage</th><th>Pattern / timeframe</th><th>Entry zone*</th><th>Estimated upside*</th><th>Stop*</th><th>What is missing</th>
-</tr></thead><tbody id="breakoutRows"></tbody></table></div></section>
+<h2>Breakouts <span class="muted">· <span id="breakoutCount">0</span> coins</span></h2>
+<p>Prices approaching breakout levels. <b>Research only</b> — not a verified buy.</p>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Setup / timeframe</th><th>Entry zone*</th><th>Possible upside*</th><th>Stop-loss*</th><th>Still needed</th></tr></thead><tbody id="breakoutRows"></tbody></table></div>
+</section>
 <section class="strategy-lane" id="pullback-lane">
-<h2>Pullback candidates · <span id="pullbackCount">0</span></h2>
-<p>Coins pulling back towards a potentially better entry area, rather than chasing a rapid rise. <span class="lane-context">(Potential support entry)</span></p>
-<div class="table-scroll"><table aria-label="Pullback candidates"><thead><tr>
-<th>Coin</th><th>Stage</th><th>Pattern / timeframe</th><th>Entry zone*</th><th>Estimated upside*</th><th>Stop*</th><th>What is missing</th>
-</tr></thead><tbody id="pullbackRows"></tbody></table></div></section>
+<h2>Pullbacks <span class="muted">· <span id="pullbackCount">0</span> coins</span></h2>
+<p>Coins pulling back near support. <b>Research only</b> — not a verified buy.</p>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Setup / timeframe</th><th>Entry zone*</th><th>Possible upside*</th><th>Stop-loss*</th><th>Still needed</th></tr></thead><tbody id="pullbackRows"></tbody></table></div>
+</section>
 <section class="strategy-lane" id="other-lane">
-<h2>Other setups · <span id="otherCount">0</span></h2>
-<p>Other useful patterns already identified by the scanner that do not fit the categories above. <span class="lane-context">(Additional research)</span></p>
-<div class="table-scroll"><table aria-label="Other setups"><thead><tr>
-<th>Coin</th><th>Stage</th><th>Pattern / timeframe</th><th>Entry zone*</th><th>Estimated upside*</th><th>Stop*</th><th>What is missing</th>
-</tr></thead><tbody id="otherRows"></tbody></table></div></section>
-<p class="note">*Entry zone = possible buying price range. Stop = possible loss limit. Estimated upside = potential price rise towards the scanner's target; it is not a prediction or guaranteed profit.</p>
-<h2 id="buy-structure">All chart setups · <span id="structureCount">0</span></h2>
-<p>Full technical list in one place. A green-looking chart setup is not a verified BUY NOW unless it appears in the approved section at the top.</p>
-<div id="structureNote" class="warn" role="status">Checking chart patterns…</div>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Chart status</th><th>Pattern / timeframe</th><th>Entry zone</th><th>Stop loss</th><th>Target (source)</th><th>Potential gain</th><th>Data age</th><th>Why it cannot be bought yet</th></tr></thead><tbody id="structureRows"></tbody></table></div>
-<h2 id="qualification">AI decisions · why coins are being held back</h2>
-<p>These are evaluation results, not trade approvals. <b>Data blocked</b> means market evidence is missing or late. <b>Model rejected</b> means the machine-learning model did not approve the setup.</p>
-<div id="qualNote" class="warn">Checking AI decisions…</div>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Strategy</th><th>AI status</th><th>Estimated target</th><th>What's missing</th></tr></thead><tbody id="qualRows"></tbody></table></div>
-<h2 id="research-section">Early EMA candidates · watchlist</h2>
-<p>Coins close to an EMA line, including coins that are not yet ready. These prices use recent chart candles and are not instant execution quotes. Repeated names can be normal if the market has not changed.</p>
-<div id="researchNote" class="warn" role="status">Checking watchlist…</div>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Timeframe</th><th>EMA line</th><th>Distance</th><th>Candle age</th><th>Updated?</th></tr></thead><tbody id="research"></tbody></table></div>
-<h2>More EMA watchlist candidates (rotating)</h2>
-<p>Additional coins close to important EMA lines. WATCH means a possible setup to monitor, not an approval to buy.</p>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Stage</th><th>Timeframe</th><th>EMA line</th><th>Distance</th><th>Candle age</th><th>Updated?</th></tr></thead><tbody id="rotating"></tbody></table></div>
-<h2 id="feed">Live market connection · detailed information</h2>
-<p><b>Trades connected</b> and <b>Order book connected</b> show whether live Binance information is being received. Old event ages can stop an entry from being verified.</p>
-<div id="subNote" class="warn">Checking subscriptions…</div>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Trades connected?</th><th>Order book connected?</th><th>Trade update age</th><th>Book update age</th><th>Current status</th></tr></thead><tbody id="subRows"></tbody></table></div>
-<h2>Previous 10%+ rises (tracked by scanner)</h2>
-<p>Previously observed rising coins during monitoring, not a complete list of top gainers. This is historical research, not a current buy signal.</p>
-<div id="moverNote" class="warn">Checking recorded moves…</div>
-<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Observed rise</th><th>Tracking started</th><th>Earlier state</th></tr></thead><tbody id="moverRows"></tbody></table></div>
-<p class="footer">Live Scanner · Binance Spot / USDT · Market research only · No automatic orders</p>
+<h2>Other opportunities <span class="muted">· <span id="otherCount">0</span> coins</span></h2>
+<p>More developing setups. <b>Research only</b> — not a verified buy.</p>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Setup / timeframe</th><th>Entry zone*</th><th>Possible upside*</th><th>Stop-loss*</th><th>Still needed</th></tr></thead><tbody id="otherRows"></tbody></table></div>
+</section>
+<p class="note">*Entry zone = possible buying range; upside = a potential move towards the listed target; stop-loss = an estimated exit point. These figures do not guarantee a result.</p>
+<h2 id="buy-structure">All chart setups <span class="muted">· <span id="structureCount">0</span> coins</span></h2>
+<p>One full table of chart patterns. A chart marked BUY here is <b>not yet a verified BUY NOW</b> unless it also appears in the approved section.</p>
+<div id="structureNote" role="status">Checking coin setups…</div>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Pattern / timeframe</th><th>Entry zone</th><th>Stop-loss</th><th>Target</th><th>Upside</th><th>Data age</th><th>Why not approved?</th></tr></thead><tbody id="structureRows"></tbody></table></div>
+<h2 id="research-section">EMA watchlist</h2>
+<p>Coins approaching important moving averages. WATCH means monitor, not buy.</p>
+<div id="researchNote" role="status">Checking EMA watchlist…</div>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Timeframe</th><th>EMA</th><th>Distance</th><th>Data age</th><th>Updated?</th></tr></thead><tbody id="research"></tbody></table></div>
+<h3>More EMA candidates (rotating)</h3>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Status</th><th>Timeframe</th><th>EMA</th><th>Distance</th><th>Data age</th><th>Updated?</th></tr></thead><tbody id="rotating"></tbody></table></div>
+<details class="advanced"><summary>More information: AI decisions and connection status</summary>
+<h2 id="qualification">Why some coins are held back</h2>
+<p>Data blocked means market information is missing or late. Model rejected means the AI did not approve that coin.</p>
+<div id="qualNote" role="status">Checking AI decisions…</div>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Strategy</th><th>AI status</th><th>Target</th><th>Reason</th></tr></thead><tbody id="qualRows"></tbody></table></div>
+<h2 id="feed">Live price and order-book connection</h2>
+<p>Technical connection details. Missing or old information can prevent a signal from being verified.</p>
+<div id="subNote" role="status">Checking live data…</div>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Trade stream</th><th>Order book</th><th>Trade age</th><th>Book age</th><th>Connection status</th></tr></thead><tbody id="subRows"></tbody></table></div>
+<h2>Tracked 10%+ price moves</h2>
+<p>Previously observed rises during scanner monitoring, not a list of coins to buy now.</p>
+<div id="moverNote">Checking records…</div>
+<div class="table-scroll"><table><thead><tr><th>Coin</th><th>Price rise</th><th>Tracking started</th><th>Earlier status</th></tr></thead><tbody id="moverRows"></tbody></table></div>
+</details>
+<p class="footer">Live scanner • Research only • No automatic orders • Binance Spot USDT pairs</p>
 <script>
 "use strict";
 const status=document.getElementById("status");
