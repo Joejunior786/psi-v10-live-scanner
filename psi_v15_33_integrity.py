@@ -16,6 +16,7 @@ class SyncedDepthBook:
         self.max_buffer = max(40, int(max_buffer))
         self.buffer = deque()
         self.snapshot_id = None
+        self.bridged = False
         self.bids = {}
         self.asks = {}
         self.last_event_ms = 0
@@ -23,9 +24,10 @@ class SyncedDepthBook:
 
     @property
     def synced(self):
-        return self.snapshot_id is not None and bool(self.bids and self.asks)
+        return self.snapshot_id is not None and self.bridged and bool(self.bids and self.asks)
 
     def invalidate(self):
+        self.bridged = False
         self.snapshot_id = None
         self.bids = {}
         self.asks = {}
@@ -65,6 +67,7 @@ class SyncedDepthBook:
                 else:
                     side[price] = qty
         self.snapshot_id = last
+        self.bridged = True
         self.last_event_ms = int(stamp)
         return self._top(stamp)
 
@@ -103,6 +106,7 @@ class SyncedDepthBook:
         if not bids or not asks:
             return []
         self.snapshot_id = sid
+        self.bridged = False
         self.bids, self.asks = bids, asks
         buffered = list(self.buffer)
         self.buffer.clear()

@@ -53,6 +53,26 @@ class SyncedBookTests(unittest.TestCase):
         self.assertIsNone(book.receive(pkt(104),1100))
         self.assertEqual(book.receive(pkt(107,106),1200)["lastUpdateId"],107)
 
+    def test_snapshot_ahead_of_buffer_waits_for_real_ws_bridge(self):
+        book=SyncedDepthBook()
+        book.receive(pkt(101),1000)
+        self.assertEqual(book.seed(seed(108)),[])
+        self.assertFalse(book.synced)
+        self.assertIsNone(book.receive(pkt(108),1100))
+        self.assertFalse(book.synced)
+        result=book.receive(pkt(109),1200)
+        self.assertTrue(book.synced)
+        self.assertEqual(result["lastUpdateId"],109)
+        self.assertEqual(result["_received_ms"],1200)
+
+    def test_snapshot_ahead_gap_stays_fail_closed(self):
+        book=SyncedDepthBook()
+        book.receive(pkt(101),1000)
+        book.seed(seed(108))
+        with self.assertRaises(DepthGap):
+            book.receive(pkt(112),1200)
+        self.assertFalse(book.synced)
+
     def test_crossed_book_fails_closed(self):
         book=SyncedDepthBook()
         book.receive(pkt(101),1000)
