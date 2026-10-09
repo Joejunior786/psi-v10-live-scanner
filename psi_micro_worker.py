@@ -465,7 +465,7 @@ def _bounded_control_plan(
     additions = [sym for sym in wanted if sym not in active]
     # The first 30 slots are execution-priority subscriptions. Both workers
     # receive the same ordering. Protect those names from research rotation.
-    pinned = set(wanted[:min(30,max_symbols)]) if force_priority else set()
+    pinned = set(wanted[:min(36,max_symbols)]) if force_priority else set()
     urgent = [sym for sym in additions if sym in pinned]
     budget = max(max_replacements,8) if urgent else max_replacements
     budget = min(budget,12)
@@ -620,7 +620,9 @@ async def stream_once(r, session: aiohttp.ClientSession, symbols: List[str], hos
                 if sym not in active or depth_books.get(sym) is not book:
                     return
                 initial=book.seed(snapshot)
-                if book.synced:
+                if book.snapshot_id is not None:
+                    # REST is seeded, but BUY remains blocked until a genuine
+                    # websocket update bridges the snapshot ID.
                     # Buffered historical events retain their original RECEIVE
                     # timestamps; seeding never fabricates a fresh book tick.
                     for item in initial:

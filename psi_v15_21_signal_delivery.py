@@ -276,19 +276,18 @@ def _candidate_authorities(now_ms):
             EMA.num(r.get("setup_strength"))),reverse=True)
     for row in structural[:6]:
         add(row.get("symbol"))
-    for row in sorted(ml_rows,key=lambda r: (
-        r.get("setup_verification") == "UPSTREAM_STRUCTURAL",
-        r.get("qualification_state") == "NEAR BUY",
-        EMA.num(r.get("setup_strength")),
-        EMA.num(r.get("probability"))),reverse=True):
-        if row.get("setup_verification") == "UPSTREAM_STRUCTURAL":
-            add(row.get("symbol"))
-        if len(wanted) >= 12:
-            break
-    for row in ml_rows:
+    # Guarantee the entire current ML top 30 a place after six
+    # execution-structure priorities. Do not allow older ranked research
+    # rows to evict today's shortlist.
+    for row in ml_rows[:30]:
         add(row.get("symbol"))
         if len(wanted) >= MICRO_PRIORITY_SLOTS:
             break
+    if len(wanted) < MICRO_PRIORITY_SLOTS:
+        for row in ml_rows[30:]:
+            add(row.get("symbol"))
+            if len(wanted) >= MICRO_PRIORITY_SLOTS:
+                break
     return approved, inspected, wanted
 
 
