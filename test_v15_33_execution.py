@@ -69,20 +69,21 @@ class ControlContractTests(unittest.TestCase):
                 setattr(outer,k,v)
 
     def test_current_ml_top30_are_all_in_priority_slots(self):
-        before_core, before_ml = delivery.CORE, delivery.ML
+        before_core, before_ml, before_ema = delivery.CORE, delivery.ML, delivery.EMA
         try:
             structural=[{"symbol":f"STR{i}USDT","state":"BUY",
                          "setup_strength":90-i} for i in range(6)]
             ranked=[{"symbol":f"ML{i}USDT","setup_verification":"RESEARCH"}
                     for i in range(30)]
             delivery.CORE=SimpleNamespace(_board=lambda:structural)
+            delivery.EMA=SimpleNamespace(num=lambda value: float(value or 0))
             delivery.ML=SimpleNamespace(_board=ranked,_last_board_ms=0)
             approved,inspected,wanted=delivery._candidate_authorities(100000)
             self.assertEqual(wanted[:6],[r["symbol"] for r in structural])
             self.assertEqual(len(wanted),36)
             self.assertTrue({r["symbol"] for r in ranked}.issubset(set(wanted)))
         finally:
-            delivery.CORE,delivery.ML=before_core,before_ml
+            delivery.CORE,delivery.ML,delivery.EMA=before_core,before_ml,before_ema
 
     def test_full_priority_cohort_pinned_during_replacement(self):
         active={f"A{i}USDT" for i in range(80)}
