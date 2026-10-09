@@ -1077,7 +1077,7 @@ body{background:radial-gradient(ellipse at 14% 0,rgba(61,135,146,.12),transparen
 <nav class="quick" aria-label="Main dashboard sections">
  <a href="#guide">Start</a><a href="#verified">Buy now</a><a href="#beast-lane">BEAST</a><a href="#ema-lane">EMA</a><a href="#more-lanes">More</a>
 </nav>
-<nav class="lane-links" aria-label="More trading setup categories"><a href="#exhaustion-lane">Seller exhaustion</a><a href="#breakout-lane">Breakouts</a><a href="#pullback-lane">Pullbacks</a><a href="#other-lane">Other setups</a><a href="#ema-watch">EMA watchlist</a><a href="#qualification">AI review</a><a href="#feed">Data health</a></nav>
+<nav class="lane-links" aria-label="More trading setup categories"><a href="#exhaustion-lane">Seller exhaustion</a><a href="#breakout-lane">Breakouts</a><a href="#pullback-lane">Pullbacks</a><a href="#other-lane">Other setups</a><a href="#ema-watch">EMA watchlist</a><a href="#research-section">Early EMA details</a><a href="#buy-structure">Full structure details</a><a href="#qualification">AI review</a><a href="#feed">Data health</a></nav>
 <section class="approved panel" id="verified">
  <div class="section-header"><h2>Verified BUY NOW · <span class="inline-number" id="verifiedCount">0</span> active</h2><span class="section-tag tag-mint">Execution-grade check</span></div>
  <p>These are the <b>only</b> entries that have passed the scanner’s live checks. Other categories below are <b>watchlists, not buy instructions</b>. Always press Verify quote before considering a trade.</p>
