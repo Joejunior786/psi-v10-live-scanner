@@ -1,14 +1,5151 @@
 {
-  "started_utc": "2026-11-06T13:40:00.628655+00:00",
+  "started_utc": "2026-11-06T13:40:44.103943+00:00",
   "kind": "Binance Spot USDT 4h RSI14 Wilder, SMA59 SMA200, EMA50 EMA200, daily SMA59 SMA200",
-  "checked": 0,
-  "successful": 0,
+  "checked": 165,
+  "successful": 165,
   "errors": [],
-  "universe_size": 0,
+  "universe_size": 165,
   "strict": [],
-  "near": [],
-  "oversold_without_touch": [],
-  "other_ma": [],
+  "near": [
+    {
+      "pair": "OSMOUSDT",
+      "price": 0.0409,
+      "rsi4h": 33.01,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 763629.545342,
+      "status": "NEAR OVERSOLD TOUCH",
+      "ma_matches": [
+        {
+          "ma": "1D SMA59",
+          "value": 0.040740677966101695,
+          "distance_pct": 0.391,
+          "side": "above/support-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 0.0397345,
+          "distance_pct": 2.933,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.048171186440677964,
+          "distance_pct": -15.094,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.044599,
+          "distance_pct": -8.294,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.04648051827004866,
+          "distance_pct": -12.006,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.04409131323384918,
+          "distance_pct": -7.238,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.040740677966101695,
+          "distance_pct": 0.391,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.0397345,
+          "distance_pct": 2.933,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 23.219,
+      "recent_4h_volume_vs_prior20": 2.77
+    }
+  ],
+  "oversold_without_touch": [
+    {
+      "pair": "TRUMPUSDT",
+      "price": 1.225,
+      "rsi4h": 27.22,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 24249902.819291,
+      "status": "OVERSOLD NO TOUCH",
+      "ma_matches": [],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1.5478813559322033,
+          "distance_pct": -20.86,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.7467849999999998,
+          "distance_pct": -29.871,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 1.4766747265869449,
+          "distance_pct": -17.043,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.7335540269613043,
+          "distance_pct": -29.336,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.881050847457627,
+          "distance_pct": -34.877,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 1.9232,
+          "distance_pct": -36.304,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 46.736,
+      "recent_4h_volume_vs_prior20": 1.35
+    }
+  ],
+  "other_ma": [
+    {
+      "pair": "ZROUSDT",
+      "price": 1.645,
+      "rsi4h": 40.21,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 9192885.65005,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA59",
+          "value": 1.6418813559322034,
+          "distance_pct": 0.19,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1.744864406779661,
+          "distance_pct": -5.723,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.89417,
+          "distance_pct": -13.155,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 1.7491541647671744,
+          "distance_pct": -5.955,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.818054625127229,
+          "distance_pct": -9.519,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.6418813559322034,
+          "distance_pct": 0.19,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 1.2296550000000002,
+          "distance_pct": 33.777,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 24.78,
+      "recent_4h_volume_vs_prior20": 1.15
+    },
+    {
+      "pair": "SOLUSDT",
+      "price": 90.25,
+      "rsi4h": 40.37,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 255556747.00749,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 89.0125,
+          "distance_pct": 1.39,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 95.714406779661,
+          "distance_pct": -5.709,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 104.38565,
+          "distance_pct": -13.542,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 94.76449819680708,
+          "distance_pct": -4.764,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 104.1822694933444,
+          "distance_pct": -13.373,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 107.27220338983051,
+          "distance_pct": -15.868,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 89.0125,
+          "distance_pct": 1.39,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 10.426,
+      "recent_4h_volume_vs_prior20": 1.38
+    },
+    {
+      "pair": "ONDOUSDT",
+      "price": 0.3736,
+      "rsi4h": 40.96,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 13601234.03971,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 0.37687849999999995,
+          "distance_pct": -0.87,
+          "side": "below/resistance-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.40092711864406777,
+          "distance_pct": -6.816,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.4406055,
+          "distance_pct": -15.208,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.39727818996242914,
+          "distance_pct": -5.96,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.4410146248173999,
+          "distance_pct": -15.286,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.437993220338983,
+          "distance_pct": -14.702,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.37687849999999995,
+          "distance_pct": -0.87,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 14.821,
+      "recent_4h_volume_vs_prior20": 1.61
+    },
+    {
+      "pair": "ETHUSDT",
+      "price": 2232.8,
+      "rsi4h": 41.07,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 877288838.953797,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 2295.6649152542373,
+          "distance_pct": -2.738,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 2295.6649152542373,
+          "distance_pct": -2.738,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 2421.3475,
+          "distance_pct": -7.787,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 2304.0152701792445,
+          "distance_pct": -3.091,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 2429.47094550898,
+          "distance_pct": -8.095,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 2499.761186440678,
+          "distance_pct": -10.679,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 2158.04645,
+          "distance_pct": 3.464,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 12.829,
+      "recent_4h_volume_vs_prior20": 1.7
+    },
+    {
+      "pair": "ARPAUSDT",
+      "price": 0.00961,
+      "rsi4h": 42.84,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 174536.492015,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 0.00962735,
+          "distance_pct": -0.18,
+          "side": "below/resistance-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.00980186440677966,
+          "distance_pct": -1.957,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.009828191764333161,
+          "distance_pct": -2.22,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.00980186440677966,
+          "distance_pct": -1.957,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0104718,
+          "distance_pct": -8.23,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.009828191764333161,
+          "distance_pct": -2.22,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.010407002144062807,
+          "distance_pct": -7.658,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.010460169491525423,
+          "distance_pct": -8.128,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00962735,
+          "distance_pct": -0.18,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.339,
+      "recent_4h_volume_vs_prior20": 1.39
+    },
+    {
+      "pair": "IQUSDT",
+      "price": 0.000696,
+      "rsi4h": 43.47,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 107369.158926,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.0007265504767225668,
+          "distance_pct": -4.205,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.0007348305084745763,
+          "distance_pct": -5.284,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0007348305084745763,
+          "distance_pct": -5.284,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.000793465,
+          "distance_pct": -12.283,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0007265504767225668,
+          "distance_pct": -4.205,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.0007971706563810485,
+          "distance_pct": -12.691,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0008368135593220338,
+          "distance_pct": -16.827,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.000839095,
+          "distance_pct": -17.053,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.009,
+      "recent_4h_volume_vs_prior20": 3.25
+    },
+    {
+      "pair": "LTCUSDT",
+      "price": 52.74,
+      "rsi4h": 43.83,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 16335537.85483,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 52.169200000000004,
+          "distance_pct": 1.094,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 55.5171186440678,
+          "distance_pct": -5.002,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 59.93455,
+          "distance_pct": -12.004,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 55.00555557501767,
+          "distance_pct": -4.119,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 60.19260857233838,
+          "distance_pct": -12.381,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 60.48101694915255,
+          "distance_pct": -12.799,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 52.169200000000004,
+          "distance_pct": 1.094,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 11.003,
+      "recent_4h_volume_vs_prior20": 1.75
+    },
+    {
+      "pair": "SUIUSDT",
+      "price": 0.864,
+      "rsi4h": 43.89,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 48301362.18983,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 0.863493,
+          "distance_pct": 0.059,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.900871186440678,
+          "distance_pct": -4.093,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.000954,
+          "distance_pct": -13.682,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.8991494683635276,
+          "distance_pct": -3.909,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.9970364810002318,
+          "distance_pct": -13.343,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.9749406779661017,
+          "distance_pct": -11.379,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.863493,
+          "distance_pct": 0.059,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 13.327,
+      "recent_4h_volume_vs_prior20": 1.64
+    },
+    {
+      "pair": "RUNEUSDT",
+      "price": 0.597,
+      "rsi4h": 44.26,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 4972224.2154,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.616987102250538,
+          "distance_pct": -3.239,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.618593220338983,
+          "distance_pct": -3.491,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.618593220338983,
+          "distance_pct": -3.491,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.657435,
+          "distance_pct": -9.193,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.616987102250538,
+          "distance_pct": -3.239,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.6593398036050206,
+          "distance_pct": -9.455,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.6378135593220339,
+          "distance_pct": -6.399,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.5015149999999999,
+          "distance_pct": 19.039,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 14.156,
+      "recent_4h_volume_vs_prior20": 0.66
+    },
+    {
+      "pair": "DASHUSDT",
+      "price": 46.4,
+      "rsi4h": 44.6,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 6619264.91314,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 47.77562899166518,
+          "distance_pct": -2.879,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 48.61322033898305,
+          "distance_pct": -4.553,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 50.911300000000004,
+          "distance_pct": -8.861,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 47.77562899166518,
+          "distance_pct": -2.879,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 52.01115888335289,
+          "distance_pct": -10.788,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 54.80474576271187,
+          "distance_pct": -15.336,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 42.8454,
+          "distance_pct": 8.296,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 13.455,
+      "recent_4h_volume_vs_prior20": 1.95
+    },
+    {
+      "pair": "UNIUSDT",
+      "price": 6.983,
+      "rsi4h": 44.76,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 89118799.7894,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 7.140050847457626,
+          "distance_pct": -2.2,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 7.168881985958674,
+          "distance_pct": -2.593,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 7.140050847457626,
+          "distance_pct": -2.2,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 7.392795,
+          "distance_pct": -5.543,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 7.168881985958674,
+          "distance_pct": -2.593,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 7.619879806017771,
+          "distance_pct": -8.358,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 7.70664406779661,
+          "distance_pct": -9.39,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 4.81184,
+          "distance_pct": 45.121,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 15.974,
+      "recent_4h_volume_vs_prior20": 1.79
+    },
+    {
+      "pair": "ICPUSDT",
+      "price": 2.45,
+      "rsi4h": 44.87,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 4994225.73738,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 2.523779661016949,
+          "distance_pct": -2.923,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 2.523779661016949,
+          "distance_pct": -2.923,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 2.861325,
+          "distance_pct": -14.375,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 2.5318617853985677,
+          "distance_pct": -3.233,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 2.825795389934597,
+          "distance_pct": -13.299,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 2.9131864406779657,
+          "distance_pct": -15.9,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 2.55858,
+          "distance_pct": -4.244,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.409,
+      "recent_4h_volume_vs_prior20": 1.99
+    },
+    {
+      "pair": "BNTUSDT",
+      "price": 0.2802,
+      "rsi4h": 44.94,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 164483.26784,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.28809338475272284,
+          "distance_pct": -2.74,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.2886677966101695,
+          "distance_pct": -2.933,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.2886677966101695,
+          "distance_pct": -2.933,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.308199,
+          "distance_pct": -9.085,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.28809338475272284,
+          "distance_pct": -2.74,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.3089200268633694,
+          "distance_pct": -9.297,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.3175949152542373,
+          "distance_pct": -11.774,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.301219,
+          "distance_pct": -6.978,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 8.983,
+      "recent_4h_volume_vs_prior20": 2.41
+    },
+    {
+      "pair": "MTLUSDT",
+      "price": 0.255,
+      "rsi4h": 45.15,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 256867.78977,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 0.2621395,
+          "distance_pct": -2.724,
+          "side": "below/resistance-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.2655474576271186,
+          "distance_pct": -3.972,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.2813325,
+          "distance_pct": -9.36,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.26320025862689916,
+          "distance_pct": -3.116,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.28453418460324875,
+          "distance_pct": -10.38,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.29206610169491526,
+          "distance_pct": -12.691,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.2621395,
+          "distance_pct": -2.724,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.661,
+      "recent_4h_volume_vs_prior20": 2.35
+    },
+    {
+      "pair": "OGNUSDT",
+      "price": 0.02407,
+      "rsi4h": 45.88,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 671573.30313,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA59",
+          "value": 0.024393389830508476,
+          "distance_pct": -1.326,
+          "side": "below/resistance-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.024952542372881355,
+          "distance_pct": -3.537,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.028281749999999998,
+          "distance_pct": -14.892,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.025066466275137193,
+          "distance_pct": -3.975,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.026045546274409942,
+          "distance_pct": -7.585,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.024393389830508476,
+          "distance_pct": -1.326,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.020445099999999997,
+          "distance_pct": 17.73,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 6.503,
+      "recent_4h_volume_vs_prior20": 0.37
+    },
+    {
+      "pair": "BNBUSDT",
+      "price": 695.5,
+      "rsi4h": 45.97,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 126278337.09916,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 708.9678072205079,
+          "distance_pct": -1.9,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 713.7661016949152,
+          "distance_pct": -2.559,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 713.7661016949152,
+          "distance_pct": -2.559,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 735.7007000000001,
+          "distance_pct": -5.464,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 708.9678072205079,
+          "distance_pct": -1.9,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 734.2267924195664,
+          "distance_pct": -5.275,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 743.8206779661017,
+          "distance_pct": -6.496,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 657.0427000000001,
+          "distance_pct": 5.853,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 5.927,
+      "recent_4h_volume_vs_prior20": 1.42
+    },
+    {
+      "pair": "TRXUSDT",
+      "price": 0.3188,
+      "rsi4h": 46.13,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 25100076.62078,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.32121983915052077,
+          "distance_pct": -0.753,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.32290677966101694,
+          "distance_pct": -1.272,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA200",
+          "value": 0.3282831064168998,
+          "distance_pct": -2.889,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.32290677966101694,
+          "distance_pct": -1.272,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.32939799999999997,
+          "distance_pct": -3.217,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.32121983915052077,
+          "distance_pct": -0.753,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.3282831064168998,
+          "distance_pct": -2.889,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.3331593220338983,
+          "distance_pct": -4.31,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.333581,
+          "distance_pct": -4.431,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 2.489,
+      "recent_4h_volume_vs_prior20": 0.73
+    },
+    {
+      "pair": "COTIUSDT",
+      "price": 0.00969,
+      "rsi4h": 46.14,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 534649.56351,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.00997677966101695,
+          "distance_pct": -2.874,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.009984017283280426,
+          "distance_pct": -2.945,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.00997677966101695,
+          "distance_pct": -2.874,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.011386849999999999,
+          "distance_pct": -14.902,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.009984017283280426,
+          "distance_pct": -2.945,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.011457466356582154,
+          "distance_pct": -15.426,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.013650338983050849,
+          "distance_pct": -29.013,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.01209675,
+          "distance_pct": -19.896,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.22,
+      "recent_4h_volume_vs_prior20": 0.86
+    },
+    {
+      "pair": "AVAXUSDT",
+      "price": 8.382,
+      "rsi4h": 46.16,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 16119504.46594,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 8.610964505783643,
+          "distance_pct": -2.659,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 8.617271186440677,
+          "distance_pct": -2.73,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 8.14099,
+          "distance_pct": 2.96,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 8.617271186440677,
+          "distance_pct": -2.73,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 9.59998,
+          "distance_pct": -12.687,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 8.610964505783643,
+          "distance_pct": -2.659,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 9.51906463339044,
+          "distance_pct": -11.945,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 9.540745762711865,
+          "distance_pct": -12.145,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 8.14099,
+          "distance_pct": 2.96,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 9.878,
+      "recent_4h_volume_vs_prior20": 1.12
+    },
+    {
+      "pair": "YGGUSDT",
+      "price": 0.02291,
+      "rsi4h": 46.21,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 372280.639201,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.02360140443749118,
+          "distance_pct": -2.93,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.02369322033898305,
+          "distance_pct": -3.306,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0252153,
+          "distance_pct": -9.142,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.02360140443749118,
+          "distance_pct": -2.93,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.025068820109011757,
+          "distance_pct": -8.612,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.025284237288135593,
+          "distance_pct": -9.39,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.026999949999999998,
+          "distance_pct": -15.148,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.934,
+      "recent_4h_volume_vs_prior20": 1.56
+    },
+    {
+      "pair": "SKLUSDT",
+      "price": 0.00384,
+      "rsi4h": 46.39,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 171186.46913,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.003941236611101907,
+          "distance_pct": -2.569,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.003958813559322034,
+          "distance_pct": -3.001,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.00441025,
+          "distance_pct": -12.93,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.003941236611101907,
+          "distance_pct": -2.569,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.0043099798821201315,
+          "distance_pct": -10.904,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.004339830508474576,
+          "distance_pct": -11.517,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.0046125,
+          "distance_pct": -16.748,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 12.147,
+      "recent_4h_volume_vs_prior20": 0.95
+    },
+    {
+      "pair": "RAREUSDT",
+      "price": 0.01222,
+      "rsi4h": 46.58,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 140827.672534,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.012365593220338984,
+          "distance_pct": -1.177,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.012370849424487353,
+          "distance_pct": -1.219,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.012365593220338984,
+          "distance_pct": -1.177,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.01391815,
+          "distance_pct": -12.201,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.012370849424487353,
+          "distance_pct": -1.219,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.014081362833958408,
+          "distance_pct": -13.219,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.014117288135593221,
+          "distance_pct": -13.439,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.01394615,
+          "distance_pct": -12.377,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 8.102,
+      "recent_4h_volume_vs_prior20": 0.93
+    },
+    {
+      "pair": "LISTAUSDT",
+      "price": 0.0742,
+      "rsi4h": 46.9,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 218468.05408,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.07623980635610823,
+          "distance_pct": -2.676,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.07706271186440679,
+          "distance_pct": -3.715,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.078355,
+          "distance_pct": -5.303,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.07623980635610823,
+          "distance_pct": -2.676,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.07912469010679092,
+          "distance_pct": -6.224,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.07939322033898305,
+          "distance_pct": -6.541,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.06839100000000001,
+          "distance_pct": 8.494,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 9.452,
+      "recent_4h_volume_vs_prior20": 1.99
+    },
+    {
+      "pair": "SSVUSDT",
+      "price": 2.239,
+      "rsi4h": 47.05,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 317598.466026,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 2.300243506495223,
+          "distance_pct": -2.662,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 2.320372881355932,
+          "distance_pct": -3.507,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 2.5938049999999997,
+          "distance_pct": -13.679,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 2.300243506495223,
+          "distance_pct": -2.662,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 2.60193838055802,
+          "distance_pct": -13.949,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 2.787,
+          "distance_pct": -19.663,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 2.51427,
+          "distance_pct": -10.948,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.547,
+      "recent_4h_volume_vs_prior20": 1.52
+    },
+    {
+      "pair": "EGLDUSDT",
+      "price": 3.294,
+      "rsi4h": 47.1,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 313430.36757,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 3.351691778958243,
+          "distance_pct": -1.721,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 3.3584745762711865,
+          "distance_pct": -1.92,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 3.3584745762711865,
+          "distance_pct": -1.92,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 3.661395,
+          "distance_pct": -10.034,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 3.351691778958243,
+          "distance_pct": -1.721,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 3.719271707792563,
+          "distance_pct": -11.434,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 3.9780169491525426,
+          "distance_pct": -17.195,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 3.553925,
+          "distance_pct": -7.314,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.045,
+      "recent_4h_volume_vs_prior20": 1.69
+    },
+    {
+      "pair": "SPELLUSDT",
+      "price": 7.47e-05,
+      "rsi4h": 47.25,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 130028.4187343,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 7.68385864695796e-05,
+          "distance_pct": -2.783,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 7.728813559322034e-05,
+          "distance_pct": -3.349,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 8.54245e-05,
+          "distance_pct": -12.554,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 7.68385864695796e-05,
+          "distance_pct": -2.783,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 8.518764613038534e-05,
+          "distance_pct": -12.311,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 8.768644067796611e-05,
+          "distance_pct": -14.81,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00010744,
+          "distance_pct": -30.473,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.474,
+      "recent_4h_volume_vs_prior20": 1.52
+    },
+    {
+      "pair": "TWTUSDT",
+      "price": 0.4005,
+      "rsi4h": 47.29,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 435488.3831,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.41170829483877003,
+          "distance_pct": -2.722,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.4169322033898305,
+          "distance_pct": -3.941,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.4693255,
+          "distance_pct": -14.665,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.41170829483877003,
+          "distance_pct": -2.722,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.47244689847287547,
+          "distance_pct": -15.229,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.5113542372881357,
+          "distance_pct": -21.679,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.442519,
+          "distance_pct": -9.495,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.658,
+      "recent_4h_volume_vs_prior20": 1.03
+    },
+    {
+      "pair": "ARKUSDT",
+      "price": 0.1614,
+      "rsi4h": 47.31,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 287650.7258,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.16444447311295102,
+          "distance_pct": -1.851,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.1645135593220339,
+          "distance_pct": -1.893,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.1645135593220339,
+          "distance_pct": -1.893,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.1839995,
+          "distance_pct": -12.282,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.16444447311295102,
+          "distance_pct": -1.851,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.1877427692092543,
+          "distance_pct": -14.031,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.18122033898305084,
+          "distance_pct": -10.937,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.142457,
+          "distance_pct": 13.297,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 7.532,
+      "recent_4h_volume_vs_prior20": 0.99
+    },
+    {
+      "pair": "DOTUSDT",
+      "price": 0.932,
+      "rsi4h": 47.42,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 5068156.84709,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.9568983050847458,
+          "distance_pct": -2.602,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.9570443500551072,
+          "distance_pct": -2.617,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.9568983050847458,
+          "distance_pct": -2.602,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.08858,
+          "distance_pct": -14.384,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.9570443500551072,
+          "distance_pct": -2.617,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.0683903834646782,
+          "distance_pct": -12.766,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.1084745762711865,
+          "distance_pct": -15.92,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 1.024785,
+          "distance_pct": -9.054,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 7.586,
+      "recent_4h_volume_vs_prior20": 1.52
+    },
+    {
+      "pair": "CELRUSDT",
+      "price": 0.00244,
+      "rsi4h": 47.61,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 401431.7458157,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.002438542372881356,
+          "distance_pct": 0.06,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.002424568768397687,
+          "distance_pct": 0.636,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.002438542372881356,
+          "distance_pct": 0.06,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.002680545,
+          "distance_pct": -8.974,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.002424568768397687,
+          "distance_pct": 0.636,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.0026743372326120717,
+          "distance_pct": -8.762,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0026948305084745763,
+          "distance_pct": -9.456,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00235176,
+          "distance_pct": 3.752,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 11.458,
+      "recent_4h_volume_vs_prior20": 1.78
+    },
+    {
+      "pair": "NEOUSDT",
+      "price": 1.926,
+      "rsi4h": 47.77,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 300882.53893,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 1.9808100742736947,
+          "distance_pct": -2.767,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1.993949152542373,
+          "distance_pct": -3.408,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 2.232025,
+          "distance_pct": -13.711,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 1.9808100742736947,
+          "distance_pct": -2.767,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 2.2176828876945636,
+          "distance_pct": -13.153,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 2.306406779661017,
+          "distance_pct": -16.493,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 2.286435,
+          "distance_pct": -15.764,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.241,
+      "recent_4h_volume_vs_prior20": 1.36
+    },
+    {
+      "pair": "MASKUSDT",
+      "price": 0.375,
+      "rsi4h": 47.96,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 274744.3401,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.38373033872515366,
+          "distance_pct": -2.275,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.3849661016949153,
+          "distance_pct": -2.589,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.3849661016949153,
+          "distance_pct": -2.589,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.42404000000000003,
+          "distance_pct": -11.565,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.38373033872515366,
+          "distance_pct": -2.275,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.4201801115166905,
+          "distance_pct": -10.753,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.4416779661016949,
+          "distance_pct": -15.097,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.426025,
+          "distance_pct": -11.977,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.563,
+      "recent_4h_volume_vs_prior20": 3.18
+    },
+    {
+      "pair": "MANAUSDT",
+      "price": 0.0724,
+      "rsi4h": 48.12,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 452026.2776,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.07421646821636715,
+          "distance_pct": -2.448,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.07439830508474576,
+          "distance_pct": -2.686,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.07439830508474576,
+          "distance_pct": -2.686,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0854815,
+          "distance_pct": -15.303,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.07421646821636715,
+          "distance_pct": -2.448,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.08339203062536099,
+          "distance_pct": -13.181,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.08449152542372881,
+          "distance_pct": -14.311,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.07833899999999999,
+          "distance_pct": -7.581,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.202,
+      "recent_4h_volume_vs_prior20": 1.73
+    },
+    {
+      "pair": "MOVRUSDT",
+      "price": 1.043,
+      "rsi4h": 48.13,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 665314.660776,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 1.064684652450904,
+          "distance_pct": -2.037,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 1.066779661016949,
+          "distance_pct": -2.229,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1.066779661016949,
+          "distance_pct": -2.229,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.3656899999999998,
+          "distance_pct": -23.628,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 1.064684652450904,
+          "distance_pct": -2.037,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.299487694070111,
+          "distance_pct": -19.738,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.238220338983051,
+          "distance_pct": -15.766,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 1.3968850000000002,
+          "distance_pct": -25.334,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 14.531,
+      "recent_4h_volume_vs_prior20": 1.15
+    },
+    {
+      "pair": "SUPERUSDT",
+      "price": 0.1721,
+      "rsi4h": 48.36,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 1298568.7346,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.17239830508474577,
+          "distance_pct": -0.173,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.1749539647808141,
+          "distance_pct": -1.631,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.17239830508474577,
+          "distance_pct": -0.173,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.1961065,
+          "distance_pct": -12.242,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.1749539647808141,
+          "distance_pct": -1.631,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.19089258605136883,
+          "distance_pct": -9.845,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.1803050847457627,
+          "distance_pct": -4.551,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.12489900000000001,
+          "distance_pct": 37.791,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 17.23,
+      "recent_4h_volume_vs_prior20": 1.57
+    },
+    {
+      "pair": "TRBUSDT",
+      "price": 16.1,
+      "rsi4h": 48.44,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 766223.63436,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 16.437025365736964,
+          "distance_pct": -2.05,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 16.47949152542373,
+          "distance_pct": -2.303,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 16.47949152542373,
+          "distance_pct": -2.303,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 18.0118,
+          "distance_pct": -10.614,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 16.437025365736964,
+          "distance_pct": -2.05,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 17.8960585201321,
+          "distance_pct": -10.036,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 18.377627118644067,
+          "distance_pct": -12.393,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 16.655350000000002,
+          "distance_pct": -3.334,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.949,
+      "recent_4h_volume_vs_prior20": 1.53
+    },
+    {
+      "pair": "ALGOUSDT",
+      "price": 0.0947,
+      "rsi4h": 48.46,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 1459064.5473,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.09637627118644068,
+          "distance_pct": -1.739,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.09651674944301035,
+          "distance_pct": -1.882,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.09637627118644068,
+          "distance_pct": -1.739,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.10976699999999999,
+          "distance_pct": -13.726,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.09651674944301035,
+          "distance_pct": -1.882,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.10803695447824273,
+          "distance_pct": -12.345,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.10895084745762712,
+          "distance_pct": -13.08,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.09992050000000001,
+          "distance_pct": -5.225,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 12.934,
+      "recent_4h_volume_vs_prior20": 1.66
+    },
+    {
+      "pair": "HIVEUSDT",
+      "price": 0.0447,
+      "rsi4h": 48.63,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 100854.3938,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.04580981627936428,
+          "distance_pct": -2.423,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.04631186440677967,
+          "distance_pct": -3.48,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0503605,
+          "distance_pct": -11.24,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.04580981627936428,
+          "distance_pct": -2.423,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.05021864730885266,
+          "distance_pct": -10.989,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.05181525423728814,
+          "distance_pct": -13.732,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.0514375,
+          "distance_pct": -13.098,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 8.675,
+      "recent_4h_volume_vs_prior20": 1.85
+    },
+    {
+      "pair": "NEIROUSDT",
+      "price": 6.194e-05,
+      "rsi4h": 48.74,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 762621.44880091,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 6.349178147577238e-05,
+          "distance_pct": -2.444,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 6.400406779661017e-05,
+          "distance_pct": -3.225,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 7.385715e-05,
+          "distance_pct": -16.135,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 6.349178147577238e-05,
+          "distance_pct": -2.444,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 7.380634668332158e-05,
+          "distance_pct": -16.078,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 8.048186440677965e-05,
+          "distance_pct": -23.039,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 7.72448e-05,
+          "distance_pct": -19.813,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.173,
+      "recent_4h_volume_vs_prior20": 1.35
+    },
+    {
+      "pair": "SAGAUSDT",
+      "price": 0.01662,
+      "rsi4h": 48.8,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 897343.131333,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.016966390722031995,
+          "distance_pct": -2.042,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.01711762711864407,
+          "distance_pct": -2.907,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.01711762711864407,
+          "distance_pct": -2.907,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0195188,
+          "distance_pct": -14.851,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.016966390722031995,
+          "distance_pct": -2.042,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.020367506287055262,
+          "distance_pct": -18.399,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.023043559322033898,
+          "distance_pct": -27.876,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.01784975,
+          "distance_pct": -6.889,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 12.088,
+      "recent_4h_volume_vs_prior20": 0.52
+    },
+    {
+      "pair": "LDOUSDT",
+      "price": 0.3317,
+      "rsi4h": 48.8,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 2484379.26074,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.34137531182619896,
+          "distance_pct": -2.834,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.3430966101694915,
+          "distance_pct": -3.322,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.39077199999999995,
+          "distance_pct": -15.117,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.34137531182619896,
+          "distance_pct": -2.834,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.3879199937833383,
+          "distance_pct": -14.493,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.4007457627118644,
+          "distance_pct": -17.229,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.3521665,
+          "distance_pct": -5.812,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.388,
+      "recent_4h_volume_vs_prior20": 1.83
+    },
+    {
+      "pair": "ILVUSDT",
+      "price": 2.93,
+      "rsi4h": 48.9,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 211962.45341,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 2.9977966101694915,
+          "distance_pct": -2.262,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 2.998148443852641,
+          "distance_pct": -2.273,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 2.9977966101694915,
+          "distance_pct": -2.262,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 3.3943,
+          "distance_pct": -13.679,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 2.998148443852641,
+          "distance_pct": -2.273,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 3.367535546248825,
+          "distance_pct": -12.993,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 3.504576271186441,
+          "distance_pct": -16.395,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 3.55005,
+          "distance_pct": -17.466,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.911,
+      "recent_4h_volume_vs_prior20": 1.21
+    },
+    {
+      "pair": "AAVEUSDT",
+      "price": 131.01,
+      "rsi4h": 48.93,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 22112011.9191,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 131.1793220338983,
+          "distance_pct": -0.129,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 131.77181940904214,
+          "distance_pct": -0.578,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 131.1793220338983,
+          "distance_pct": -0.129,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 150.2017,
+          "distance_pct": -12.777,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 131.77181940904214,
+          "distance_pct": -0.578,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 146.58143648345123,
+          "distance_pct": -10.623,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 146.7157627118644,
+          "distance_pct": -10.705,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 108.69495,
+          "distance_pct": 20.53,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 7.848,
+      "recent_4h_volume_vs_prior20": 1.19
+    },
+    {
+      "pair": "API3USDT",
+      "price": 0.2346,
+      "rsi4h": 49.22,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 258935.720017,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.23864149363468445,
+          "distance_pct": -1.694,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.24040338983050846,
+          "distance_pct": -2.414,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.24040338983050846,
+          "distance_pct": -2.414,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.27356,
+          "distance_pct": -14.242,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.23864149363468445,
+          "distance_pct": -1.694,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.264791074884177,
+          "distance_pct": -11.402,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.2670474576271187,
+          "distance_pct": -12.15,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.264009,
+          "distance_pct": -11.139,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.712,
+      "recent_4h_volume_vs_prior20": 0.92
+    },
+    {
+      "pair": "NMRUSDT",
+      "price": 9.48,
+      "rsi4h": 49.25,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 316544.0306,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "1D SMA200",
+          "value": 9.45855,
+          "distance_pct": 0.227,
+          "side": "above/support-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 9.641023648637965,
+          "distance_pct": -1.67,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 9.675254237288136,
+          "distance_pct": -2.018,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 9.675254237288136,
+          "distance_pct": -2.018,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 11.37325,
+          "distance_pct": -16.647,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 9.641023648637965,
+          "distance_pct": -1.67,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 10.803402353275805,
+          "distance_pct": -12.25,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 10.749491525423728,
+          "distance_pct": -11.81,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 9.45855,
+          "distance_pct": 0.227,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 8.563,
+      "recent_4h_volume_vs_prior20": 0.76
+    },
+    {
+      "pair": "COMPUSDT",
+      "price": 20.17,
+      "rsi4h": 49.33,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 427636.50936,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 20.48300646652364,
+          "distance_pct": -1.528,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 19.8524,
+          "distance_pct": 1.6,
+          "side": "above/support-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 20.517966101694913,
+          "distance_pct": -1.696,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 20.517966101694913,
+          "distance_pct": -1.696,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 22.5675,
+          "distance_pct": -10.624,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 20.48300646652364,
+          "distance_pct": -1.528,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 22.240300433702924,
+          "distance_pct": -9.309,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 22.36864406779661,
+          "distance_pct": -9.829,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 19.8524,
+          "distance_pct": 1.6,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 7.565,
+      "recent_4h_volume_vs_prior20": 0.82
+    },
+    {
+      "pair": "BEAMXUSDT",
+      "price": 0.004306,
+      "rsi4h": 49.37,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 3752150.124528,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.004299254237288135,
+          "distance_pct": 0.157,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.004257389267023583,
+          "distance_pct": 1.142,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.004299254237288135,
+          "distance_pct": 0.157,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.0032959,
+          "distance_pct": 30.647,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 0.004257389267023583,
+          "distance_pct": 1.142,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.0033962462459646062,
+          "distance_pct": 26.787,
+          "wick_touch": false,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0026709661016949154,
+          "distance_pct": 61.215,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.00191938,
+          "distance_pct": 124.343,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 21.315,
+      "recent_4h_volume_vs_prior20": 0.48
+    },
+    {
+      "pair": "JOEUSDT",
+      "price": 0.0275,
+      "rsi4h": 49.37,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 71326.060281,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.02820954192069845,
+          "distance_pct": -2.515,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.028303389830508473,
+          "distance_pct": -2.838,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.028303389830508473,
+          "distance_pct": -2.838,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.032887,
+          "distance_pct": -16.38,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.02820954192069845,
+          "distance_pct": -2.515,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.032552844263109955,
+          "distance_pct": -15.522,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.03363559322033898,
+          "distance_pct": -18.241,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.0338305,
+          "distance_pct": -18.712,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.517,
+      "recent_4h_volume_vs_prior20": 1.33
+    },
+    {
+      "pair": "ARUSDT",
+      "price": 3.164,
+      "rsi4h": 49.4,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 2341008.22585,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 3.2097621319752507,
+          "distance_pct": -1.426,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 3.2254745762711865,
+          "distance_pct": -1.906,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 3.2254745762711865,
+          "distance_pct": -1.906,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 3.715865,
+          "distance_pct": -14.852,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 3.2097621319752507,
+          "distance_pct": -1.426,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 3.6881500916789243,
+          "distance_pct": -14.212,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 3.724372881355932,
+          "distance_pct": -15.046,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 2.544835,
+          "distance_pct": 24.33,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 12.073,
+      "recent_4h_volume_vs_prior20": 1.58
+    },
+    {
+      "pair": "AEVOUSDT",
+      "price": 0.01971,
+      "rsi4h": 49.43,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 77501.4134765,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.020198976939294386,
+          "distance_pct": -2.421,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.02048983050847458,
+          "distance_pct": -3.806,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.023002349999999998,
+          "distance_pct": -14.313,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.020198976939294386,
+          "distance_pct": -2.421,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.022725661718356095,
+          "distance_pct": -13.27,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.02356220338983051,
+          "distance_pct": -16.349,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.02250375,
+          "distance_pct": -12.415,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.411,
+      "recent_4h_volume_vs_prior20": 1.09
+    },
+    {
+      "pair": "IDUSDT",
+      "price": 0.029,
+      "rsi4h": 49.81,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 191327.6187,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.029445832946295856,
+          "distance_pct": -1.514,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.029496610169491524,
+          "distance_pct": -1.684,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.029496610169491524,
+          "distance_pct": -1.684,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.032808000000000004,
+          "distance_pct": -11.607,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.029445832946295856,
+          "distance_pct": -1.514,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.032656354867291376,
+          "distance_pct": -11.196,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0340864406779661,
+          "distance_pct": -14.922,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.03235,
+          "distance_pct": -10.355,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 7.462,
+      "recent_4h_volume_vs_prior20": 0.77
+    },
+    {
+      "pair": "IMXUSDT",
+      "price": 0.1208,
+      "rsi4h": 49.84,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 261452.240202,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.12408803677370682,
+          "distance_pct": -2.65,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.1250033898305085,
+          "distance_pct": -3.363,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.153771,
+          "distance_pct": -21.442,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.12408803677370682,
+          "distance_pct": -2.65,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.147890501238206,
+          "distance_pct": -18.318,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.150835593220339,
+          "distance_pct": -19.913,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.143692,
+          "distance_pct": -15.931,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.626,
+      "recent_4h_volume_vs_prior20": 1.0
+    },
+    {
+      "pair": "BONKUSDT",
+      "price": 2.9e-06,
+      "rsi4h": 49.93,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 3234482.68806428,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 2.94050450312036e-06,
+          "distance_pct": -1.377,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 2.9542372881355932e-06,
+          "distance_pct": -1.836,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 2.9542372881355932e-06,
+          "distance_pct": -1.836,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 3.1568e-06,
+          "distance_pct": -8.135,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 2.94050450312036e-06,
+          "distance_pct": -1.377,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 3.183739476054243e-06,
+          "distance_pct": -8.912,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 3.1922033898305086e-06,
+          "distance_pct": -9.154,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 4.02685e-06,
+          "distance_pct": -27.983,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 15.191,
+      "recent_4h_volume_vs_prior20": 1.89
+    },
+    {
+      "pair": "REZUSDT",
+      "price": 0.003989,
+      "rsi4h": 50.07,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 701810.8121825,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA200",
+          "value": 0.00399251,
+          "distance_pct": -0.088,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "1D SMA59",
+          "value": 0.003968542372881355,
+          "distance_pct": 0.515,
+          "side": "above/support-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.004036013639421048,
+          "distance_pct": -1.165,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA200",
+          "value": 0.004066824728933424,
+          "distance_pct": -1.914,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.004167508474576271,
+          "distance_pct": -4.283,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.00399251,
+          "distance_pct": -0.088,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.004036013639421048,
+          "distance_pct": -1.165,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.004066824728933424,
+          "distance_pct": -1.914,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.003968542372881355,
+          "distance_pct": 0.515,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.003631195,
+          "distance_pct": 9.854,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 9.075,
+      "recent_4h_volume_vs_prior20": 1.41
+    },
+    {
+      "pair": "TLMUSDT",
+      "price": 0.001116,
+      "rsi4h": 50.22,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 147852.43502,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.0011416698580328747,
+          "distance_pct": -2.248,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0011619152542372882,
+          "distance_pct": -3.952,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.00127661,
+          "distance_pct": -12.581,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0011416698580328747,
+          "distance_pct": -2.248,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.001290241521611065,
+          "distance_pct": -13.505,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.001365813559322034,
+          "distance_pct": -18.29,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.0015156,
+          "distance_pct": -26.366,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 10.828,
+      "recent_4h_volume_vs_prior20": 0.76
+    },
+    {
+      "pair": "NOMUSDT",
+      "price": 0.001524,
+      "rsi4h": 50.24,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 582485.391258,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.001531619977838446,
+          "distance_pct": -0.498,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.001555220338983051,
+          "distance_pct": -2.007,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.001555220338983051,
+          "distance_pct": -2.007,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.00182643,
+          "distance_pct": -16.559,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.001531619977838446,
+          "distance_pct": -0.498,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.0018182645008642103,
+          "distance_pct": -16.184,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0018625762711864408,
+          "distance_pct": -18.178,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00187306,
+          "distance_pct": -18.636,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.125,
+      "recent_4h_volume_vs_prior20": 0.46
+    },
+    {
+      "pair": "LUNCUSDT",
+      "price": 4.14e-05,
+      "rsi4h": 50.39,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 1516398.40614892,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 4.212194948415584e-05,
+          "distance_pct": -1.714,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 4.261898305084746e-05,
+          "distance_pct": -2.86,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 4.261898305084746e-05,
+          "distance_pct": -2.86,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 4.6733499999999996e-05,
+          "distance_pct": -11.413,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 4.212194948415584e-05,
+          "distance_pct": -1.714,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 4.663043132379303e-05,
+          "distance_pct": -11.217,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 4.9360169491525424e-05,
+          "distance_pct": -16.127,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 5.9878e-05,
+          "distance_pct": -30.859,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 6.728,
+      "recent_4h_volume_vs_prior20": 1.59
+    },
+    {
+      "pair": "AXSUSDT",
+      "price": 0.856,
+      "rsi4h": 50.54,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 946401.60093,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.8719085323242078,
+          "distance_pct": -1.825,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.8766610169491525,
+          "distance_pct": -2.357,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.8766610169491525,
+          "distance_pct": -2.357,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.038635,
+          "distance_pct": -17.584,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.8719085323242078,
+          "distance_pct": -1.825,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.0111070613186637,
+          "distance_pct": -15.34,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.042677966101695,
+          "distance_pct": -17.904,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 1.0445149999999999,
+          "distance_pct": -18.048,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.574,
+      "recent_4h_volume_vs_prior20": 1.34
+    },
+    {
+      "pair": "XVSUSDT",
+      "price": 2.857,
+      "rsi4h": 50.57,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 225351.40777,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 2.8569051479997287,
+          "distance_pct": 0.003,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 2.8553389830508475,
+          "distance_pct": 0.058,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 2.842125,
+          "distance_pct": 0.523,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 2.8553389830508475,
+          "distance_pct": 0.058,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 3.0208600000000003,
+          "distance_pct": -5.424,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 2.8569051479997287,
+          "distance_pct": 0.003,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 3.0382568993950185,
+          "distance_pct": -5.966,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 3.1227966101694915,
+          "distance_pct": -8.511,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 2.842125,
+          "distance_pct": 0.523,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 7.481,
+      "recent_4h_volume_vs_prior20": 4.5
+    },
+    {
+      "pair": "XTZUSDT",
+      "price": 0.2612,
+      "rsi4h": 50.74,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 2294910.66655,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.2597176100620775,
+          "distance_pct": 0.571,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.2595474576271186,
+          "distance_pct": 0.637,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.2595474576271186,
+          "distance_pct": 0.637,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.293225,
+          "distance_pct": -10.922,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.2597176100620775,
+          "distance_pct": 0.571,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.2877337829687199,
+          "distance_pct": -9.222,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.29687796610169487,
+          "distance_pct": -12.018,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.2747905,
+          "distance_pct": -4.946,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 17.765,
+      "recent_4h_volume_vs_prior20": 2.92
+    },
+    {
+      "pair": "KAVAUSDT",
+      "price": 0.06869,
+      "rsi4h": 50.77,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 1146711.446949,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.06871305084745763,
+          "distance_pct": -0.034,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.0686327067645622,
+          "distance_pct": 0.083,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA200",
+          "value": 0.0688878466554164,
+          "distance_pct": -0.287,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "1D SMA59",
+          "value": 0.06853220338983051,
+          "distance_pct": 0.23,
+          "side": "above/support-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "4H SMA200",
+          "value": 0.0690915,
+          "distance_pct": -0.581,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.06871305084745763,
+          "distance_pct": -0.034,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0690915,
+          "distance_pct": -0.581,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0686327067645622,
+          "distance_pct": 0.083,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.0688878466554164,
+          "distance_pct": -0.287,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.06853220338983051,
+          "distance_pct": 0.23,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.05512835,
+          "distance_pct": 24.6,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 2.084,
+      "recent_4h_volume_vs_prior20": 1.87
+    },
+    {
+      "pair": "LPTUSDT",
+      "price": 1.386,
+      "rsi4h": 51.05,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 346911.65286,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 1.4135160049334698,
+          "distance_pct": -1.947,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 1.4234237288135594,
+          "distance_pct": -2.629,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1.4234237288135594,
+          "distance_pct": -2.629,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.603385,
+          "distance_pct": -13.558,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 1.4135160049334698,
+          "distance_pct": -1.947,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.5692474551157758,
+          "distance_pct": -11.677,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.595271186440678,
+          "distance_pct": -13.118,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 1.66902,
+          "distance_pct": -16.957,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 8.717,
+      "recent_4h_volume_vs_prior20": 1.45
+    },
+    {
+      "pair": "STXUSDT",
+      "price": 0.3361,
+      "rsi4h": 51.31,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 2798732.30839,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.32896664372203804,
+          "distance_pct": 2.168,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA200",
+          "value": 0.34360623027617604,
+          "distance_pct": -2.185,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "1D SMA59",
+          "value": 0.3335440677966102,
+          "distance_pct": 0.766,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.3179135593220339,
+          "distance_pct": 5.721,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.35438600000000003,
+          "distance_pct": -5.16,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.32896664372203804,
+          "distance_pct": 2.168,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.34360623027617604,
+          "distance_pct": -2.185,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.3335440677966102,
+          "distance_pct": 0.766,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.2369355,
+          "distance_pct": 41.853,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 13.446,
+      "recent_4h_volume_vs_prior20": 1.23
+    },
+    {
+      "pair": "IOSTUSDT",
+      "price": 0.000702,
+      "rsi4h": 51.39,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 943905.985567,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.0007161647357039299,
+          "distance_pct": -1.978,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.0007235254237288135,
+          "distance_pct": -2.975,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0007235254237288135,
+          "distance_pct": -2.975,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0008046549999999999,
+          "distance_pct": -12.758,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0007161647357039299,
+          "distance_pct": -1.978,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.0007970764459585949,
+          "distance_pct": -11.928,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0008518813559322034,
+          "distance_pct": -17.594,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00081869,
+          "distance_pct": -14.253,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 8.749,
+      "recent_4h_volume_vs_prior20": 1.51
+    },
+    {
+      "pair": "POLUSDT",
+      "price": 0.09305,
+      "rsi4h": 51.55,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 3829265.693291,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.09258988624318862,
+          "distance_pct": 0.497,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.09207661016949154,
+          "distance_pct": 1.057,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA200",
+          "value": 0.0957034,
+          "distance_pct": -2.773,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.09207661016949154,
+          "distance_pct": 1.057,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.0957034,
+          "distance_pct": -2.773,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.09258988624318862,
+          "distance_pct": 0.497,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.09765826555317936,
+          "distance_pct": -4.719,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.10005067796610169,
+          "distance_pct": -6.997,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.08967069999999999,
+          "distance_pct": 3.769,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 11.414,
+      "recent_4h_volume_vs_prior20": 1.04
+    },
+    {
+      "pair": "RENDERUSDT",
+      "price": 1.576,
+      "rsi4h": 51.56,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 2848039.68423,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 1.5770815279803703,
+          "distance_pct": -0.069,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 1.580237288135593,
+          "distance_pct": -0.268,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1.580237288135593,
+          "distance_pct": -0.268,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 1.8001449999999999,
+          "distance_pct": -12.451,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 1.5770815279803703,
+          "distance_pct": -0.069,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 1.7584440211258447,
+          "distance_pct": -10.375,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1.75035593220339,
+          "distance_pct": -9.961,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 1.667125,
+          "distance_pct": -5.466,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.571,
+      "recent_4h_volume_vs_prior20": 1.23
+    },
+    {
+      "pair": "MBLUSDT",
+      "price": 0.000654,
+      "rsi4h": 51.8,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 198273.347271,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.0006593693187464154,
+          "distance_pct": -0.814,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.000661271186440678,
+          "distance_pct": -1.1,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.000661271186440678,
+          "distance_pct": -1.1,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H SMA200": {
+          "value": 0.0007302,
+          "distance_pct": -10.435,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0006593693187464154,
+          "distance_pct": -0.814,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.0007252098226989331,
+          "distance_pct": -9.819,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0007560169491525423,
+          "distance_pct": -13.494,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.000756315,
+          "distance_pct": -13.528,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 5.437,
+      "recent_4h_volume_vs_prior20": 0.74
+    },
+    {
+      "pair": "PYTHUSDT",
+      "price": 0.06627,
+      "rsi4h": 53.07,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 2206308.805684,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.06607423728813559,
+          "distance_pct": 0.296,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.06601995409611568,
+          "distance_pct": 0.379,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.06607423728813559,
+          "distance_pct": 0.296,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.07466425,
+          "distance_pct": -11.243,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.06601995409611568,
+          "distance_pct": 0.379,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.07253539606175366,
+          "distance_pct": -8.638,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.07041186440677966,
+          "distance_pct": -5.882,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.051552,
+          "distance_pct": 28.55,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 10.597,
+      "recent_4h_volume_vs_prior20": 1.25
+    },
+    {
+      "pair": "ANKRUSDT",
+      "price": 0.00394,
+      "rsi4h": 53.11,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 253995.719707,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.003917079582981492,
+          "distance_pct": 0.585,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.0039016949152542372,
+          "distance_pct": 0.982,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0039016949152542372,
+          "distance_pct": 0.982,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.00429245,
+          "distance_pct": -8.211,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.003917079582981492,
+          "distance_pct": 0.585,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.004292442688440279,
+          "distance_pct": -8.211,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.004510508474576271,
+          "distance_pct": -12.648,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.0041871,
+          "distance_pct": -5.901,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 9.092,
+      "recent_4h_volume_vs_prior20": 1.26
+    },
+    {
+      "pair": "WOOUSDT",
+      "price": 0.01217,
+      "rsi4h": 53.7,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 720585.692749,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA200",
+          "value": 0.011893934877341014,
+          "distance_pct": 2.321,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "1D SMA59",
+          "value": 0.011906271186440678,
+          "distance_pct": 2.215,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.011319661016949152,
+          "distance_pct": 7.512,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.01163265,
+          "distance_pct": 4.619,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 0.01160233469214163,
+          "distance_pct": 4.893,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.011893934877341014,
+          "distance_pct": 2.321,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.011906271186440678,
+          "distance_pct": 2.215,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.0133364,
+          "distance_pct": -8.746,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 8.811,
+      "recent_4h_volume_vs_prior20": 3.92
+    },
+    {
+      "pair": "KAIAUSDT",
+      "price": 0.0336,
+      "rsi4h": 53.87,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 605803.22127,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.03351694915254237,
+          "distance_pct": 0.248,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.03368985685069757,
+          "distance_pct": -0.267,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.03351694915254237,
+          "distance_pct": 0.248,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.0395745,
+          "distance_pct": -15.097,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.03368985685069757,
+          "distance_pct": -0.267,
+          "wick_touch": true,
+          "side": "below/resistance-side"
+        },
+        "4H EMA200": {
+          "value": 0.03711807439518045,
+          "distance_pct": -9.478,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.03633728813559322,
+          "distance_pct": -7.533,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.036889,
+          "distance_pct": -8.916,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 11.911,
+      "recent_4h_volume_vs_prior20": 1.23
+    },
+    {
+      "pair": "ZECUSDT",
+      "price": 1311.26,
+      "rsi4h": 55.1,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 307826568.55958,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA200",
+          "value": 1278.9685298247764,
+          "distance_pct": 2.525,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 1258.810847457627,
+          "distance_pct": 4.167,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 1253.2172870630375,
+          "distance_pct": 4.631,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "1D SMA59",
+          "value": 1295.742033898305,
+          "distance_pct": 1.198,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 1258.810847457627,
+          "distance_pct": 4.167,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 1236.53955,
+          "distance_pct": 6.043,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 1253.2172870630375,
+          "distance_pct": 4.631,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 1278.9685298247764,
+          "distance_pct": 2.525,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 1295.742033898305,
+          "distance_pct": 1.198,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 761.0135,
+          "distance_pct": 72.304,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 16.132,
+      "recent_4h_volume_vs_prior20": 1.51
+    },
+    {
+      "pair": "PEPEUSDT",
+      "price": 5.08e-06,
+      "rsi4h": 57.17,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 70630984.47941583,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 4.922203389830509e-06,
+          "distance_pct": 3.206,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 4.862201026481705e-06,
+          "distance_pct": 4.479,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 4.922203389830509e-06,
+          "distance_pct": 3.206,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 4.42525e-06,
+          "distance_pct": 14.796,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 4.862201026481705e-06,
+          "distance_pct": 4.479,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 4.550914406981049e-06,
+          "distance_pct": 11.626,
+          "wick_touch": false,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 4.22135593220339e-06,
+          "distance_pct": 20.34,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 3.5079000000000003e-06,
+          "distance_pct": 44.816,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 9.473,
+      "recent_4h_volume_vs_prior20": 1.28
+    },
+    {
+      "pair": "ARBUSDT",
+      "price": 0.1685,
+      "rsi4h": 57.3,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 22454294.86521,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.16316056114798566,
+          "distance_pct": 3.273,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.16294915254237288,
+          "distance_pct": 3.406,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.16294915254237288,
+          "distance_pct": 3.406,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.17921099999999998,
+          "distance_pct": -5.977,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.16316056114798566,
+          "distance_pct": 3.273,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.17950059464388843,
+          "distance_pct": -6.128,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.1833271186440678,
+          "distance_pct": -8.088,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.123414,
+          "distance_pct": 36.532,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 11.243,
+      "recent_4h_volume_vs_prior20": 3.11
+    },
+    {
+      "pair": "RSRUSDT",
+      "price": 0.001545,
+      "rsi4h": 60.78,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 1534745.1906138,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H EMA50",
+          "value": 0.0015041688522927257,
+          "distance_pct": 2.715,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H SMA59",
+          "value": 0.0014958305084745763,
+          "distance_pct": 3.287,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 0.00150584,
+          "distance_pct": 2.601,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0014958305084745763,
+          "distance_pct": 3.287,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.0017077000000000001,
+          "distance_pct": -9.527,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0015041688522927257,
+          "distance_pct": 2.715,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.0016465199233705078,
+          "distance_pct": -6.166,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0016541355932203389,
+          "distance_pct": -6.598,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00150584,
+          "distance_pct": 2.601,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 11.471,
+      "recent_4h_volume_vs_prior20": 1.88
+    },
+    {
+      "pair": "GNOUSDT",
+      "price": 114.12,
+      "rsi4h": 63.67,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 229391.85051,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA200",
+          "value": 113.30645,
+          "distance_pct": 0.718,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA200",
+          "value": 112.76186093506071,
+          "distance_pct": 1.204,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 113.5686,
+          "distance_pct": 0.486,
+          "side": "above/support-side",
+          "wick_touch": false
+        },
+        {
+          "ma": "1D SMA59",
+          "value": 114.73762711864407,
+          "distance_pct": -0.538,
+          "side": "below/resistance-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 108.55067796610169,
+          "distance_pct": 5.131,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 113.30645,
+          "distance_pct": 0.718,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 109.84383013408868,
+          "distance_pct": 3.893,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 112.76186093506071,
+          "distance_pct": 1.204,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 114.73762711864407,
+          "distance_pct": -0.538,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 113.5686,
+          "distance_pct": 0.486,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 12.311,
+      "recent_4h_volume_vs_prior20": 1.99
+    },
+    {
+      "pair": "MAGICUSDT",
+      "price": 0.0911,
+      "rsi4h": 65.35,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 778918.20913,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA200",
+          "value": 0.09036799999999999,
+          "distance_pct": 0.81,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.08311148535090586,
+          "distance_pct": 9.612,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0821406779661017,
+          "distance_pct": 10.907,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.09036799999999999,
+          "distance_pct": 0.81,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 0.08311148535090586,
+          "distance_pct": 9.612,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.08202265933432634,
+          "distance_pct": 11.067,
+          "wick_touch": false,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0721,
+          "distance_pct": 26.352,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.0566235,
+          "distance_pct": 60.887,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 15.538,
+      "recent_4h_volume_vs_prior20": 1.93
+    },
+    {
+      "pair": "ONEUSDT",
+      "price": 0.001497,
+      "rsi4h": 74.73,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 7167180.6702736,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA59",
+          "value": 0.0011720847457627119,
+          "distance_pct": 27.721,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "4H EMA50",
+          "value": 0.0011685771685472262,
+          "distance_pct": 28.105,
+          "wick_touch": true,
+          "side": "above/support-side"
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.0011720847457627119,
+          "distance_pct": 27.721,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.001560885,
+          "distance_pct": -4.093,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        },
+        "4H EMA50": {
+          "value": 0.0011685771685472262,
+          "distance_pct": 28.105,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.0015795889790087192,
+          "distance_pct": -5.229,
+          "wick_touch": false,
+          "side": "below/resistance-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.0017604745762711865,
+          "distance_pct": -14.966,
+          "side": "below/resistance-side"
+        },
+        "1D SMA200": {
+          "value": 0.00155573,
+          "distance_pct": -3.775,
+          "side": "below/resistance-side"
+        }
+      },
+      "bb_width_pct": 26.925,
+      "recent_4h_volume_vs_prior20": 8.76
+    },
+    {
+      "pair": "CYBERUSDT",
+      "price": 0.373,
+      "rsi4h": 82.14,
+      "last_closed4h_utc": "2026-11-06T11:59:59.999000+00:00",
+      "quote_volume_24h": 17612300.75183,
+      "status": "NEAR MA, RSI NEUTRAL",
+      "ma_matches": [
+        {
+          "ma": "4H SMA200",
+          "value": 0.30988,
+          "distance_pct": 20.369,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        {
+          "ma": "1D SMA200",
+          "value": 0.36729999999999996,
+          "distance_pct": 1.552,
+          "side": "above/support-side",
+          "wick_touch": false
+        }
+      ],
+      "ma_4h": {
+        "4H SMA59": {
+          "value": 0.2750677966101695,
+          "distance_pct": 35.603,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H SMA200": {
+          "value": 0.30988,
+          "distance_pct": 20.369,
+          "wick_touch": true,
+          "side": "above/support-side"
+        },
+        "4H EMA50": {
+          "value": 0.27915183952856804,
+          "distance_pct": 33.619,
+          "wick_touch": false,
+          "side": "above/support-side"
+        },
+        "4H EMA200": {
+          "value": 0.3038928625674045,
+          "distance_pct": 22.741,
+          "wick_touch": false,
+          "side": "above/support-side"
+        }
+      },
+      "ma_daily": {
+        "1D SMA59": {
+          "value": 0.3139661016949153,
+          "distance_pct": 18.803,
+          "side": "above/support-side"
+        },
+        "1D SMA200": {
+          "value": 0.36729999999999996,
+          "distance_pct": 1.552,
+          "side": "above/support-side"
+        }
+      },
+      "bb_width_pct": 64.841,
+      "recent_4h_volume_vs_prior20": 78.23
+    }
+  ],
   "notes": "RSI from last CLOSED 4h candle. MA from closed candles. Current price from ticker. Real calendar-day MAs from 1D bars. Live 4h candle wick used only for recent touch. Not a verified BUY signal.",
-  "finished_utc": "2026-11-06T13:40:03.568767+00:00"
+  "finished_utc": "2026-11-06T13:42:14.263225+00:00"
 }
