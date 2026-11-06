@@ -143,13 +143,74 @@ def second(row,now):
         row["status"]="IGNITION" if ignition else ("EARLY WATCH" if setup else "MONITOR")
         row["breakout_reference"]=max(resistance1,row["previous_5m_resistance"])
         row["invalidation_reference"]=min(l1[-9:])
+        # A separate stricter quality assessment: avoid promoting 1-minute spikes alone.
+        enough_buying=(buyshare is not None and len(recent)>=20 and recent_usdt>=2500
+                       and age is not None and -6<=age<=40 and buyshare>=.60)
+        volume_aligned=((rvol1>=1.25 and row["rvol5m"]>=1.45)
+                        or (row["rvol5m"]>=2.0 and rvol15>=1.15)
+                        or (rvol1>=2.0 and rvol15>=1.35))
+        near_break=(-1<=dist1<=2.0 and -1<=row["distance_to_5m_resistance_pct"]<=2.5)
+        no_chase=(row["change24_pct"]<10 and row["rsi5m"]<74 and r15<72)
+        structure=(highlow1 or row["higher_low5m"])
+        demand=(ratio>=1.1)
+        healthy_spread=(row["spread_pct"]<=.35)
+        sample_quality=(len(recent)>=20 and recent_usdt>=2500 and age is not None and -6<=age<=40)
+        row["quality_checks"]={"recent_sample":sample_quality,"buyers_60pct":enough_buying,
+                "aligned_multitimeframe_volume":volume_aligned,"near_breakout":near_break,
+                "not_overextended":no_chase,"higher_low":structure,
+                "bids_gt_asks":demand,"spread_ok":healthy_spread}
+        row["quality_reasons_missing"]=[k for k,v in row["quality_checks"].items() if not v]
+        row["quality_score"]=round(
+            (23 if enough_buying else (7 if sample_quality else -10))
+            +(24 if volume_aligned else 0)+(15 if near_break else 0)
+            +(10 if no_chase else -10)+(8 if structure else 0)
+            +(8 if demand else 0)+(7 if healthy_spread else -10)
+            +(5 if row["bb_compression_ratio"]<=.85 else 0)
+            +(5 if row.get("above_4h_ema50") else 0),1)
+        row["qualified_preignition"]=all(row["quality_checks"].values())
+        row["quality_tier"]="STRICT CANDIDATE" if row["qualified_preignition"] else (
+            "PARTIAL WATCH" if enough_buying and near_break and healthy_spread and
+            (volume_aligned or demand) and no_chase else "UNCONFIRMED")
         return row
     except Exception as e:return dict(row,error=str(e)[:220])
+def second_snapshot(row,now):
+    """Independent Binance depth/trade sample to check consistency; cancellations are not fills."""
+    try:
+        pair=row["pair"];old=row["best_ask"]
+        book=get("/api/v3/depth?"+urllib.parse.urlencode({"symbol":pair,"limit":500}),10)
+        asks=sorted((float(p),float(q)) for p,q in book.get("asks",[]) if float(p)>0 and float(q)>0)
+        bids=sorted((float(p),float(q)) for p,q in book.get("bids",[]) if float(p)>0 and float(q)>0)
+        if not asks or not bids:return dict(row,verification_error="missing second book")
+        nextask=asks[0][0];nextbid=bids[-1][0]
+        anchoredask1=sum(p*q for p,q in asks if p<=old*1.01)
+        anchoredbid1=sum(p*q for p,q in bids if p>=old*.99)
+        oldasks=row["ask1_usdt"]
+        delta=round(100*(anchoredask1/oldasks-1),2) if oldasks>0 else None
+        tt=get("/api/v3/aggTrades?"+urllib.parse.urlencode({"symbol":pair,"limit":500}),10)
+        recent=[t for t in tt if now-300000<=int(t.get("T",0))<=now+10000]
+        buy=sum(float(t["p"])*float(t["q"]) for t in recent if t.get("m")==False)
+        sell=sum(float(t["p"])*float(t["q"]) for t in recent if t.get("m")==True)
+        share=buy/(buy+sell) if buy+sell>0 else None
+        age=(now-int(tt[-1]["T"]))/1000 if tt else None
+        good=(share is not None and share>=.58 and len(recent)>=20 and buy+sell>=2500
+              and age is not None and -6<=age<=45
+              and nextask>=old*.995 and nextask<=old*1.035)
+        row.update({"second_book_best_ask":nextask,"second_book_ask1_anchored_usdt":round(anchoredask1,2),
+          "second_book_bid1_anchored_usdt":round(anchoredbid1,2),
+          "ask1_depth_change_pct":delta,"second_5m_buy_share":round(share,3) if share is not None else None,
+          "second_5m_trade_count":len(recent),"second_5m_trade_usdt":round(buy+sell,2),
+          "second_sample_latest_age_seconds":round(age,1) if age is not None else None,
+          "second_sample_buyers_valid":good,
+          "potential_ask_depletion":bool(delta is not None and delta<=-12 and nextask>=old*.995)})
+        row["repeat_check"]="PERSISTENT" if good else "NOT_CONFIRMED"
+        # Depth depletion is descriptive, NOT proof of market buys.
+        return row
+    except Exception as e:return dict(row,verification_error=str(e)[:180],repeat_check="NOT_CONFIRMED")
 def main():
     out={"started_utc":dt.datetime.now(dt.timezone.utc).isoformat(),"exchange":"Binance Spot USDT",
          "purpose":"Detect early upside-wick candidates with 5m 1m and 15m volume, 4h RSI, bid/ask depth and sampled aggressor trades",
-         "pairs_checked":0,"stage1":0,"deep_checked":0,"deep_success":0,"errors":[],"ignition":[],"early_watch":[],"monitor":[],
-         "notes":"Snapshot only. Price spikes not guaranteed; no BUY NOW. Last 500 aggregate trades cover variable time, not full session CVD. USDT Binance Spot listing does not establish UK account trade access."}
+         "pairs_checked":0,"stage1":0,"deep_checked":0,"deep_success":0,"repeat_checked":0,"errors":[],"ignition":[],"early_watch":[],"monitor":[],
+         "notes":"Research-only, no BUY NOW. Two depth samples are not proof of fills. Trade sample is capped at latest 500 aggregate trades and five minutes; high-volume pairs can be truncated. UK Spot access is not verified."}
     try:
         info=get("/api/v3/exchangeInfo",12)
         tk=get("/api/v3/ticker/24hr",12)
@@ -167,7 +228,7 @@ def main():
         rotation.shuffle(rest)
         mids=[s for s in ranked[80:750] if s not in core and s not in rest]
         rotation.shuffle(mids)
-        universe=list(dict.fromkeys([s for s in core if s in valid]+rest[:90]+mids[:65]))[:165]
+        universe=list(dict.fromkeys([s for s in core if s in valid]+rest[:110]+mids[:75]))[:205]
         print("Binance Spot 5m screening",len(universe),flush=True)
         now=int(time.time()*1000);screen=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
@@ -177,18 +238,36 @@ def main():
                 else:out["stage1"]+=1;screen.append(x)
         # Give fresh volume anomalies and near-resistance structures a chance to be checked.
         screen.sort(key=lambda x:x["initial_score"],reverse=True)
-        chosen=screen[:72]
+        chosen=screen[:82]
+        deep=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             for x in ex.map(lambda p:second(p,int(time.time()*1000)),chosen):
                 out["deep_checked"]+=1
                 if "error" in x:out["errors"].append({"pair":x["pair"],"error":x["error"]})
                 else:
                     out["deep_success"]+=1
-                    if x["status"]=="IGNITION":out["ignition"].append(x)
-                    elif x["status"]=="EARLY WATCH":out["early_watch"].append(x)
-                    else:out["monitor"].append(x)
+                    deep.append(x)
+        # Check the strongest independent quality candidates at two different times.
+        deep.sort(key=lambda x:(x["quality_score"],x["wick_score"]),reverse=True)
+        repeat_candidates=deep[:20]
+        out["repeat_checked"]=len(repeat_candidates)
+        if repeat_candidates:time.sleep(7)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            repeated=list(ex.map(lambda r:second_snapshot(r,int(time.time()*1000)),repeat_candidates))
+        repeats={x["pair"]:x for x in repeated}
+        for x in deep:
+            x=repeats.get(x["pair"],x)
+            if x["qualified_preignition"] and x.get("second_sample_buyers_valid"):
+                x["status"]="PERSISTENT PRE-IGNITION"
+                out["ignition"].append(x)
+            elif x["quality_tier"] in ("STRICT CANDIDATE","PARTIAL WATCH"):
+                x["status"]="EARLY WATCH - UNVERIFIED"
+                out["early_watch"].append(x)
+            else:
+                x["status"]="MONITOR"
+                out["monitor"].append(x)
     except Exception as e:out["errors"].append({"phase":"discovery","error":str(e)[:250]})
-    for key in ("ignition","early_watch","monitor"):out[key].sort(key=lambda x:x.get("wick_score",0),reverse=True)
+    for key in ("ignition","early_watch","monitor"):out[key].sort(key=lambda x:(x.get("quality_score",0),x.get("wick_score",0)),reverse=True)
     out["finished_utc"]=dt.datetime.now(dt.timezone.utc).isoformat()
     Path("binance_spot_upwick_results.json").write_text(json.dumps(out,indent=2))
     print("UPWICK",out["finished_utc"],"pairs",out["pairs_checked"],"stage1",out["stage1"],"deep",out["deep_success"],
