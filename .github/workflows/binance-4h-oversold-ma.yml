@@ -1,0 +1,35 @@
+name: Binance Spot 4h oversold MA scan
+on:
+  push:
+    branches: [binance-liquidity-experiment-2026]
+    paths:
+      - 'tools/binance_4h_oversold_ma_scan.py'
+      - '.github/workflows/binance-4h-oversold-ma.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  scan-4h:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Binance Spot RSI14 and MA touches
+        run: python3 tools/binance_4h_oversold_ma_scan.py
+      - name: Commit the timestamped technical scan
+        if: always()
+        run: |
+          if [ ! -f binance_4h_oversold_ma_results.json ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add binance_4h_oversold_ma_results.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Record Binance Spot oversold MA scan [skip ci]"
+          git pull --rebase origin binance-liquidity-experiment-2026
+          git push origin HEAD:binance-liquidity-experiment-2026
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binance-4h-oversold-ma
+          path: binance_4h_oversold_ma_results.json
+          if-no-files-found: warn
