@@ -1,0 +1,14 @@
+{
+  "started_utc": "2026-11-06T13:40:00.628655+00:00",
+  "kind": "Binance Spot USDT 4h RSI14 Wilder, SMA59 SMA200, EMA50 EMA200, daily SMA59 SMA200",
+  "checked": 0,
+  "successful": 0,
+  "errors": [],
+  "universe_size": 0,
+  "strict": [],
+  "near": [],
+  "oversold_without_touch": [],
+  "other_ma": [],
+  "notes": "RSI from last CLOSED 4h candle. MA from closed candles. Current price from ticker. Real calendar-day MAs from 1D bars. Live 4h candle wick used only for recent touch. Not a verified BUY signal.",
+  "finished_utc": "2026-11-06T13:40:03.568767+00:00"
+}
