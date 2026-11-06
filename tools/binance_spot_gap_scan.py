@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='IQ KAIA WAXP ME BIGTIME AIGENSYN SIGN NOM MAV BERA JOE CVC EGLD XVS COOKIE BAND RESOLV NEWT BREV KNC QKC RLC NEAR SEI SAGA GLMR ARKM MOVR PEPE WLFI ASTER OPG INIT HAEDAL WOO DYM CHR RARE IOST CELR PHA CTK MANTA ROSE PROM GTC NMR LPT DENT DGB LSK IDEX PUNDIX ASTR VTHO REQ REZ NTRN HOOK HIGH HFT TLM ALPACA C98 ALGO ONG ZIL MEME TURBO ZKJ FLOKI BONK BANANAS31 PNUT PENGU 1000CHEEMS BABY KERNEL TWT JASMY API3 SAHARA VANA PROVE AEVO ROBO PROS FORTH OXT OGN FIDA LISTA HIVE RIF ALICE OSMO ARPA CKB XAI SLP STMX FIO ZRX CELR ALPACA COTI BADGER MASK PIVX DASH LUNC LUNA DODO FLUX ANT AKRO GALA STG GLM HBAR TRB APE FET BICO XTZ ALT SXT YGG BAND GRT JST ILV AXS DUSK LRC TNSR MAGIC NKN NULS GHST WIN ONE POND FUN NEIRO RED LEVER AGLD POND BEAM DEGEN LQTY GPS DAR ACH SAND SHIB WLD'.split()
+FOCUS='FARM FIS DEGO MBOX PHA DEXE NFP RSR DCR RAD FIRO UTK VIB DENT CFX IOTX STORJ RAY BNT FLM SUSHI SUPER CELO BLZ CHZ CKB XLM RUNE KAVA SYS RLC MBL ALPINE LAZIO PSG OG CITY PORTO BAR JUV SANTOS ATM ASR ACM LIT LOKA YGG AUCTION GTC FORTH LPT UMA PHB SFP CTSI SLP ALGO AERGO OSMO PIVX NMR FIDA AKT STPT BEL REEF DOCK DATA DF VIDT HIVE STEEM ARDR FTT REI ALPHA CLV ATA TRU TRB TWT MDT VITE PERP NKN DODO WIN KMD AUDIO KDA BAL COMP XVS NEO GAS ONG ONT COTI DUSK IDEX HFT ID EDU TLM OGN C98 ALCX DYM MAV THETA TFUEL GLMR INJ SOLV AXS PYR AVA PUNDIX NULS ARK HBAR API3 CYBER MASK XAI SSV PENDLE ENJ ILV ELF ACE HOOK PORTAL OXT OOKI BICO ALICE CVC RARE CRV LQTY DAR JASMY FIO FET STMX ONE QI QUICK CAKE ALPACA REZ RIF SXT DGB SCRT TIA AEVO TNSR STG BNBX ALLO CHR PYTH IOST NTRN GHST KNC FLOKI ANKR ORCA JTO JUP SCR WIF'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
@@ -26,7 +26,7 @@ def analyze(pair,book):
     gaps.sort(key=lambda z:z['empty_pct']/(1+z['end_upside_pct']/12),reverse=True)
     ask_depth={str(p):round(sum(price*qty for price,qty in asks if price<=best*(1+p/100)),2) for p in (2,5,10,20)}
     bid_depth={str(p):round(sum(price*qty for price,qty in ((float(a),float(b)) for a,b in book.get('bids',[])) if price>=best*(1-p/100)),2) for p in (2,5,10)}
-    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
+    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'quote_volume_24h_usdt':round(volume.get(pair,0),2),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
 def main():
     results={'started_utc':dt.datetime.now(dt.timezone.utc).isoformat(),'exchange':'Binance Spot','books':0,'pairs_checked':0,'candidates':[],'errors':[],'note':'Displayed asks only. Gaps do not guarantee future price movement. Reverify before trading.'}
     try:
@@ -36,16 +36,16 @@ def main():
         volume={s.get('symbol'):float(s.get('quoteVolume') or 0) for s in tick if isinstance(s,dict)}
         ranked=sorted(valid,key=lambda s:volume.get(s,0),reverse=True)
         focus=[x+'USDT' for x in FOCUS if x+'USDT' in valid]
-        mids=[s for s in ranked[280:950] if s not in focus and not s.endswith('BUSDT')]
+        mids=[s for s in ranked[380:940] if s not in focus and not s.endswith('BUSDT') and not s.endswith('BUSD')]
         random.Random(int(time.time()//3600)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus+ranked[110:114]+mids[:25]))[:160]
+        pairs=list(dict.fromkeys(focus+mids[:18]))[:135]
         print('Verified exchangeInfo, Spot USDT pairs selected:',len(pairs),flush=True)
         def run(pair):
             try:
                 book=get('/api/v3/depth?'+urllib.parse.urlencode({'symbol':pair,'limit':1000}),10)
                 return pair,analyze(pair,book),None
             except Exception as e:return pair,None,str(e)[:260]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             for pair,x,e in pool.map(run,pairs):
                 results['pairs_checked']+=1
                 if e:results['errors'].append({'pair':pair,'message':e})
