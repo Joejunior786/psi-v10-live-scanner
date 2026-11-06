@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='BEAMX IQ BNT ME WAXP KAIA'.split()
+FOCUS='BEAMX'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
@@ -19,14 +19,25 @@ def analyze(pair,book,quote_volume):
     best=asks[0][0];spread=(best/bids[-1]-1)*100;cum=0.; gaps=[]
     for (p,q),(hi,_) in zip(asks,asks[1:]):
         cum+=p*q
-        if (hi/best-1)*100>100:break
+        if (hi/best-1)*100>600:break
         g=(hi/p-1)*100
         if g>=.05:gaps.append({'start':p,'end':hi,'empty_pct':round(g,6),'end_upside_pct':round((hi/best-1)*100,5),'ask_usdt_before':round(cum,2)})
     if not gaps:gaps=[{'start':best,'end':best,'empty_pct':0.0,'end_upside_pct':0.0,'ask_usdt_before':0.0}]
+    pivot=0.007580
+    above=sorted([x for x in gaps if x['start']>=pivot],key=lambda x:x['start'])
+    maxask=asks[-1][0]
+    ahead=sum(p*q for p,q in asks if p<=pivot)
+    far_fields={'pivot':pivot,'visible_ask_min':best,'visible_ask_max':maxask,
+        'ask_levels_above_pivot':sum(1 for p,q in asks if p>pivot),
+        'ask_usdt_to_pivot':round(ahead,2),
+        'post_pivot_gap_count':len(above),
+        'post_pivot_nearest_gaps':above[:30],
+        'post_pivot_largest_gaps':sorted(above,key=lambda z:z['empty_pct'],reverse=True)[:35],
+        'ask_usdt_to_levels':{str(v):round(sum(p*q for p,q in asks if p<=v),2) for v in [0.008,0.009,0.010,0.012,0.015,0.020] if v<=maxask}}
     gaps.sort(key=lambda z:z['empty_pct']/(1+z['end_upside_pct']/12),reverse=True)
     ask_depth={str(p):round(sum(price*qty for price,qty in asks if price<=best*(1+p/100)),2) for p in (2,5,10,20)}
     bid_depth={str(p):round(sum(price*qty for price,qty in ((float(a),float(b)) for a,b in book.get('bids',[])) if price>=best*(1-p/100)),2) for p in (2,5,10)}
-    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'quote_volume_24h_usdt':round(quote_volume,2),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
+    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),**far_fields,'quote_volume_24h_usdt':round(quote_volume,2),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
 def main():
     results={'started_utc':dt.datetime.now(dt.timezone.utc).isoformat(),'exchange':'Binance Spot','books':0,'pairs_checked':0,'candidates':[],'errors':[],'note':'Displayed asks only. Gaps do not guarantee future price movement. Reverify before trading.'}
     try:
@@ -38,7 +49,7 @@ def main():
         focus=[x+'USDT' for x in FOCUS if x+'USDT' in valid]
         mids=[s for s in ranked[380:940] if s not in focus and not s.endswith('BUSDT') and not s.endswith('BUSD')]
         random.Random(int(time.time()//3600)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus))[:6]
+        pairs=list(dict.fromkeys(focus))[:1]
         print('Verified exchangeInfo, Spot USDT pairs selected:',len(pairs),flush=True)
         def run(pair):
             try:
