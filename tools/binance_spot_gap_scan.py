@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='FARM FIS DEGO MBOX PHA DEXE NFP RSR DCR RAD FIRO UTK VIB DENT CFX IOTX STORJ RAY BNT FLM SUSHI SUPER CELO BLZ CHZ CKB XLM RUNE KAVA SYS RLC MBL ALPINE LAZIO PSG OG CITY PORTO BAR JUV SANTOS ATM ASR ACM LIT LOKA YGG AUCTION GTC FORTH LPT UMA PHB SFP CTSI SLP ALGO AERGO OSMO PIVX NMR FIDA AKT STPT BEL REEF DOCK DATA DF VIDT HIVE STEEM ARDR FTT REI ALPHA CLV ATA TRU TRB TWT MDT VITE PERP NKN DODO WIN KMD AUDIO KDA BAL COMP XVS NEO GAS ONG ONT COTI DUSK IDEX HFT ID EDU TLM OGN C98 ALCX DYM MAV THETA TFUEL GLMR INJ SOLV AXS PYR AVA PUNDIX NULS ARK HBAR API3 CYBER MASK XAI SSV PENDLE ENJ ILV ELF ACE HOOK PORTAL OXT OOKI BICO ALICE CVC RARE CRV LQTY DAR JASMY FIO FET STMX ONE QI QUICK CAKE ALPACA REZ RIF SXT DGB SCRT TIA AEVO TNSR STG BNBX ALLO CHR PYTH IOST NTRN GHST KNC FLOKI ANKR ORCA JTO JUP SCR WIF'.split()
+FOCUS='BEAM IQ BNT ME WAXP KAIA'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
@@ -22,7 +22,7 @@ def analyze(pair,book,quote_volume):
         if (hi/best-1)*100>100:break
         g=(hi/p-1)*100
         if g>=.05:gaps.append({'start':p,'end':hi,'empty_pct':round(g,6),'end_upside_pct':round((hi/best-1)*100,5),'ask_usdt_before':round(cum,2)})
-    if not gaps:return None
+    if not gaps:gaps=[{'start':best,'end':best,'empty_pct':0.0,'end_upside_pct':0.0,'ask_usdt_before':0.0}]
     gaps.sort(key=lambda z:z['empty_pct']/(1+z['end_upside_pct']/12),reverse=True)
     ask_depth={str(p):round(sum(price*qty for price,qty in asks if price<=best*(1+p/100)),2) for p in (2,5,10,20)}
     bid_depth={str(p):round(sum(price*qty for price,qty in ((float(a),float(b)) for a,b in book.get('bids',[])) if price>=best*(1-p/100)),2) for p in (2,5,10)}
@@ -38,7 +38,7 @@ def main():
         focus=[x+'USDT' for x in FOCUS if x+'USDT' in valid]
         mids=[s for s in ranked[380:940] if s not in focus and not s.endswith('BUSDT') and not s.endswith('BUSD')]
         random.Random(int(time.time()//3600)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus+mids[:18]))[:135]
+        pairs=list(dict.fromkeys(focus))[:6]
         print('Verified exchangeInfo, Spot USDT pairs selected:',len(pairs),flush=True)
         def run(pair):
             try:
