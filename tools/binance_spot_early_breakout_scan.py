@@ -3,7 +3,8 @@
 import concurrent.futures,datetime as dt,json,math,random,time,urllib.parse,urllib.request
 from pathlib import Path
 ROOTS=["https://data-api.binance.vision","https://api1.binance.com"]
-FOCUS="""FLOCK DYDX ZRO SUI SOL ETH BNB BTC XRP AVAX LINK INJ SEI RENDER FET ONDO NEAR APT TRB MOVR TAO RUNE FIL ARB OP ENA PENDLE WLD TIA SAGA STG ALICE KAIA IQ BNT ME WAXP JOE CVC NOM BEAMX IOST BERA KNC QKC EGLD ASTR XVS COOKIE BAND RESOLV NEWT BREV OSMO MANTA RLC YGG APE TNSR BIGTIME TWT PNUT PENGU FIDA REZ RIF PHA JASMY LPT NMR ZEC DASH XTZ HBAR VET ADA DOT DOGE PEPE BONK WIF FLOKI TURBO GALA SAND AXS CHZ COMP UNI AAVE CRV LDO IMX KAVA TRX PYTH JUP ORCA JTO ARKM CYBER MASK BLUR DYM WOO ANKR API3 SPELL RARE C98 PUNDIX SKL GRT ALGO CKB POL PORTAL ALT AEVO HIVE FLUX XAI TLM ACH LQTY OGN RSR ZIL ROSE THETA KERNEL COTI ARPA SSV MTL QNT CTK STRAX HIGH FIO HFT AUCTION SUPER NEO EGLD GNO CELR TRUMP MAGIC GNS ZRX MANA METIS ILV EGLD RAY BANANA DOGE1000 AGLD HOOK LISTA SXT BICO NTRN RED ALLO MIRA VANA PROVE SAHARA INIT OPG HAEDAL SUNDOG ZKJ BARD FARTCOIN MEME PNUT BOME SIGN AIXBT TOWNS""".split()
+FOCUS="""KSM CFX KDA SNX SUSHI LSK ARPA IOTX CKB CHR OCEAN AI FLM REI PHA GTC REQ BNT NTRN NKN STMX VTHO RSR CTSI BEL AKT DGB API3 SFP PHB KAVA ZRX C98 SLP SXP HIVE COTI OGN ARK KNC QI USTC LUNA LUNC FLOW AGLD CVC AUDIO MANA TLM STORJ BICO AUCTION PIVX DUSK GAS NEO DCR XVS INJ NEAR SSV ORCA NEIRO BIGTIME WAXP KAIA IQ JOE BERA MOVR GLMR MAGIC RIF ZIL RVN ACH ONT ONG MINA COMP ALPINE PORTO LAZIO SANTOS PSG JUV CITY ALPHA QTUM ENS XMR ZEC BCH BTC ETH ICX RUNE FIL EGLD WOO TRB GRT OSMO BEAMX RLC ALLO TOWNS CHZ SAND XAI JASMY TURBO LPT MBL AEVO TIA RARE WLD JUP RAY CAKE AXS QNT ARDR HIGH ZKJ BLUR CRV DOGE POL REZ HFT HBAR ROSE VET FIO RENDER DASH TRU ASTR KERNEL DYM MAV TWT ALICE DOT WIF PENGU FIDA ONDO APT DODO ACE SEI FET FLUX PUNDIX SKL SOLV TNSR STG GNS SUPER YGG BANANA ACT ARKM OXT MASK JTO QKC CELR TRX BNB ONE SUI AVAX BLZ""".split()
+PRIOR_STAGE2=["RENDERUSDT","THETAUSDT","METISUSDT","WIFUSDT","RESOLVUSDT","DOGSUSDT","HBARUSDT","AAVEUSDT","ASTRUSDT","ALGOUSDT","GNSUSDT","SEIUSDT","TRXUSDT","JSTUSDT","QNTUSDT","APTUSDT","GALAUSDT","XLMUSDT","VANAUSDT","ALICEUSDT","RAYUSDT","LISTAUSDT","BROCCOLI714USDT","DOGEUSDT","NMRUSDT","ACTUSDT","TAOUSDT","TNSRUSDT","NOMUSDT","AUCTIONUSDT","CELOUSDT","PUNDIXUSDT","WAXPUSDT","RWUSDUSDT","ILVUSDT","AXSUSDT","FETUSDT","FIDAUSDT","CRVUSDT","KNCUSDT","SSVUSDT","PNUTUSDT","AVAXUSDT","FLOKIUSDT","SAGAUSDT","JASMYUSDT","SAHARAUSDT","ARKMUSDT","ANKRUSDT","LPTUSDT","SUIUSDT","COMPUSDT","C98USDT","XAIUSDT","AIXBTUSDT","FLUXUSDT","MASKUSDT","TWTUSDT","MEMEUSDT","ADAUSDT","CHZUSDT","ROSEUSDT","FILUSDT","ARPAUSDT","STRKUSDT"]
 EXCLUDED={"USDC","USDE","FDUSD","TUSD","DAI","USDP","USD1","RLUSD","EURI","EUR","PAXG","XAUT","BFUSD","U","WBETH","WBTC","USDT"}
 def get(path,timeout=10):
     errors=[]
@@ -120,10 +121,10 @@ def main():
         volume={s:float(tks.get(s,{}).get("quoteVolume") or 0) for s in tradable}
         price={s:float(tks.get(s,{}).get("lastPrice") or 0) for s in tradable}
         change={s:float(tks.get(s,{}).get("priceChangePercent") or 0) for s in tradable}
-        allpairs=sorted([s for s in tradable if s[:-4] not in EXCLUDED and not s.endswith("BUSDT") and volume.get(s,0)>110000],key=lambda s:volume[s],reverse=True)
-        focus=[s+"USDT" for s in dict.fromkeys(FOCUS) if s+"USDT" in tradable and volume.get(s+"USDT",0)>100000]
-        mids=allpairs[100:650];random.Random(int(time.time()//1200)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus+allpairs[:65]+mids[:40]))[:190]
+        allpairs=sorted([s for s in tradable if s[:-4] not in EXCLUDED and not s.endswith("BUSDT") and volume.get(s,0)>80000 and s not in PRIOR_STAGE2],key=lambda s:volume[s],reverse=True)
+        focus=[s+"USDT" for s in dict.fromkeys(FOCUS) if s+"USDT" in tradable and volume.get(s+"USDT",0)>80000 and s+"USDT" not in PRIOR_STAGE2]
+        mids=allpairs[90:730];random.Random(int(time.time()//1200)).shuffle(mids)
+        pairs=list(dict.fromkeys(focus+allpairs[15:100]+mids[:50]))[:180]
         print("BINANCE SPOT PAIRS",len(pairs),flush=True)
         nowms=int(time.time()*1000)
         good=[]
@@ -135,7 +136,7 @@ def main():
                     out["stage1_success"]+=1;good.append(row)
         good.sort(key=lambda r:r["initial_score"],reverse=True)
         # Reserve multiple candidates from earlier-stage near-resistance pool, not just obvious winners.
-        chosen=good[:65]
+        chosen=good[:60]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             for row in pool.map(lambda r:refine(r,int(time.time()*1000)),chosen):
                 out["stage2_checked"]+=1
