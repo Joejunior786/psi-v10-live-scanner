@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='IQ WAXP ME KNC BREV MAV JOE CVC QKC KAIA NOM BERA YGG 1000CHEEMS OPG INIT HAEDAL GRT MOVR SUI ASTER WLFI SEI STG ALICE RLC LPT NMR GTC FET FIO DGB NKN ARPA IDEX CTK LSK CKB HIVE PHA DENT STMX CELR SFP PERP MINA ROSE PROM FLUX XVS XEC IOTX SYS KMD NULS NKN COTI BAND LRC AERGO REQ DUSK VTHO QUICK TWT OXT KAVA ONG STPT UTK FORTH BAT AUDIO DAR TWT ALPACA COMBO'.split()
+FOCUS='IQ KAIA WAXP ME BIGTIME AIGENSYN SIGN NOM MAV BERA JOE CVC EGLD XVS COOKIE BAND RESOLV NEWT BREV KNC QKC RLC NEAR SEI SAGA GLMR ARKM MOVR PEPE WLFI ASTER OPG INIT HAEDAL WOO DYM CHR RARE IOST CELR PHA CTK MANTA ROSE PROM GTC NMR LPT DENT DGB LSK IDEX PUNDIX ASTR VTHO REQ REZ NTRN HOOK HIGH HFT TLM ALPACA C98 ALGO ONG ZIL MEME TURBO ZKJ FLOKI BONK BANANAS31 PNUT PENGU 1000CHEEMS BABY KERNEL TWT JASMY API3 SAHARA VANA PROVE AEVO ROBO PROS FORTH OXT OGN FIDA LISTA HIVE RIF ALICE OSMO ARPA CKB XAI SLP STMX FIO ZRX CELR ALPACA COTI BADGER MASK PIVX DASH LUNC LUNA DODO FLUX ANT AKRO GALA STG GLM HBAR TRB APE FET BICO XTZ ALT SXT YGG BAND GRT JST ILV AXS DUSK LRC TNSR MAGIC NKN NULS GHST WIN ONE POND FUN NEIRO RED LEVER AGLD POND BEAM DEGEN LQTY GPS DAR ACH SAND SHIB WLD'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
@@ -26,7 +26,7 @@ def analyze(pair,book):
     gaps.sort(key=lambda z:z['empty_pct']/(1+z['end_upside_pct']/12),reverse=True)
     ask_depth={str(p):round(sum(price*qty for price,qty in asks if price<=best*(1+p/100)),2) for p in (2,5,10,20)}
     bid_depth={str(p):round(sum(price*qty for price,qty in ((float(a),float(b)) for a,b in book.get('bids',[])) if price>=best*(1-p/100)),2) for p in (2,5,10)}
-    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:5]}
+    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
 def main():
     results={'started_utc':dt.datetime.now(dt.timezone.utc).isoformat(),'exchange':'Binance Spot','books':0,'pairs_checked':0,'candidates':[],'errors':[],'note':'Displayed asks only. Gaps do not guarantee future price movement. Reverify before trading.'}
     try:
@@ -36,9 +36,9 @@ def main():
         volume={s.get('symbol'):float(s.get('quoteVolume') or 0) for s in tick if isinstance(s,dict)}
         ranked=sorted(valid,key=lambda s:volume.get(s,0),reverse=True)
         focus=[x+'USDT' for x in FOCUS if x+'USDT' in valid]
-        mids=[s for s in ranked[320:1050] if s not in focus]
+        mids=[s for s in ranked[280:950] if s not in focus and not s.endswith('BUSDT')]
         random.Random(int(time.time()//3600)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus+ranked[140:145]+mids[:85]))[:150]
+        pairs=list(dict.fromkeys(focus+ranked[110:114]+mids[:25]))[:160]
         print('Verified exchangeInfo, Spot USDT pairs selected:',len(pairs),flush=True)
         def run(pair):
             try:
