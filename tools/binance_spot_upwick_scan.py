@@ -3,7 +3,7 @@
 import concurrent.futures, datetime as dt, json, math, random, time, urllib.request, urllib.parse
 from pathlib import Path
 ROOTS=("https://data-api.binance.vision","https://api1.binance.com","https://api-gcp.binance.com")
-PRIOR={"TUT","IOTX","CKB","SFP","CHR","S","SLP","PROM","MBL","QTUM","NMR","SNX","GLMR","RENDER","THETA","METIS","RESOLV","DOGS","WIF"}
+PRIOR=set()
 FOCUS="""GAS KDA STORJ REQ CTK IDEX ALPACA CVX UMA BICO POL SXP HFT NKN KAVA ONG ONT QI OSMO LUNA HIVE NEO ARK ALICE CTSI SUPER NTRN ELF LRC STG FET DUSK ARPA RAD DATA HIGH CVC TRU API3 ARDR ACE BANANA PHA FIRO LIT FIDA KSM BNT BAND MAV DYM QKC AUCTION FIO SUN VET QNT ONE JOE MAGIC OGN MANTA CELR FLUX HBAR AR XAI AEVO LPT TLM WOO IOST ALGO SEI SUI LINK AVAX JASMY MOVE ALLO ENS STX PUNDIX LSK ASTER MBOX CYBER YGG APE RARE FLOW RIF GALA ARKM ORCA WAXP SPELL DEGO BEL MINA XVS COMP BCH RLC AAVE OXT ZEN ZEC TNSR TRB BEAMX KAIA IQ ME BERA ASTR SSV NEAR REZ INJ FIL ONDO HYPE PENGU WLD MEME AGLD ETHFI SUSHI PENDLE PYTH JUP JTO CAKE LDO ILV DODO INJ COTI METIS STMX DENT STPT PIVX DGB RUNE WIF BONK PEPE TURBO BABY TWT DEXE MASK RSR RED SANTOS PORTAL PHA KERNEL SAHARA INIT BREV NOM WLD BOME ACT NEIRO FARTCOIN VANA PROVE ROBO AIXBT FLM GNS RVN LUNC GNO XEC RAY GMT NFP NULS NMR ICP EGLD BANANAS31 XTZ ROSE ENA LPT NTRN SOLV ORCA TIA TAO ENJ CHZ OCEAN ZIL THETA SAND GRT AXS APT ADA DOT SOL BNB BTC ETH DOGE XRP TRX LTC 1000CHEEMS MOVR SNX RENDER CHR TUT IOTX CKB ASTR GALA SFP QKC ALT TLM SXT TWT IMX SUPER DYM MAV LRC OSMO GLMR""".split()
 EXCLUDE={"USDC","USDE","FDUSD","TUSD","DAI","USDP","USD1","RLUSD","EURI","EUR","PAXG","XAUT","BFUSD","U","WBETH","WBTC","USDT","RWUSD"}
 def get(path,timeout=10):
@@ -161,8 +161,13 @@ def main():
         ranked=sorted((s for s in valid if s[:-4] not in EXCLUDE and not s.endswith("BUSDT") and vol.get(s,0)>90000),
                       key=lambda s:vol[s],reverse=True)
         focus=[s+"USDT" for s in dict.fromkeys(FOCUS) if s not in PRIOR and s+"USDT" in valid and vol.get(s+"USDT",0)>90000]
-        mids=ranked[110:700];random.Random(int(time.time()//900)).shuffle(mids)
-        universe=list(dict.fromkeys(focus+ranked[40:100]+mids[:55]))[:195]
+        core=["STXUSDT","NOMUSDT","APTUSDT","THETAUSDT","RENDERUSDT","TUTUSDT","GLMRUSDT","CKBUSDT","BNTUSDT","IQUSDT","MEUSDT","BEAMXUSDT","OSMOUSDT","RESOLVUSDT","WIFUSDT","METISUSDT","ASTRUSDT","ACTUSDT","SSVUSDT","RAYUSDT"]
+        rotation=random.Random(int(time.time()//300))
+        rest=[s for s in focus if s not in core]
+        rotation.shuffle(rest)
+        mids=[s for s in ranked[80:750] if s not in core and s not in rest]
+        rotation.shuffle(mids)
+        universe=list(dict.fromkeys([s for s in core if s in valid]+rest[:100]+mids[:60]))[:165]
         print("Binance Spot 5m screening",len(universe),flush=True)
         now=int(time.time()*1000);screen=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
@@ -172,7 +177,7 @@ def main():
                 else:out["stage1"]+=1;screen.append(x)
         # Give fresh volume anomalies and near-resistance structures a chance to be checked.
         screen.sort(key=lambda x:x["initial_score"],reverse=True)
-        chosen=screen[:68]
+        chosen=screen[:65]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             for x in ex.map(lambda p:second(p,int(time.time()*1000)),chosen):
                 out["deep_checked"]+=1
