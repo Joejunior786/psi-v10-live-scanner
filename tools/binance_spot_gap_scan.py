@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='ASTER WLFI TRB SUI SEI ARB OP SAGA BEAM IOST MOVR YGG APE ENA ONDO ZRO ARKM ALICE STG RLC PEPE BONK FLOKI NEAR AVAX LINK INJ APT FIL TAO RENDER WLD SAND GALA TIA PENDLE AR POL ICP RUNE STX JUP'.split()
+FOCUS='OPG INIT HAEDAL CYBER ZIL PNUT XTZ GRT JUP DEXE OGN AXS GALA SXT GPS NXPC MET APE BABY RLC SAND NOM KAIA BERA SEI ZRO TRB ASTER IOST ALGO CHZ ONE LPT NMR BLUR MAGIC MEME SKL NKN CVC API3 RARE GLMR C98 CHR CTSI MASK DYM NTRN SSV REZ LISTA TLM HFT FIDA ACE WAXP RDNT LQTY HOOK ID EDU MAV PORTAL DODO PHA HIGH BADGER'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
@@ -34,16 +34,16 @@ def main():
         volume={s.get('symbol'):float(s.get('quoteVolume') or 0) for s in tick if isinstance(s,dict)}
         ranked=sorted(valid,key=lambda s:volume.get(s,0),reverse=True)
         focus=[x+'USDT' for x in FOCUS if x+'USDT' in valid]
-        mids=[s for s in ranked[35:275] if s not in focus]
+        mids=[s for s in ranked[220:850] if s not in focus]
         random.Random(int(time.time()//3600)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus+ranked[:35]+mids[:60]))[:120]
+        pairs=list(dict.fromkeys(focus+ranked[80:92]+mids[:70]))[:130]
         print('Verified exchangeInfo, Spot USDT pairs selected:',len(pairs),flush=True)
         def run(pair):
             try:
                 book=get('/api/v3/depth?'+urllib.parse.urlencode({'symbol':pair,'limit':1000}),10)
                 return pair,analyze(pair,book),None
             except Exception as e:return pair,None,str(e)[:260]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             for pair,x,e in pool.map(run,pairs):
                 results['pairs_checked']+=1
                 if e:results['errors'].append({'pair':pair,'message':e})
