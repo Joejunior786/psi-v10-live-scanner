@@ -78,18 +78,25 @@ def second(row,now):
         def bidsTo(pct):return sum(a*b for a,b in bids if a>=bid*(1-pct/100))
         a1=asksTo(1);a2=asksTo(2);a5=asksTo(5);b1=bidsTo(1)
         gaps=[];cum=0.
-        for (a,q),(a2,q2) in zip(asks,asks[1:]):
+        for (a,q),(upper,q2) in zip(asks,asks[1:]):
             cum+=a*q
             if a>ask*1.065:break
-            g=(a2/a-1)*100
+            g=(upper/a-1)*100
             if g>=.12:
-                gaps.append({"from":a,"to":a2,"empty_pct":round(g,3),
+                gaps.append({"from":a,"to":upper,"empty_pct":round(g,3),
                             "start_above_ask_pct":round((a/ask-1)*100,2),"asks_before_usdt":round(cum,2)})
         gaps.sort(key=lambda x:x["empty_pct"]/(1+x["start_above_ask_pct"]/8),reverse=True)
         trades=get("/api/v3/aggTrades?"+urllib.parse.urlencode({"symbol":pair,"limit":500}),10)
         buy=sum(float(t["p"])*float(t["q"]) for t in trades if t.get("m")==False)
         sell=sum(float(t["p"])*float(t["q"]) for t in trades if t.get("m")==True)
-        buyshare=buy/(buy+sell) if buy+sell else None
+        sample_buy_share=buy/(buy+sell) if buy+sell else None
+        recent=[t for t in trades if int(t.get("T",0))>=now-300000 and int(t.get("T",0))<=now+10000]
+        freshbuy=sum(float(t["p"])*float(t["q"]) for t in recent if t.get("m")==False)
+        freshsell=sum(float(t["p"])*float(t["q"]) for t in recent if t.get("m")==True)
+        recent_usdt=freshbuy+freshsell
+        age=(now-int(trades[-1]["T"]))/1000 if trades else None
+        # Fixed 5-minute buy share is usable only with minimum trades, value and recency.
+        buyshare=freshbuy/recent_usdt if len(recent)>=8 and recent_usdt>=500 and age is not None and age<120 else None
         trade_span=(int(trades[-1]["T"])-int(trades[0]["T"]))/1000 if len(trades)>1 else 0
         ratio=b1/a1 if a1 else 0
         r1=rsi(c1)
@@ -102,6 +109,10 @@ def second(row,now):
                     "ask2_over_last3_1m_traded_value":round(a2/vol1,2) if vol1 else None,
                     "top_nearby_gap":gaps[0] if gaps else None,"other_nearby_gaps":gaps[1:3],
                     "aggressive_buy_share":round(buyshare,3) if buyshare is not None else None,
+                    "historical_500_trade_buy_share":round(sample_buy_share,3) if sample_buy_share is not None else None,
+                    "recent_5m_aggregated_trade_count":len(recent),
+                    "recent_5m_aggregated_trades_usdt":round(recent_usdt,2),
+                    "latest_trade_age_seconds":round(age,2) if age is not None else None,
                     "aggressive_trades_usdt":round(buy+sell,2),
                     "aggressive_trade_sample_span_seconds":round(trade_span,1),
                     "aggressive_trade_sample_count":len(trades)})
