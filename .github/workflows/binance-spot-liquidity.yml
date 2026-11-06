@@ -1,0 +1,22 @@
+name: Binance Spot live depth scan (no Railway)
+on:
+  push:
+    branches: [binance-liquidity-experiment-2026]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan Binance Spot USDT depth
+        run: python3 tools/binance_spot_gap_scan.py
+      - name: Upload timestamped book-gap results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binance-spot-live-depth
+          path: binance_spot_gap_results.json
+          if-no-files-found: warn
