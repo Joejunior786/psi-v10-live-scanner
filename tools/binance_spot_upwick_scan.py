@@ -161,13 +161,13 @@ def main():
         ranked=sorted((s for s in valid if s[:-4] not in EXCLUDE and not s.endswith("BUSDT") and vol.get(s,0)>90000),
                       key=lambda s:vol[s],reverse=True)
         focus=[s+"USDT" for s in dict.fromkeys(FOCUS) if s not in PRIOR and s+"USDT" in valid and vol.get(s+"USDT",0)>90000]
-        core=["STXUSDT","NOMUSDT","APTUSDT","THETAUSDT","RENDERUSDT","TUTUSDT","GLMRUSDT","CKBUSDT","BNTUSDT","IQUSDT","MEUSDT","BEAMXUSDT","OSMOUSDT","RESOLVUSDT","WIFUSDT","METISUSDT","ASTRUSDT","ACTUSDT","SSVUSDT","RAYUSDT"]
+        core=["FIDAUSDT","LAZIOUSDT","QNTUSDT","ACMUSDT","HEIUSDT","DOGEUSDT","STXUSDT","NOMUSDT","APTUSDT","OSMOUSDT","BEAMXUSDT","IQUSDT","BNTUSDT","MEUSDT","THETAUSDT","RENDERUSDT","TUTUSDT","GLMRUSDT","CKBUSDT","ACTUSDT","RAYUSDT","SSVUSDT","HUMAUSDT","ASTRUSDT","NTRNUSDT","KAVAUSDT"]
         rotation=random.Random(int(time.time()//300))
         rest=[s for s in focus if s not in core]
         rotation.shuffle(rest)
         mids=[s for s in ranked[80:750] if s not in core and s not in rest]
         rotation.shuffle(mids)
-        universe=list(dict.fromkeys([s for s in core if s in valid]+rest[:100]+mids[:60]))[:165]
+        universe=list(dict.fromkeys([s for s in core if s in valid]+rest[:90]+mids[:65]))[:165]
         print("Binance Spot 5m screening",len(universe),flush=True)
         now=int(time.time()*1000);screen=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
@@ -177,7 +177,7 @@ def main():
                 else:out["stage1"]+=1;screen.append(x)
         # Give fresh volume anomalies and near-resistance structures a chance to be checked.
         screen.sort(key=lambda x:x["initial_score"],reverse=True)
-        chosen=screen[:65]
+        chosen=screen[:72]
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
             for x in ex.map(lambda p:second(p,int(time.time()*1000)),chosen):
                 out["deep_checked"]+=1
