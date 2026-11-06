@@ -1,0 +1,35 @@
+name: Binance Spot upward wick early signals
+on:
+  push:
+    branches: [binance-liquidity-experiment-2026]
+    paths:
+      - 'tools/binance_spot_upwick_scan.py'
+      - '.github/workflows/binance-spot-upwick.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan Spot upward wick precursors
+        run: python3 tools/binance_spot_upwick_scan.py
+      - name: Commit JSON scan results
+        if: always()
+        run: |
+          if [ ! -f binance_spot_upwick_results.json ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add binance_spot_upwick_results.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Save upward wick early signal scan [skip ci]"
+          git pull --rebase origin binance-liquidity-experiment-2026
+          git push origin HEAD:binance-liquidity-experiment-2026
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binance-spot-upwick
+          path: binance_spot_upwick_results.json
+          if-no-files-found: warn
