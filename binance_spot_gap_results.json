@@ -1,0 +1,4521 @@
+{
+  "started_utc": "2026-11-06T11:39:34.434472+00:00",
+  "exchange": "Binance Spot",
+  "books": 118,
+  "pairs_checked": 120,
+  "candidates": [
+    {
+      "pair": "RLUSDUSDT",
+      "ask": 1.0015,
+      "spread_pct": 0.01,
+      "book_levels": 16,
+      "visible_coverage_pct": 19.8203,
+      "update_id": 90237261,
+      "start": 1.0803,
+      "end": 1.2,
+      "empty_pct": 11.080255,
+      "end_upside_pct": 19.82027,
+      "ask_usdt_before": 12003345.9,
+      "other_gaps": [
+        {
+          "start": 1.0127,
+          "end": 1.0508,
+          "empty_pct": 3.76222,
+          "end_upside_pct": 4.92262,
+          "ask_usdt_before": 12003130.07
+        },
+        {
+          "start": 1.0509,
+          "end": 1.0803,
+          "empty_pct": 2.797602,
+          "end_upside_pct": 7.8682,
+          "ask_usdt_before": 12003330.78
+        },
+        {
+          "start": 1.0026,
+          "end": 1.011,
+          "empty_pct": 0.837822,
+          "end_upside_pct": 0.94858,
+          "ask_usdt_before": 12002965.2
+        },
+        {
+          "start": 1.011,
+          "end": 1.0122,
+          "empty_pct": 0.118694,
+          "end_upside_pct": 1.0684,
+          "ask_usdt_before": 12003064.27
+        }
+      ]
+    },
+    {
+      "pair": "SQQQBUSDT",
+      "ask": 47.31,
+      "spread_pct": 0.1058,
+      "book_levels": 44,
+      "visible_coverage_pct": 12.0271,
+      "update_id": 28211867,
+      "start": 48.2,
+      "end": 50.24,
+      "empty_pct": 4.232365,
+      "end_upside_pct": 6.19319,
+      "ask_usdt_before": 277841.05,
+      "other_gaps": [
+        {
+          "start": 51.0,
+          "end": 53.0,
+          "empty_pct": 3.921569,
+          "end_upside_pct": 12.02706,
+          "ask_usdt_before": 278982.37
+        },
+        {
+          "start": 50.24,
+          "end": 51.0,
+          "empty_pct": 1.512739,
+          "end_upside_pct": 7.79962,
+          "ask_usdt_before": 277946.05
+        },
+        {
+          "start": 47.94,
+          "end": 48.2,
+          "empty_pct": 0.542345,
+          "end_upside_pct": 1.88121,
+          "ask_usdt_before": 277826.11
+        },
+        {
+          "start": 47.9,
+          "end": 47.94,
+          "empty_pct": 0.083507,
+          "end_upside_pct": 1.33164,
+          "ask_usdt_before": 277811.25
+        }
+      ]
+    },
+    {
+      "pair": "SMCIBUSDT",
+      "ask": 28.77,
+      "spread_pct": 0.209,
+      "book_levels": 130,
+      "visible_coverage_pct": 74.1397,
+      "update_id": 39540744,
+      "start": 30.4,
+      "end": 32.0,
+      "empty_pct": 5.263158,
+      "end_upside_pct": 11.22697,
+      "ask_usdt_before": 133769.06,
+      "other_gaps": [
+        {
+          "start": 33.6,
+          "end": 36.0,
+          "empty_pct": 7.142857,
+          "end_upside_pct": 25.13034,
+          "ask_usdt_before": 136281.31
+        },
+        {
+          "start": 29.43,
+          "end": 29.93,
+          "empty_pct": 1.698947,
+          "end_upside_pct": 4.03198,
+          "ask_usdt_before": 133354.37
+        },
+        {
+          "start": 32.0,
+          "end": 32.69,
+          "empty_pct": 2.15625,
+          "end_upside_pct": 13.6253,
+          "ask_usdt_before": 133774.18
+        },
+        {
+          "start": 30.0,
+          "end": 30.4,
+          "empty_pct": 1.333333,
+          "end_upside_pct": 5.66562,
+          "ask_usdt_before": 133465.36
+        }
+      ]
+    },
+    {
+      "pair": "USD1USDT",
+      "ask": 0.99923,
+      "spread_pct": 0.001,
+      "book_levels": 172,
+      "visible_coverage_pct": 10.1848,
+      "update_id": 155941092,
+      "start": 1.05,
+      "end": 1.099,
+      "empty_pct": 4.666667,
+      "end_upside_pct": 9.98469,
+      "ask_usdt_before": 72977348.25,
+      "other_gaps": [
+        {
+          "start": 1.03,
+          "end": 1.0409,
+          "empty_pct": 1.058252,
+          "end_upside_pct": 4.17021,
+          "ask_usdt_before": 72977300.01
+        },
+        {
+          "start": 1.02,
+          "end": 1.03,
+          "empty_pct": 0.980392,
+          "end_upside_pct": 3.07937,
+          "ask_usdt_before": 72977272.2
+        },
+        {
+          "start": 1.0409,
+          "end": 1.0489,
+          "empty_pct": 0.768566,
+          "end_upside_pct": 4.97083,
+          "ask_usdt_before": 72977305.21
+        },
+        {
+          "start": 1.0112,
+          "end": 1.0175,
+          "empty_pct": 0.623022,
+          "end_upside_pct": 1.82841,
+          "ask_usdt_before": 72976902.33
+        }
+      ]
+    },
+    {
+      "pair": "UUSDT",
+      "ask": 1.0005,
+      "spread_pct": 0.01,
+      "book_levels": 86,
+      "visible_coverage_pct": 19.94,
+      "update_id": 22616640,
+      "start": 1.0532,
+      "end": 1.1,
+      "empty_pct": 4.4436,
+      "end_upside_pct": 9.94503,
+      "ask_usdt_before": 15435871.14,
+      "other_gaps": [
+        {
+          "start": 1.0205,
+          "end": 1.0532,
+          "empty_pct": 3.204312,
+          "end_upside_pct": 5.26737,
+          "ask_usdt_before": 15435850.08
+        },
+        {
+          "start": 1.1008,
+          "end": 1.15,
+          "empty_pct": 4.469477,
+          "end_upside_pct": 14.94253,
+          "ask_usdt_before": 15435922.86
+        },
+        {
+          "start": 1.15,
+          "end": 1.1999,
+          "empty_pct": 4.33913,
+          "end_upside_pct": 19.93003,
+          "ask_usdt_before": 15435933.21
+        },
+        {
+          "start": 1.0109,
+          "end": 1.0134,
+          "empty_pct": 0.247304,
+          "end_upside_pct": 1.28936,
+          "ask_usdt_before": 14704129.11
+        }
+      ]
+    },
+    {
+      "pair": "DELLBUSDT",
+      "ask": 345.2,
+      "spread_pct": 0.177,
+      "book_levels": 260,
+      "visible_coverage_pct": 70.3998,
+      "update_id": 76142907,
+      "start": 398.68,
+      "end": 423.5,
+      "empty_pct": 6.225544,
+      "end_upside_pct": 22.6825,
+      "ask_usdt_before": 146140.96,
+      "other_gaps": [
+        {
+          "start": 361.91,
+          "end": 369.15,
+          "empty_pct": 2.000497,
+          "end_upside_pct": 6.93801,
+          "ask_usdt_before": 142078.63
+        },
+        {
+          "start": 356.15,
+          "end": 361.91,
+          "empty_pct": 1.617296,
+          "end_upside_pct": 4.84067,
+          "ask_usdt_before": 142073.2
+        },
+        {
+          "start": 373.02,
+          "end": 378.2,
+          "empty_pct": 1.388665,
+          "end_upside_pct": 9.55968,
+          "ask_usdt_before": 142093.09
+        },
+        {
+          "start": 369.15,
+          "end": 373.02,
+          "empty_pct": 1.048354,
+          "end_upside_pct": 8.0591,
+          "ask_usdt_before": 142087.49
+        }
+      ]
+    },
+    {
+      "pair": "SPYBUSDT",
+      "ask": 736.9,
+      "spread_pct": 0.0014,
+      "book_levels": 261,
+      "visible_coverage_pct": 23.626,
+      "update_id": 56062047,
+      "start": 840.13,
+      "end": 888.0,
+      "empty_pct": 5.697928,
+      "end_upside_pct": 20.50482,
+      "ask_usdt_before": 230509.69,
+      "other_gaps": [
+        {
+          "start": 812.21,
+          "end": 840.13,
+          "empty_pct": 3.437535,
+          "end_upside_pct": 14.00869,
+          "ask_usdt_before": 230172.8
+        },
+        {
+          "start": 796.98,
+          "end": 812.21,
+          "empty_pct": 1.910964,
+          "end_upside_pct": 10.21984,
+          "ask_usdt_before": 229962.43
+        },
+        {
+          "start": 888.0,
+          "end": 911.0,
+          "empty_pct": 2.59009,
+          "end_upside_pct": 23.626,
+          "ask_usdt_before": 230951.91
+        },
+        {
+          "start": 750.61,
+          "end": 753.67,
+          "empty_pct": 0.407668,
+          "end_upside_pct": 2.27575,
+          "ask_usdt_before": 211937.93
+        }
+      ]
+    },
+    {
+      "pair": "PLTRBUSDT",
+      "ask": 159.25,
+      "spread_pct": 0.0251,
+      "book_levels": 196,
+      "visible_coverage_pct": 56.2951,
+      "update_id": 105981965,
+      "start": 212.99,
+      "end": 235.0,
+      "empty_pct": 10.333818,
+      "end_upside_pct": 47.56672,
+      "ask_usdt_before": 179695.89,
+      "other_gaps": [
+        {
+          "start": 163.9,
+          "end": 168.68,
+          "empty_pct": 2.916412,
+          "end_upside_pct": 5.92151,
+          "ask_usdt_before": 167018.88
+        },
+        {
+          "start": 168.68,
+          "end": 171.7,
+          "empty_pct": 1.790372,
+          "end_upside_pct": 7.8179,
+          "ask_usdt_before": 167120.09
+        },
+        {
+          "start": 235.0,
+          "end": 248.9,
+          "empty_pct": 5.914894,
+          "end_upside_pct": 56.29513,
+          "ask_usdt_before": 179708.34
+        },
+        {
+          "start": 174.54,
+          "end": 177.75,
+          "empty_pct": 1.83912,
+          "end_upside_pct": 11.61695,
+          "ask_usdt_before": 169437.26
+        }
+      ]
+    },
+    {
+      "pair": "MVLLBUSDT",
+      "ask": 9.27,
+      "spread_pct": 0.3247,
+      "book_levels": 151,
+      "visible_coverage_pct": 448.6516,
+      "update_id": 89680715,
+      "start": 9.96,
+      "end": 10.35,
+      "empty_pct": 3.915663,
+      "end_upside_pct": 11.65049,
+      "ask_usdt_before": 69309.21,
+      "other_gaps": [
+        {
+          "start": 10.35,
+          "end": 10.78,
+          "empty_pct": 4.154589,
+          "end_upside_pct": 16.2891,
+          "ask_usdt_before": 69314.8
+        },
+        {
+          "start": 9.6,
+          "end": 9.84,
+          "empty_pct": 2.5,
+          "end_upside_pct": 6.14887,
+          "ask_usdt_before": 69264.27
+        },
+        {
+          "start": 11.62,
+          "end": 12.33,
+          "empty_pct": 6.110155,
+          "end_upside_pct": 33.00971,
+          "ask_usdt_before": 71720.15
+        },
+        {
+          "start": 13.19,
+          "end": 14.2,
+          "empty_pct": 7.657316,
+          "end_upside_pct": 53.18231,
+          "ask_usdt_before": 72066.81
+        }
+      ]
+    },
+    {
+      "pair": "IRENBUSDT",
+      "ask": 21.17,
+      "spread_pct": 0.1419,
+      "book_levels": 170,
+      "visible_coverage_pct": 167.6429,
+      "update_id": 57564598,
+      "start": 22.31,
+      "end": 23.0,
+      "empty_pct": 3.092784,
+      "end_upside_pct": 8.64431,
+      "ask_usdt_before": 116451.11,
+      "other_gaps": [
+        {
+          "start": 21.49,
+          "end": 22.0,
+          "empty_pct": 2.373197,
+          "end_upside_pct": 3.92064,
+          "ask_usdt_before": 115198.7
+        },
+        {
+          "start": 23.0,
+          "end": 23.76,
+          "empty_pct": 3.304348,
+          "end_upside_pct": 12.23429,
+          "ask_usdt_before": 116878.45
+        },
+        {
+          "start": 22.0,
+          "end": 22.31,
+          "empty_pct": 1.409091,
+          "end_upside_pct": 5.38498,
+          "ask_usdt_before": 115251.06
+        },
+        {
+          "start": 23.76,
+          "end": 24.23,
+          "empty_pct": 1.978114,
+          "end_upside_pct": 14.45442,
+          "ask_usdt_before": 116909.11
+        }
+      ]
+    },
+    {
+      "pair": "NOMUSDT",
+      "ask": 0.001507,
+      "spread_pct": 0.1995,
+      "book_levels": 913,
+      "visible_coverage_pct": 14498.5401,
+      "update_id": 266371963,
+      "start": 0.0016,
+      "end": 0.001649,
+      "empty_pct": 3.0625,
+      "end_upside_pct": 9.42269,
+      "ask_usdt_before": 37241.64,
+      "other_gaps": [
+        {
+          "start": 0.00195,
+          "end": 0.001997,
+          "empty_pct": 2.410256,
+          "end_upside_pct": 32.51493,
+          "ask_usdt_before": 57154.41
+        },
+        {
+          "start": 0.001665,
+          "end": 0.001685,
+          "empty_pct": 1.201201,
+          "end_upside_pct": 11.81155,
+          "ask_usdt_before": 37526.15
+        },
+        {
+          "start": 0.001777,
+          "end": 0.0018,
+          "empty_pct": 1.294316,
+          "end_upside_pct": 19.4426,
+          "ask_usdt_before": 47167.41
+        },
+        {
+          "start": 0.00165,
+          "end": 0.001665,
+          "empty_pct": 0.909091,
+          "end_upside_pct": 10.48441,
+          "ask_usdt_before": 37466.42
+        }
+      ]
+    },
+    {
+      "pair": "AVGOBUSDT",
+      "ask": 305.89,
+      "spread_pct": 0.0458,
+      "book_levels": 308,
+      "visible_coverage_pct": 59.7077,
+      "update_id": 92253208,
+      "start": 317.02,
+      "end": 324.8,
+      "empty_pct": 2.454104,
+      "end_upside_pct": 6.18196,
+      "ask_usdt_before": 202152.39,
+      "other_gaps": [
+        {
+          "start": 338.81,
+          "end": 344.0,
+          "empty_pct": 1.531832,
+          "end_upside_pct": 12.45873,
+          "ask_usdt_before": 211169.11
+        },
+        {
+          "start": 311.99,
+          "end": 314.4,
+          "empty_pct": 0.772461,
+          "end_upside_pct": 2.78205,
+          "ask_usdt_before": 202130.94
+        },
+        {
+          "start": 324.8,
+          "end": 328.0,
+          "empty_pct": 0.985222,
+          "end_upside_pct": 7.22809,
+          "ask_usdt_before": 202659.73
+        },
+        {
+          "start": 441.0,
+          "end": 453.36,
+          "empty_pct": 2.802721,
+          "end_upside_pct": 48.21014,
+          "ask_usdt_before": 294197.54
+        }
+      ]
+    },
+    {
+      "pair": "EWYBUSDT",
+      "ask": 139.56,
+      "spread_pct": 0.0072,
+      "book_levels": 172,
+      "visible_coverage_pct": 48.3448,
+      "update_id": 240588860,
+      "start": 145.44,
+      "end": 149.07,
+      "empty_pct": 2.495875,
+      "end_upside_pct": 6.81427,
+      "ask_usdt_before": 212959.51,
+      "other_gaps": [
+        {
+          "start": 149.07,
+          "end": 153.07,
+          "empty_pct": 2.683303,
+          "end_upside_pct": 9.68042,
+          "ask_usdt_before": 212965.17
+        },
+        {
+          "start": 143.61,
+          "end": 145.44,
+          "empty_pct": 1.274285,
+          "end_upside_pct": 4.21324,
+          "ask_usdt_before": 212953.84
+        },
+        {
+          "start": 142.16,
+          "end": 143.61,
+          "empty_pct": 1.019977,
+          "end_upside_pct": 2.90198,
+          "ask_usdt_before": 212943.78
+        },
+        {
+          "start": 163.33,
+          "end": 166.76,
+          "empty_pct": 2.100043,
+          "end_upside_pct": 19.48983,
+          "ask_usdt_before": 222421.04
+        }
+      ]
+    },
+    {
+      "pair": "INTWBUSDT",
+      "ask": 5.21,
+      "spread_pct": 0.3854,
+      "book_levels": 203,
+      "visible_coverage_pct": 673.7044,
+      "update_id": 71943128,
+      "start": 5.75,
+      "end": 5.9,
+      "empty_pct": 2.608696,
+      "end_upside_pct": 13.24376,
+      "ask_usdt_before": 98334.93,
+      "other_gaps": [
+        {
+          "start": 7.12,
+          "end": 7.5,
+          "empty_pct": 5.337079,
+          "end_upside_pct": 43.95393,
+          "ask_usdt_before": 125731.93
+        },
+        {
+          "start": 5.6,
+          "end": 5.7,
+          "empty_pct": 1.785714,
+          "end_upside_pct": 9.40499,
+          "ask_usdt_before": 98224.69
+        },
+        {
+          "start": 6.5,
+          "end": 6.65,
+          "empty_pct": 2.307692,
+          "end_upside_pct": 27.63916,
+          "ask_usdt_before": 115951.52
+        },
+        {
+          "start": 6.05,
+          "end": 6.15,
+          "empty_pct": 1.652893,
+          "end_upside_pct": 18.04223,
+          "ask_usdt_before": 112378.18
+        }
+      ]
+    },
+    {
+      "pair": "SNXXBUSDT",
+      "ask": 3.77,
+      "spread_pct": 0.266,
+      "book_levels": 330,
+      "visible_coverage_pct": 520.6897,
+      "update_id": 155632195,
+      "start": 4.58,
+      "end": 4.76,
+      "empty_pct": 3.930131,
+      "end_upside_pct": 26.25995,
+      "ask_usdt_before": 568363.69,
+      "other_gaps": [
+        {
+          "start": 4.0,
+          "end": 4.05,
+          "empty_pct": 1.25,
+          "end_upside_pct": 7.42706,
+          "ask_usdt_before": 553812.85
+        },
+        {
+          "start": 4.14,
+          "end": 4.19,
+          "empty_pct": 1.207729,
+          "end_upside_pct": 11.14058,
+          "ask_usdt_before": 553964.6
+        },
+        {
+          "start": 4.05,
+          "end": 4.09,
+          "empty_pct": 0.987654,
+          "end_upside_pct": 8.48806,
+          "ask_usdt_before": 553818.44
+        },
+        {
+          "start": 5.5,
+          "end": 5.66,
+          "empty_pct": 2.909091,
+          "end_upside_pct": 50.13263,
+          "ask_usdt_before": 577410.37
+        }
+      ]
+    },
+    {
+      "pair": "EURUSDT",
+      "ask": 1.119,
+      "spread_pct": 0.0089,
+      "book_levels": 534,
+      "visible_coverage_pct": 25.1117,
+      "update_id": 781805413,
+      "start": 1.35,
+      "end": 1.4,
+      "empty_pct": 3.703704,
+      "end_upside_pct": 25.11171,
+      "ask_usdt_before": 524541.73,
+      "other_gaps": [
+        {
+          "start": 1.3036,
+          "end": 1.3094,
+          "empty_pct": 0.444922,
+          "end_upside_pct": 17.01519,
+          "ask_usdt_before": 490050.68
+        },
+        {
+          "start": 1.3152,
+          "end": 1.321,
+          "empty_pct": 0.440998,
+          "end_upside_pct": 18.05183,
+          "ask_usdt_before": 490491.53
+        },
+        {
+          "start": 1.321,
+          "end": 1.3268,
+          "empty_pct": 0.439061,
+          "end_upside_pct": 18.57015,
+          "ask_usdt_before": 490502.1
+        },
+        {
+          "start": 1.3326,
+          "end": 1.3384,
+          "empty_pct": 0.435239,
+          "end_upside_pct": 19.60679,
+          "ask_usdt_before": 510473.37
+        }
+      ]
+    },
+    {
+      "pair": "BERAUSDT",
+      "ask": 0.12,
+      "spread_pct": 0.1669,
+      "book_levels": 1000,
+      "visible_coverage_pct": 3676.6667,
+      "update_id": 1416786770,
+      "start": 0.1344,
+      "end": 0.138,
+      "empty_pct": 2.678571,
+      "end_upside_pct": 15.0,
+      "ask_usdt_before": 26959.22,
+      "other_gaps": [
+        {
+          "start": 0.1252,
+          "end": 0.1263,
+          "empty_pct": 0.878594,
+          "end_upside_pct": 5.25,
+          "ask_usdt_before": 23462.13
+        },
+        {
+          "start": 0.1308,
+          "end": 0.132,
+          "empty_pct": 0.917431,
+          "end_upside_pct": 10.0,
+          "ask_usdt_before": 24750.64
+        },
+        {
+          "start": 0.1295,
+          "end": 0.1306,
+          "empty_pct": 0.849421,
+          "end_upside_pct": 8.83333,
+          "ask_usdt_before": 24513.46
+        },
+        {
+          "start": 0.1224,
+          "end": 0.1231,
+          "empty_pct": 0.571895,
+          "end_upside_pct": 2.58333,
+          "ask_usdt_before": 19520.63
+        }
+      ]
+    },
+    {
+      "pair": "KAIAUSDT",
+      "ask": 0.034,
+      "spread_pct": 0.295,
+      "book_levels": 1000,
+      "visible_coverage_pct": 1076.1765,
+      "update_id": 732406196,
+      "start": 0.036,
+      "end": 0.0367,
+      "empty_pct": 1.944444,
+      "end_upside_pct": 7.94118,
+      "ask_usdt_before": 66760.78,
+      "other_gaps": [
+        {
+          "start": 0.0387,
+          "end": 0.0397,
+          "empty_pct": 2.583979,
+          "end_upside_pct": 16.76471,
+          "ask_usdt_before": 67813.85
+        },
+        {
+          "start": 0.0373,
+          "end": 0.038,
+          "empty_pct": 1.876676,
+          "end_upside_pct": 11.76471,
+          "ask_usdt_before": 67767.05
+        },
+        {
+          "start": 0.0455,
+          "end": 0.0469,
+          "empty_pct": 3.076923,
+          "end_upside_pct": 37.94118,
+          "ask_usdt_before": 75358.73
+        },
+        {
+          "start": 0.0401,
+          "end": 0.0407,
+          "empty_pct": 1.496259,
+          "end_upside_pct": 19.70588,
+          "ask_usdt_before": 71243.37
+        }
+      ]
+    },
+    {
+      "pair": "METABUSDT",
+      "ask": 607.46,
+      "spread_pct": 0.0066,
+      "book_levels": 233,
+      "visible_coverage_pct": 46.5117,
+      "update_id": 100742826,
+      "start": 850.0,
+      "end": 890.0,
+      "empty_pct": 4.705882,
+      "end_upside_pct": 46.5117,
+      "ask_usdt_before": 468140.36,
+      "other_gaps": [
+        {
+          "start": 790.27,
+          "end": 820.0,
+          "empty_pct": 3.762005,
+          "end_upside_pct": 34.98831,
+          "ask_usdt_before": 450853.03
+        },
+        {
+          "start": 765.11,
+          "end": 777.6,
+          "empty_pct": 1.632445,
+          "end_upside_pct": 28.00843,
+          "ask_usdt_before": 434988.9
+        },
+        {
+          "start": 636.0,
+          "end": 639.68,
+          "empty_pct": 0.578616,
+          "end_upside_pct": 5.30405,
+          "ask_usdt_before": 205676.02
+        },
+        {
+          "start": 701.56,
+          "end": 707.89,
+          "empty_pct": 0.902275,
+          "end_upside_pct": 16.53278,
+          "ask_usdt_before": 308188.41
+        }
+      ]
+    },
+    {
+      "pair": "FDUSDUSDT",
+      "ask": 0.9981,
+      "spread_pct": 0.01,
+      "book_levels": 287,
+      "visible_coverage_pct": 20.5891,
+      "update_id": 601931949,
+      "start": 1.1188,
+      "end": 1.1388,
+      "empty_pct": 1.78763,
+      "end_upside_pct": 14.09678,
+      "ask_usdt_before": 7349853.65,
+      "other_gaps": [
+        {
+          "start": 1.03,
+          "end": 1.039,
+          "empty_pct": 0.873786,
+          "end_upside_pct": 4.09779,
+          "ask_usdt_before": 7048027.59
+        },
+        {
+          "start": 1.1497,
+          "end": 1.167,
+          "empty_pct": 1.50474,
+          "end_upside_pct": 16.92215,
+          "ask_usdt_before": 7388632.05
+        },
+        {
+          "start": 1.06,
+          "end": 1.07,
+          "empty_pct": 0.943396,
+          "end_upside_pct": 7.20369,
+          "ask_usdt_before": 7150379.13
+        },
+        {
+          "start": 1.07,
+          "end": 1.08,
+          "empty_pct": 0.934579,
+          "end_upside_pct": 8.20559,
+          "ask_usdt_before": 7152198.13
+        }
+      ]
+    },
+    {
+      "pair": "YGGUSDT",
+      "ask": 0.02292,
+      "spread_pct": 0.0873,
+      "book_levels": 1000,
+      "visible_coverage_pct": 1451.0471,
+      "update_id": 3518543477,
+      "start": 0.02412,
+      "end": 0.02439,
+      "empty_pct": 1.119403,
+      "end_upside_pct": 6.41361,
+      "ask_usdt_before": 18508.44,
+      "other_gaps": [
+        {
+          "start": 0.02339,
+          "end": 0.02357,
+          "empty_pct": 0.76956,
+          "end_upside_pct": 2.83595,
+          "ask_usdt_before": 13200.7
+        },
+        {
+          "start": 0.02326,
+          "end": 0.02339,
+          "empty_pct": 0.558899,
+          "end_upside_pct": 2.05061,
+          "ask_usdt_before": 13057.82
+        },
+        {
+          "start": 0.02387,
+          "end": 0.02401,
+          "empty_pct": 0.58651,
+          "end_upside_pct": 4.75567,
+          "ask_usdt_before": 18172.73
+        },
+        {
+          "start": 0.02364,
+          "end": 0.02373,
+          "empty_pct": 0.380711,
+          "end_upside_pct": 3.53403,
+          "ask_usdt_before": 18022.27
+        }
+      ]
+    },
+    {
+      "pair": "MOVRUSDT",
+      "ask": 1.038,
+      "spread_pct": 0.0964,
+      "book_levels": 1000,
+      "visible_coverage_pct": 366.3776,
+      "update_id": 2775929210,
+      "start": 1.07,
+      "end": 1.08,
+      "empty_pct": 0.934579,
+      "end_upside_pct": 4.04624,
+      "ask_usdt_before": 29796.84,
+      "other_gaps": [
+        {
+          "start": 1.05,
+          "end": 1.054,
+          "empty_pct": 0.380952,
+          "end_upside_pct": 1.54143,
+          "ask_usdt_before": 24713.46
+        },
+        {
+          "start": 1.08,
+          "end": 1.085,
+          "empty_pct": 0.462963,
+          "end_upside_pct": 4.52794,
+          "ask_usdt_before": 30927.24
+        },
+        {
+          "start": 1.086,
+          "end": 1.091,
+          "empty_pct": 0.460405,
+          "end_upside_pct": 5.10597,
+          "ask_usdt_before": 31194.92
+        },
+        {
+          "start": 1.12,
+          "end": 1.126,
+          "empty_pct": 0.535714,
+          "end_upside_pct": 8.47784,
+          "ask_usdt_before": 40996.56
+        }
+      ]
+    },
+    {
+      "pair": "USDEUSDT",
+      "ask": 1.0003,
+      "spread_pct": 0.01,
+      "book_levels": 55,
+      "visible_coverage_pct": 9.967,
+      "update_id": 26641197,
+      "start": 1.0775,
+      "end": 1.09,
+      "empty_pct": 1.160093,
+      "end_upside_pct": 8.96731,
+      "ask_usdt_before": 4557337.33,
+      "other_gaps": [
+        {
+          "start": 1.05,
+          "end": 1.0582,
+          "empty_pct": 0.780952,
+          "end_upside_pct": 5.78826,
+          "ask_usdt_before": 4535760.75
+        },
+        {
+          "start": 1.0681,
+          "end": 1.0772,
+          "empty_pct": 0.85198,
+          "end_upside_pct": 7.68769,
+          "ask_usdt_before": 4551939.06
+        },
+        {
+          "start": 1.06,
+          "end": 1.0673,
+          "empty_pct": 0.688679,
+          "end_upside_pct": 6.69799,
+          "ask_usdt_before": 4551905.95
+        },
+        {
+          "start": 1.005,
+          "end": 1.0093,
+          "empty_pct": 0.427861,
+          "end_upside_pct": 0.89973,
+          "ask_usdt_before": 1605589.86
+        }
+      ]
+    },
+    {
+      "pair": "1000CHEEMSUSDT",
+      "ask": 0.000383,
+      "spread_pct": 0.2618,
+      "book_levels": 777,
+      "visible_coverage_pct": 2714.6214,
+      "update_id": 543755578,
+      "start": 0.000402,
+      "end": 0.000406,
+      "empty_pct": 0.995025,
+      "end_upside_pct": 6.00522,
+      "ask_usdt_before": 10911.2,
+      "other_gaps": [
+        {
+          "start": 0.00041,
+          "end": 0.000414,
+          "empty_pct": 0.97561,
+          "end_upside_pct": 8.09399,
+          "ask_usdt_before": 11303.4
+        },
+        {
+          "start": 0.000423,
+          "end": 0.000427,
+          "empty_pct": 0.945626,
+          "end_upside_pct": 11.48825,
+          "ask_usdt_before": 11871.8
+        },
+        {
+          "start": 0.000452,
+          "end": 0.000457,
+          "empty_pct": 1.106195,
+          "end_upside_pct": 19.32115,
+          "ask_usdt_before": 13674.4
+        },
+        {
+          "start": 0.000461,
+          "end": 0.000466,
+          "empty_pct": 1.084599,
+          "end_upside_pct": 21.67102,
+          "ask_usdt_before": 13679.01
+        }
+      ]
+    },
+    {
+      "pair": "BABYUSDT",
+      "ask": 0.01166,
+      "spread_pct": 0.0858,
+      "book_levels": 895,
+      "visible_coverage_pct": 7292.7959,
+      "update_id": 863724260,
+      "start": 0.01214,
+      "end": 0.01225,
+      "empty_pct": 0.906096,
+      "end_upside_pct": 5.06003,
+      "ask_usdt_before": 69861.12,
+      "other_gaps": [
+        {
+          "start": 0.01225,
+          "end": 0.01235,
+          "empty_pct": 0.816327,
+          "end_upside_pct": 5.91767,
+          "ask_usdt_before": 69866.53
+        },
+        {
+          "start": 0.0125,
+          "end": 0.01259,
+          "empty_pct": 0.72,
+          "end_upside_pct": 7.97599,
+          "ask_usdt_before": 70623.67
+        },
+        {
+          "start": 0.01186,
+          "end": 0.01192,
+          "empty_pct": 0.505902,
+          "end_upside_pct": 2.22985,
+          "ask_usdt_before": 64231.8
+        },
+        {
+          "start": 0.0129,
+          "end": 0.013,
+          "empty_pct": 0.775194,
+          "end_upside_pct": 11.49228,
+          "ask_usdt_before": 94410.34
+        }
+      ]
+    },
+    {
+      "pair": "OPGUSDT",
+      "ask": 0.1187,
+      "spread_pct": 0.0843,
+      "book_levels": 284,
+      "visible_coverage_pct": 742.46,
+      "update_id": 116300513,
+      "start": 0.1415,
+      "end": 0.144,
+      "empty_pct": 1.766784,
+      "end_upside_pct": 21.31424,
+      "ask_usdt_before": 48540.58,
+      "other_gaps": [
+        {
+          "start": 0.146,
+          "end": 0.1488,
+          "empty_pct": 1.917808,
+          "end_upside_pct": 25.35805,
+          "ask_usdt_before": 48742.78
+        },
+        {
+          "start": 0.144,
+          "end": 0.146,
+          "empty_pct": 1.388889,
+          "end_upside_pct": 22.99916,
+          "ask_usdt_before": 48548.7
+        },
+        {
+          "start": 0.1252,
+          "end": 0.126,
+          "empty_pct": 0.638978,
+          "end_upside_pct": 6.14996,
+          "ask_usdt_before": 19644.56
+        },
+        {
+          "start": 0.136,
+          "end": 0.1373,
+          "empty_pct": 0.955882,
+          "end_upside_pct": 15.66976,
+          "ask_usdt_before": 45443.69
+        }
+      ]
+    },
+    {
+      "pair": "CVXUSDT",
+      "ask": 1.873,
+      "spread_pct": 0.1069,
+      "book_levels": 959,
+      "visible_coverage_pct": 1982.221,
+      "update_id": 1052363355,
+      "start": 1.958,
+      "end": 1.976,
+      "empty_pct": 0.919305,
+      "end_upside_pct": 5.4992,
+      "ask_usdt_before": 24506.44,
+      "other_gaps": [
+        {
+          "start": 2.01,
+          "end": 2.028,
+          "empty_pct": 0.895522,
+          "end_upside_pct": 8.27549,
+          "ask_usdt_before": 25126.19
+        },
+        {
+          "start": 1.905,
+          "end": 1.914,
+          "empty_pct": 0.472441,
+          "end_upside_pct": 2.189,
+          "ask_usdt_before": 16568.19
+        },
+        {
+          "start": 1.936,
+          "end": 1.945,
+          "empty_pct": 0.464876,
+          "end_upside_pct": 3.8441,
+          "ask_usdt_before": 24117.67
+        },
+        {
+          "start": 1.895,
+          "end": 1.902,
+          "empty_pct": 0.369393,
+          "end_upside_pct": 1.54832,
+          "ask_usdt_before": 14745.29
+        }
+      ]
+    },
+    {
+      "pair": "SOXLBUSDT",
+      "ask": 48.66,
+      "spread_pct": 0.0411,
+      "book_levels": 795,
+      "visible_coverage_pct": 341.8413,
+      "update_id": 684201103,
+      "start": 58.8,
+      "end": 59.86,
+      "empty_pct": 1.802721,
+      "end_upside_pct": 23.01685,
+      "ask_usdt_before": 920093.96,
+      "other_gaps": [
+        {
+          "start": 60.0,
+          "end": 61.0,
+          "empty_pct": 1.666667,
+          "end_upside_pct": 25.35964,
+          "ask_usdt_before": 921063.56
+        },
+        {
+          "start": 55.1,
+          "end": 55.67,
+          "empty_pct": 1.034483,
+          "end_upside_pct": 14.40608,
+          "ask_usdt_before": 598760.89
+        },
+        {
+          "start": 65.0,
+          "end": 66.0,
+          "empty_pct": 1.538462,
+          "end_upside_pct": 35.63502,
+          "ask_usdt_before": 949033.38
+        },
+        {
+          "start": 53.0,
+          "end": 53.33,
+          "empty_pct": 0.622642,
+          "end_upside_pct": 9.59721,
+          "ask_usdt_before": 513139.95
+        }
+      ]
+    },
+    {
+      "pair": "SANDUSDT",
+      "ask": 0.04403,
+      "spread_pct": 0.0227,
+      "book_levels": 1000,
+      "visible_coverage_pct": 308.3579,
+      "update_id": 8422861142,
+      "start": 0.04631,
+      "end": 0.0467,
+      "empty_pct": 0.842151,
+      "end_upside_pct": 6.06405,
+      "ask_usdt_before": 49607.23,
+      "other_gaps": [
+        {
+          "start": 0.04551,
+          "end": 0.04582,
+          "empty_pct": 0.681169,
+          "end_upside_pct": 4.06541,
+          "ask_usdt_before": 49213.93
+        },
+        {
+          "start": 0.04601,
+          "end": 0.04623,
+          "empty_pct": 0.478157,
+          "end_upside_pct": 4.99659,
+          "ask_usdt_before": 49499.29
+        },
+        {
+          "start": 0.05229,
+          "end": 0.0527,
+          "empty_pct": 0.784089,
+          "end_upside_pct": 19.69112,
+          "ask_usdt_before": 60228.6
+        },
+        {
+          "start": 0.05124,
+          "end": 0.05157,
+          "empty_pct": 0.644028,
+          "end_upside_pct": 17.12469,
+          "ask_usdt_before": 60079.18
+        }
+      ]
+    },
+    {
+      "pair": "GRTUSDT",
+      "ask": 0.01971,
+      "spread_pct": 0.1524,
+      "book_levels": 1000,
+      "visible_coverage_pct": 342.415,
+      "update_id": 4970095533,
+      "start": 0.02002,
+      "end": 0.02015,
+      "empty_pct": 0.649351,
+      "end_upside_pct": 2.23237,
+      "ask_usdt_before": 31658.64,
+      "other_gaps": [
+        {
+          "start": 0.02067,
+          "end": 0.02081,
+          "empty_pct": 0.67731,
+          "end_upside_pct": 5.58092,
+          "ask_usdt_before": 36293.76
+        },
+        {
+          "start": 0.02251,
+          "end": 0.0227,
+          "empty_pct": 0.844069,
+          "end_upside_pct": 15.16996,
+          "ask_usdt_before": 47807.65
+        },
+        {
+          "start": 0.0205,
+          "end": 0.0206,
+          "empty_pct": 0.487805,
+          "end_upside_pct": 4.51547,
+          "ask_usdt_before": 35908.94
+        },
+        {
+          "start": 0.02032,
+          "end": 0.02041,
+          "empty_pct": 0.442913,
+          "end_upside_pct": 3.5515,
+          "ask_usdt_before": 35266.48
+        }
+      ]
+    },
+    {
+      "pair": "ENSUSDT",
+      "ask": 4.69,
+      "spread_pct": 0.2137,
+      "book_levels": 1000,
+      "visible_coverage_pct": 361.8337,
+      "update_id": 4478830036,
+      "start": 5.11,
+      "end": 5.16,
+      "empty_pct": 0.978474,
+      "end_upside_pct": 10.02132,
+      "ask_usdt_before": 60333.68,
+      "other_gaps": [
+        {
+          "start": 4.9,
+          "end": 4.93,
+          "empty_pct": 0.612245,
+          "end_upside_pct": 5.11727,
+          "ask_usdt_before": 53994.96
+        },
+        {
+          "start": 5.04,
+          "end": 5.07,
+          "empty_pct": 0.595238,
+          "end_upside_pct": 8.10235,
+          "ask_usdt_before": 55011.83
+        },
+        {
+          "start": 5.17,
+          "end": 5.2,
+          "empty_pct": 0.580271,
+          "end_upside_pct": 10.8742,
+          "ask_usdt_before": 60416.59
+        },
+        {
+          "start": 5.55,
+          "end": 5.59,
+          "empty_pct": 0.720721,
+          "end_upside_pct": 19.18977,
+          "ask_usdt_before": 68897.15
+        }
+      ]
+    },
+    {
+      "pair": "NXPCUSDT",
+      "ask": 0.1521,
+      "spread_pct": 0.1317,
+      "book_levels": 1000,
+      "visible_coverage_pct": 1819.7896,
+      "update_id": 814711718,
+      "start": 0.1572,
+      "end": 0.1583,
+      "empty_pct": 0.699746,
+      "end_upside_pct": 4.07627,
+      "ask_usdt_before": 60258.78,
+      "other_gaps": [
+        {
+          "start": 0.2,
+          "end": 0.2028,
+          "empty_pct": 1.4,
+          "end_upside_pct": 33.33333,
+          "ask_usdt_before": 90758.59
+        },
+        {
+          "start": 0.1669,
+          "end": 0.168,
+          "empty_pct": 0.659077,
+          "end_upside_pct": 10.45365,
+          "ask_usdt_before": 69544.02
+        },
+        {
+          "start": 0.16,
+          "end": 0.1608,
+          "empty_pct": 0.5,
+          "end_upside_pct": 5.71992,
+          "ask_usdt_before": 65703.84
+        },
+        {
+          "start": 0.1608,
+          "end": 0.1615,
+          "empty_pct": 0.435323,
+          "end_upside_pct": 6.18014,
+          "ask_usdt_before": 65718.97
+        }
+      ]
+    },
+    {
+      "pair": "RUNEUSDT",
+      "ask": 0.594,
+      "spread_pct": 0.1686,
+      "book_levels": 1000,
+      "visible_coverage_pct": 218.6869,
+      "update_id": 5359348965,
+      "start": 0.611,
+      "end": 0.615,
+      "empty_pct": 0.654664,
+      "end_upside_pct": 3.53535,
+      "ask_usdt_before": 52915.47,
+      "other_gaps": [
+        {
+          "start": 0.608,
+          "end": 0.61,
+          "empty_pct": 0.328947,
+          "end_upside_pct": 2.6936,
+          "ask_usdt_before": 51849.15
+        },
+        {
+          "start": 0.617,
+          "end": 0.619,
+          "empty_pct": 0.324149,
+          "end_upside_pct": 4.20875,
+          "ask_usdt_before": 54834.09
+        },
+        {
+          "start": 0.627,
+          "end": 0.629,
+          "empty_pct": 0.318979,
+          "end_upside_pct": 5.89226,
+          "ask_usdt_before": 66335.14
+        },
+        {
+          "start": 0.672,
+          "end": 0.675,
+          "empty_pct": 0.446429,
+          "end_upside_pct": 13.63636,
+          "ask_usdt_before": 80633.27
+        }
+      ]
+    },
+    {
+      "pair": "GPSUSDT",
+      "ask": 0.0083,
+      "spread_pct": 0.2415,
+      "book_levels": 835,
+      "visible_coverage_pct": 7128.9157,
+      "update_id": 700599475,
+      "start": 0.00867,
+      "end": 0.00873,
+      "empty_pct": 0.692042,
+      "end_upside_pct": 5.18072,
+      "ask_usdt_before": 20981.12,
+      "other_gaps": [
+        {
+          "start": 0.00841,
+          "end": 0.00845,
+          "empty_pct": 0.475624,
+          "end_upside_pct": 1.80723,
+          "ask_usdt_before": 14722.8
+        },
+        {
+          "start": 0.00902,
+          "end": 0.00908,
+          "empty_pct": 0.665188,
+          "end_upside_pct": 9.39759,
+          "ask_usdt_before": 21686.39
+        },
+        {
+          "start": 0.00885,
+          "end": 0.0089,
+          "empty_pct": 0.564972,
+          "end_upside_pct": 7.22892,
+          "ask_usdt_before": 21151.68
+        },
+        {
+          "start": 0.0086,
+          "end": 0.00864,
+          "empty_pct": 0.465116,
+          "end_upside_pct": 4.09639,
+          "ask_usdt_before": 20565.1
+        }
+      ]
+    },
+    {
+      "pair": "ALTUSDT",
+      "ask": 0.00559,
+      "spread_pct": 0.1792,
+      "book_levels": 1000,
+      "visible_coverage_pct": 1035.4204,
+      "update_id": 3633522163,
+      "start": 0.00642,
+      "end": 0.00649,
+      "empty_pct": 1.090343,
+      "end_upside_pct": 16.10018,
+      "ask_usdt_before": 70717.69,
+      "other_gaps": [
+        {
+          "start": 0.00655,
+          "end": 0.0066,
+          "empty_pct": 0.763359,
+          "end_upside_pct": 18.06798,
+          "ask_usdt_before": 77832.94
+        },
+        {
+          "start": 0.006,
+          "end": 0.00603,
+          "empty_pct": 0.5,
+          "end_upside_pct": 7.8712,
+          "ask_usdt_before": 63216.62
+        },
+        {
+          "start": 0.0063,
+          "end": 0.00634,
+          "empty_pct": 0.634921,
+          "end_upside_pct": 13.41682,
+          "ask_usdt_before": 70421.95
+        },
+        {
+          "start": 0.00634,
+          "end": 0.00638,
+          "empty_pct": 0.630915,
+          "end_upside_pct": 14.13238,
+          "ask_usdt_before": 70433.07
+        }
+      ]
+    },
+    {
+      "pair": "HAEDALUSDT",
+      "ask": 0.02623,
+      "spread_pct": 0.0381,
+      "book_levels": 743,
+      "visible_coverage_pct": 5428.0213,
+      "update_id": 425088570,
+      "start": 0.0306,
+      "end": 0.03095,
+      "empty_pct": 1.143791,
+      "end_upside_pct": 17.99466,
+      "ask_usdt_before": 83448.08,
+      "other_gaps": [
+        {
+          "start": 0.0465,
+          "end": 0.048,
+          "empty_pct": 3.225806,
+          "end_upside_pct": 82.99657,
+          "ask_usdt_before": 241883.42
+        },
+        {
+          "start": 0.02717,
+          "end": 0.0273,
+          "empty_pct": 0.478469,
+          "end_upside_pct": 4.0793,
+          "ask_usdt_before": 68986.91
+        },
+        {
+          "start": 0.034,
+          "end": 0.03443,
+          "empty_pct": 1.264706,
+          "end_upside_pct": 31.26191,
+          "ask_usdt_before": 174611.74
+        },
+        {
+          "start": 0.03037,
+          "end": 0.0306,
+          "empty_pct": 0.757326,
+          "end_upside_pct": 16.66031,
+          "ask_usdt_before": 83371.09
+        }
+      ]
+    },
+    {
+      "pair": "SXTUSDT",
+      "ask": 0.00898,
+      "spread_pct": 0.1115,
+      "book_levels": 1000,
+      "visible_coverage_pct": 7707.3497,
+      "update_id": 393478431,
+      "start": 0.00936,
+      "end": 0.00942,
+      "empty_pct": 0.641026,
+      "end_upside_pct": 4.89978,
+      "ask_usdt_before": 48298.32,
+      "other_gaps": [
+        {
+          "start": 0.0102,
+          "end": 0.0103,
+          "empty_pct": 0.980392,
+          "end_upside_pct": 14.69933,
+          "ask_usdt_before": 68822.68
+        },
+        {
+          "start": 0.01,
+          "end": 0.01008,
+          "empty_pct": 0.8,
+          "end_upside_pct": 12.24944,
+          "ask_usdt_before": 66514.28
+        },
+        {
+          "start": 0.0105,
+          "end": 0.0106,
+          "empty_pct": 0.952381,
+          "end_upside_pct": 18.04009,
+          "ask_usdt_before": 75007.37
+        },
+        {
+          "start": 0.00951,
+          "end": 0.00956,
+          "empty_pct": 0.525762,
+          "end_upside_pct": 6.4588,
+          "ask_usdt_before": 53253.36
+        }
+      ]
+    },
+    {
+      "pair": "INITUSDT",
+      "ask": 0.13934,
+      "spread_pct": 0.0574,
+      "book_levels": 953,
+      "visible_coverage_pct": 4923.6831,
+      "update_id": 1134209563,
+      "start": 0.175,
+      "end": 0.1775,
+      "empty_pct": 1.428571,
+      "end_upside_pct": 27.38625,
+      "ask_usdt_before": 69262.22,
+      "other_gaps": [
+        {
+          "start": 0.1775,
+          "end": 0.18,
+          "empty_pct": 1.408451,
+          "end_upside_pct": 29.18042,
+          "ask_usdt_before": 69385.42
+        },
+        {
+          "start": 0.172,
+          "end": 0.174,
+          "empty_pct": 1.162791,
+          "end_upside_pct": 24.87441,
+          "ask_usdt_before": 66763.94
+        },
+        {
+          "start": 0.15407,
+          "end": 0.155,
+          "empty_pct": 0.603622,
+          "end_upside_pct": 11.2387,
+          "ask_usdt_before": 42848.71
+        },
+        {
+          "start": 0.14322,
+          "end": 0.14374,
+          "empty_pct": 0.363078,
+          "end_upside_pct": 3.15774,
+          "ask_usdt_before": 25727.89
+        }
+      ]
+    },
+    {
+      "pair": "XTZUSDT",
+      "ask": 0.2568,
+      "spread_pct": 0.0779,
+      "book_levels": 1000,
+      "visible_coverage_pct": 299.1433,
+      "update_id": 3856712385,
+      "start": 0.2672,
+      "end": 0.2688,
+      "empty_pct": 0.598802,
+      "end_upside_pct": 4.6729,
+      "ask_usdt_before": 138162.34,
+      "other_gaps": [
+        {
+          "start": 0.296,
+          "end": 0.299,
+          "empty_pct": 1.013514,
+          "end_upside_pct": 16.43302,
+          "ask_usdt_before": 149027.84
+        },
+        {
+          "start": 0.2736,
+          "end": 0.2752,
+          "empty_pct": 0.584795,
+          "end_upside_pct": 7.16511,
+          "ask_usdt_before": 139773.45
+        },
+        {
+          "start": 0.28,
+          "end": 0.2817,
+          "empty_pct": 0.607143,
+          "end_upside_pct": 9.69626,
+          "ask_usdt_before": 143037.19
+        },
+        {
+          "start": 0.2704,
+          "end": 0.2717,
+          "empty_pct": 0.480769,
+          "end_upside_pct": 5.80218,
+          "ask_usdt_before": 139296.89
+        }
+      ]
+    },
+    {
+      "pair": "THEUSDT",
+      "ask": 0.0398,
+      "spread_pct": 0.2519,
+      "book_levels": 1000,
+      "visible_coverage_pct": 2008.2915,
+      "update_id": 1510306819,
+      "start": 0.0426,
+      "end": 0.0429,
+      "empty_pct": 0.704225,
+      "end_upside_pct": 7.78894,
+      "ask_usdt_before": 53107.24,
+      "other_gaps": [
+        {
+          "start": 0.041,
+          "end": 0.0412,
+          "empty_pct": 0.487805,
+          "end_upside_pct": 3.51759,
+          "ask_usdt_before": 23231.31
+        },
+        {
+          "start": 0.0447,
+          "end": 0.045,
+          "empty_pct": 0.671141,
+          "end_upside_pct": 13.06533,
+          "ask_usdt_before": 65046.81
+        },
+        {
+          "start": 0.0473,
+          "end": 0.0477,
+          "empty_pct": 0.845666,
+          "end_upside_pct": 19.84925,
+          "ask_usdt_before": 75051.52
+        },
+        {
+          "start": 0.0452,
+          "end": 0.0455,
+          "empty_pct": 0.663717,
+          "end_upside_pct": 14.32161,
+          "ask_usdt_before": 66666.52
+        }
+      ]
+    },
+    {
+      "pair": "SEIUSDT",
+      "ask": 0.0464,
+      "spread_pct": 0.0431,
+      "book_levels": 1000,
+      "visible_coverage_pct": 95.2155,
+      "update_id": 4689522701,
+      "start": 0.05038,
+      "end": 0.05076,
+      "empty_pct": 0.754268,
+      "end_upside_pct": 9.39655,
+      "ask_usdt_before": 138993.68,
+      "other_gaps": [
+        {
+          "start": 0.04739,
+          "end": 0.0476,
+          "empty_pct": 0.443131,
+          "end_upside_pct": 2.58621,
+          "ask_usdt_before": 120752.04
+        },
+        {
+          "start": 0.04902,
+          "end": 0.04922,
+          "empty_pct": 0.407997,
+          "end_upside_pct": 6.07759,
+          "ask_usdt_before": 132665.5
+        },
+        {
+          "start": 0.05158,
+          "end": 0.0518,
+          "empty_pct": 0.426522,
+          "end_upside_pct": 11.63793,
+          "ask_usdt_before": 142319.1
+        },
+        {
+          "start": 0.04944,
+          "end": 0.04959,
+          "empty_pct": 0.303398,
+          "end_upside_pct": 6.875,
+          "ask_usdt_before": 133033.03
+        }
+      ]
+    },
+    {
+      "pair": "ZILUSDT",
+      "ask": 0.001732,
+      "spread_pct": 0.1156,
+      "book_levels": 1000,
+      "visible_coverage_pct": 613.0485,
+      "update_id": 3573351033,
+      "start": 0.001769,
+      "end": 0.001778,
+      "empty_pct": 0.508762,
+      "end_upside_pct": 2.65589,
+      "ask_usdt_before": 14919.14,
+      "other_gaps": [
+        {
+          "start": 0.002107,
+          "end": 0.00213,
+          "empty_pct": 1.091599,
+          "end_upside_pct": 22.97921,
+          "ask_usdt_before": 38172.26
+        },
+        {
+          "start": 0.001789,
+          "end": 0.001797,
+          "empty_pct": 0.447177,
+          "end_upside_pct": 3.75289,
+          "ask_usdt_before": 19310.13
+        },
+        {
+          "start": 0.00203,
+          "end": 0.002047,
+          "empty_pct": 0.837438,
+          "end_upside_pct": 18.18707,
+          "ask_usdt_before": 33748.65
+        },
+        {
+          "start": 0.00216,
+          "end": 0.002182,
+          "empty_pct": 1.018519,
+          "end_upside_pct": 25.98152,
+          "ask_usdt_before": 43964.97
+        }
+      ]
+    },
+    {
+      "pair": "SAGAUSDT",
+      "ask": 0.0166,
+      "spread_pct": 0.0603,
+      "book_levels": 1000,
+      "visible_coverage_pct": 188.494,
+      "update_id": 4012564873,
+      "start": 0.01729,
+      "end": 0.01739,
+      "empty_pct": 0.578369,
+      "end_upside_pct": 4.75904,
+      "ask_usdt_before": 31999.78,
+      "other_gaps": [
+        {
+          "start": 0.01712,
+          "end": 0.01719,
+          "empty_pct": 0.408879,
+          "end_upside_pct": 3.55422,
+          "ask_usdt_before": 31342.83
+        },
+        {
+          "start": 0.0169,
+          "end": 0.01696,
+          "empty_pct": 0.35503,
+          "end_upside_pct": 2.16867,
+          "ask_usdt_before": 28265.6
+        },
+        {
+          "start": 0.01792,
+          "end": 0.01799,
+          "empty_pct": 0.390625,
+          "end_upside_pct": 8.37349,
+          "ask_usdt_before": 36779.78
+        },
+        {
+          "start": 0.01739,
+          "end": 0.01744,
+          "empty_pct": 0.287522,
+          "end_upside_pct": 5.06024,
+          "ask_usdt_before": 32018.54
+        }
+      ]
+    },
+    {
+      "pair": "APEUSDT",
+      "ask": 0.1109,
+      "spread_pct": 0.0903,
+      "book_levels": 1000,
+      "visible_coverage_pct": 297.5654,
+      "update_id": 5751091789,
+      "start": 0.1141,
+      "end": 0.1147,
+      "empty_pct": 0.525855,
+      "end_upside_pct": 3.42651,
+      "ask_usdt_before": 49796.17,
+      "other_gaps": [
+        {
+          "start": 0.1161,
+          "end": 0.1166,
+          "empty_pct": 0.430663,
+          "end_upside_pct": 5.13977,
+          "ask_usdt_before": 51193.75
+        },
+        {
+          "start": 0.1174,
+          "end": 0.1179,
+          "empty_pct": 0.425894,
+          "end_upside_pct": 6.31199,
+          "ask_usdt_before": 51240.03
+        },
+        {
+          "start": 0.1202,
+          "end": 0.1207,
+          "empty_pct": 0.415973,
+          "end_upside_pct": 8.83679,
+          "ask_usdt_before": 52446.06
+        },
+        {
+          "start": 0.1166,
+          "end": 0.117,
+          "empty_pct": 0.343053,
+          "end_upside_pct": 5.50045,
+          "ask_usdt_before": 51200.49
+        }
+      ]
+    },
+    {
+      "pair": "JUPUSDT",
+      "ask": 0.2491,
+      "spread_pct": 0.0804,
+      "book_levels": 1000,
+      "visible_coverage_pct": 208.069,
+      "update_id": 4869381291,
+      "start": 0.268,
+      "end": 0.2698,
+      "empty_pct": 0.671642,
+      "end_upside_pct": 8.30992,
+      "ask_usdt_before": 153743.94,
+      "other_gaps": [
+        {
+          "start": 0.2537,
+          "end": 0.2549,
+          "empty_pct": 0.473,
+          "end_upside_pct": 2.32838,
+          "ask_usdt_before": 102280.74
+        },
+        {
+          "start": 0.2835,
+          "end": 0.286,
+          "empty_pct": 0.881834,
+          "end_upside_pct": 14.81333,
+          "ask_usdt_before": 171311.12
+        },
+        {
+          "start": 0.2564,
+          "end": 0.2573,
+          "empty_pct": 0.351014,
+          "end_upside_pct": 3.29185,
+          "ask_usdt_before": 124519.73
+        },
+        {
+          "start": 0.2928,
+          "end": 0.2947,
+          "empty_pct": 0.648907,
+          "end_upside_pct": 18.3059,
+          "ask_usdt_before": 172956.89
+        }
+      ]
+    },
+    {
+      "pair": "PNUTUSDT",
+      "ask": 0.0363,
+      "spread_pct": 0.2762,
+      "book_levels": 1000,
+      "visible_coverage_pct": 571.0744,
+      "update_id": 4413171493,
+      "start": 0.0376,
+      "end": 0.0378,
+      "empty_pct": 0.531915,
+      "end_upside_pct": 4.13223,
+      "ask_usdt_before": 36544.47,
+      "other_gaps": [
+        {
+          "start": 0.0378,
+          "end": 0.038,
+          "empty_pct": 0.529101,
+          "end_upside_pct": 4.6832,
+          "ask_usdt_before": 36567.9
+        },
+        {
+          "start": 0.0363,
+          "end": 0.0364,
+          "empty_pct": 0.275482,
+          "end_upside_pct": 0.27548,
+          "ask_usdt_before": 6569.68
+        },
+        {
+          "start": 0.0364,
+          "end": 0.0365,
+          "empty_pct": 0.274725,
+          "end_upside_pct": 0.55096,
+          "ask_usdt_before": 12277.52
+        },
+        {
+          "start": 0.0365,
+          "end": 0.0366,
+          "empty_pct": 0.273973,
+          "end_upside_pct": 0.82645,
+          "ask_usdt_before": 15153.76
+        }
+      ]
+    },
+    {
+      "pair": "RLCUSDT",
+      "ask": 0.4472,
+      "spread_pct": 0.0447,
+      "book_levels": 1000,
+      "visible_coverage_pct": 521.6458,
+      "update_id": 3064244083,
+      "start": 0.4833,
+      "end": 0.4866,
+      "empty_pct": 0.682806,
+      "end_upside_pct": 8.81038,
+      "ask_usdt_before": 30807.19,
+      "other_gaps": [
+        {
+          "start": 0.5106,
+          "end": 0.515,
+          "empty_pct": 0.861731,
+          "end_upside_pct": 15.161,
+          "ask_usdt_before": 31642.51
+        },
+        {
+          "start": 0.457,
+          "end": 0.4591,
+          "empty_pct": 0.459519,
+          "end_upside_pct": 2.661,
+          "ask_usdt_before": 26131.09
+        },
+        {
+          "start": 0.5351,
+          "end": 0.5399,
+          "empty_pct": 0.897029,
+          "end_upside_pct": 20.72898,
+          "ask_usdt_before": 33189.6
+        },
+        {
+          "start": 0.4542,
+          "end": 0.4559,
+          "empty_pct": 0.374284,
+          "end_upside_pct": 1.94544,
+          "ask_usdt_before": 25186.44
+        }
+      ]
+    },
+    {
+      "pair": "DEXEUSDT",
+      "ask": 1.319,
+      "spread_pct": 0.0759,
+      "book_levels": 1000,
+      "visible_coverage_pct": 132.4488,
+      "update_id": 1944712764,
+      "start": 1.411,
+      "end": 1.42,
+      "empty_pct": 0.637845,
+      "end_upside_pct": 7.65732,
+      "ask_usdt_before": 40194.96,
+      "other_gaps": [
+        {
+          "start": 1.335,
+          "end": 1.34,
+          "empty_pct": 0.374532,
+          "end_upside_pct": 1.59212,
+          "ask_usdt_before": 26527.22
+        },
+        {
+          "start": 1.384,
+          "end": 1.39,
+          "empty_pct": 0.433526,
+          "end_upside_pct": 5.38287,
+          "ask_usdt_before": 36910.3
+        },
+        {
+          "start": 1.467,
+          "end": 1.475,
+          "empty_pct": 0.545331,
+          "end_upside_pct": 11.82714,
+          "ask_usdt_before": 56520.66
+        },
+        {
+          "start": 1.53,
+          "end": 1.54,
+          "empty_pct": 0.653595,
+          "end_upside_pct": 16.75512,
+          "ask_usdt_before": 65296.89
+        }
+      ]
+    },
+    {
+      "pair": "BANKUSDT",
+      "ask": 0.025,
+      "spread_pct": 0.4016,
+      "book_levels": 1000,
+      "visible_coverage_pct": 1188.0,
+      "update_id": 438860136,
+      "start": 0.025,
+      "end": 0.0251,
+      "empty_pct": 0.4,
+      "end_upside_pct": 0.4,
+      "ask_usdt_before": 10366.85,
+      "other_gaps": [
+        {
+          "start": 0.0251,
+          "end": 0.0252,
+          "empty_pct": 0.398406,
+          "end_upside_pct": 0.8,
+          "ask_usdt_before": 23760.06
+        },
+        {
+          "start": 0.0252,
+          "end": 0.0253,
+          "empty_pct": 0.396825,
+          "end_upside_pct": 1.2,
+          "ask_usdt_before": 32674.35
+        },
+        {
+          "start": 0.0253,
+          "end": 0.0254,
+          "empty_pct": 0.395257,
+          "end_upside_pct": 1.6,
+          "ask_usdt_before": 45954.9
+        },
+        {
+          "start": 0.0254,
+          "end": 0.0255,
+          "empty_pct": 0.393701,
+          "end_upside_pct": 2.0,
+          "ask_usdt_before": 55135.04
+        }
+      ]
+    },
+    {
+      "pair": "OGNUSDT",
+      "ask": 0.02425,
+      "spread_pct": 0.1239,
+      "book_levels": 1000,
+      "visible_coverage_pct": 741.6495,
+      "update_id": 2373449826,
+      "start": 0.0258,
+      "end": 0.02595,
+      "empty_pct": 0.581395,
+      "end_upside_pct": 7.01031,
+      "ask_usdt_before": 61486.32,
+      "other_gaps": [
+        {
+          "start": 0.02709,
+          "end": 0.02728,
+          "empty_pct": 0.701366,
+          "end_upside_pct": 12.49485,
+          "ask_usdt_before": 69812.81
+        },
+        {
+          "start": 0.02671,
+          "end": 0.02688,
+          "empty_pct": 0.636466,
+          "end_upside_pct": 10.84536,
+          "ask_usdt_before": 64904.99
+        },
+        {
+          "start": 0.0248,
+          "end": 0.0249,
+          "empty_pct": 0.403226,
+          "end_upside_pct": 2.68041,
+          "ask_usdt_before": 54327.33
+        },
+        {
+          "start": 0.02621,
+          "end": 0.02634,
+          "empty_pct": 0.495994,
+          "end_upside_pct": 8.61856,
+          "ask_usdt_before": 61722.44
+        }
+      ]
+    },
+    {
+      "pair": "CYBERUSDT",
+      "ask": 0.365,
+      "spread_pct": 0.2747,
+      "book_levels": 1000,
+      "visible_coverage_pct": 1327.6712,
+      "update_id": 2030313028,
+      "start": 0.407,
+      "end": 0.41,
+      "empty_pct": 0.737101,
+      "end_upside_pct": 12.32877,
+      "ask_usdt_before": 106677.28,
+      "other_gaps": [
+        {
+          "start": 0.411,
+          "end": 0.414,
+          "empty_pct": 0.729927,
+          "end_upside_pct": 13.42466,
+          "ask_usdt_before": 116925.17
+        },
+        {
+          "start": 0.395,
+          "end": 0.397,
+          "empty_pct": 0.506329,
+          "end_upside_pct": 8.76712,
+          "ask_usdt_before": 88790.75
+        },
+        {
+          "start": 0.365,
+          "end": 0.366,
+          "empty_pct": 0.273973,
+          "end_upside_pct": 0.27397,
+          "ask_usdt_before": 2540.06
+        },
+        {
+          "start": 0.366,
+          "end": 0.367,
+          "empty_pct": 0.273224,
+          "end_upside_pct": 0.54795,
+          "ask_usdt_before": 8115.31
+        }
+      ]
+    },
+    {
+      "pair": "IOSTUSDT",
+      "ask": 0.000705,
+      "spread_pct": 0.142,
+      "book_levels": 1000,
+      "visible_coverage_pct": 894.6099,
+      "update_id": 3180020069,
+      "start": 0.000743,
+      "end": 0.000747,
+      "empty_pct": 0.538358,
+      "end_upside_pct": 5.95745,
+      "ask_usdt_before": 19446.89,
+      "other_gaps": [
+        {
+          "start": 0.000793,
+          "end": 0.000799,
+          "empty_pct": 0.75662,
+          "end_upside_pct": 13.33333,
+          "ask_usdt_before": 39798.58
+        },
+        {
+          "start": 0.000755,
+          "end": 0.000759,
+          "empty_pct": 0.529801,
+          "end_upside_pct": 7.65957,
+          "ask_usdt_before": 25301.33
+        },
+        {
+          "start": 0.00076,
+          "end": 0.000764,
+          "empty_pct": 0.526316,
+          "end_upside_pct": 8.36879,
+          "ask_usdt_before": 31982.64
+        },
+        {
+          "start": 0.000733,
+          "end": 0.000736,
+          "empty_pct": 0.409277,
+          "end_upside_pct": 4.39716,
+          "ask_usdt_before": 17655.25
+        }
+      ]
+    },
+    {
+      "pair": "JSTUSDT",
+      "ask": 0.14152,
+      "spread_pct": 0.0283,
+      "book_levels": 377,
+      "visible_coverage_pct": 161.4471,
+      "update_id": 1280767722,
+      "start": 0.15271,
+      "end": 0.1536,
+      "empty_pct": 0.582804,
+      "end_upside_pct": 8.5359,
+      "ask_usdt_before": 217748.18,
+      "other_gaps": [
+        {
+          "start": 0.202,
+          "end": 0.205,
+          "empty_pct": 1.485149,
+          "end_upside_pct": 44.85585,
+          "ask_usdt_before": 351377.14
+        },
+        {
+          "start": 0.146,
+          "end": 0.14656,
+          "empty_pct": 0.383562,
+          "end_upside_pct": 3.56133,
+          "ask_usdt_before": 203501.04
+        },
+        {
+          "start": 0.15814,
+          "end": 0.159,
+          "empty_pct": 0.543822,
+          "end_upside_pct": 12.35161,
+          "ask_usdt_before": 224060.69
+        },
+        {
+          "start": 0.15009,
+          "end": 0.15069,
+          "empty_pct": 0.39976,
+          "end_upside_pct": 6.47965,
+          "ask_usdt_before": 213628.92
+        }
+      ]
+    },
+    {
+      "pair": "BONKUSDT",
+      "ask": 2.93e-06,
+      "spread_pct": 0.3425,
+      "book_levels": 1000,
+      "visible_coverage_pct": 360.4096,
+      "update_id": 7913931971,
+      "start": 2.93e-06,
+      "end": 2.94e-06,
+      "empty_pct": 0.341297,
+      "end_upside_pct": 0.3413,
+      "ask_usdt_before": 30580.79,
+      "other_gaps": [
+        {
+          "start": 2.94e-06,
+          "end": 2.95e-06,
+          "empty_pct": 0.340136,
+          "end_upside_pct": 0.68259,
+          "ask_usdt_before": 75385.27
+        },
+        {
+          "start": 2.95e-06,
+          "end": 2.96e-06,
+          "empty_pct": 0.338983,
+          "end_upside_pct": 1.02389,
+          "ask_usdt_before": 104224.34
+        },
+        {
+          "start": 2.96e-06,
+          "end": 2.97e-06,
+          "empty_pct": 0.337838,
+          "end_upside_pct": 1.36519,
+          "ask_usdt_before": 133231.59
+        },
+        {
+          "start": 2.97e-06,
+          "end": 2.98e-06,
+          "empty_pct": 0.3367,
+          "end_upside_pct": 1.70648,
+          "ask_usdt_before": 154663.2
+        }
+      ]
+    },
+    {
+      "pair": "AXSUSDT",
+      "ask": 0.858,
+      "spread_pct": 0.2336,
+      "book_levels": 1000,
+      "visible_coverage_pct": 264.6853,
+      "update_id": 5250572035,
+      "start": 0.9,
+      "end": 0.904,
+      "empty_pct": 0.444444,
+      "end_upside_pct": 5.36131,
+      "ask_usdt_before": 66596.4,
+      "other_gaps": [
+        {
+          "start": 0.942,
+          "end": 0.947,
+          "empty_pct": 0.530786,
+          "end_upside_pct": 10.37296,
+          "ask_usdt_before": 85399.6
+        },
+        {
+          "start": 0.914,
+          "end": 0.918,
+          "empty_pct": 0.437637,
+          "end_upside_pct": 6.99301,
+          "ask_usdt_before": 67755.74
+        },
+        {
+          "start": 0.895,
+          "end": 0.898,
+          "empty_pct": 0.335196,
+          "end_upside_pct": 4.662,
+          "ask_usdt_before": 66426.27
+        },
+        {
+          "start": 0.98,
+          "end": 0.985,
+          "empty_pct": 0.510204,
+          "end_upside_pct": 14.80186,
+          "ask_usdt_before": 87549.84
+        }
+      ]
+    },
+    {
+      "pair": "DUSKUSDT",
+      "ask": 0.0759,
+      "spread_pct": 0.1319,
+      "book_levels": 1000,
+      "visible_coverage_pct": 383.004,
+      "update_id": 2391247913,
+      "start": 0.078,
+      "end": 0.0783,
+      "empty_pct": 0.384615,
+      "end_upside_pct": 3.16206,
+      "ask_usdt_before": 30552.45,
+      "other_gaps": [
+        {
+          "start": 0.0825,
+          "end": 0.0829,
+          "empty_pct": 0.484848,
+          "end_upside_pct": 9.22266,
+          "ask_usdt_before": 44890.06
+        },
+        {
+          "start": 0.0791,
+          "end": 0.0794,
+          "empty_pct": 0.379267,
+          "end_upside_pct": 4.61133,
+          "ask_usdt_before": 34502.36
+        },
+        {
+          "start": 0.086,
+          "end": 0.0865,
+          "empty_pct": 0.581395,
+          "end_upside_pct": 13.96574,
+          "ask_usdt_before": 49696.35
+        },
+        {
+          "start": 0.0816,
+          "end": 0.0819,
+          "empty_pct": 0.367647,
+          "end_upside_pct": 7.90514,
+          "ask_usdt_before": 40997.66
+        }
+      ]
+    },
+    {
+      "pair": "METUSDT",
+      "ask": 0.2758,
+      "spread_pct": 0.0363,
+      "book_levels": 1000,
+      "visible_coverage_pct": 112.9804,
+      "update_id": 458094265,
+      "start": 0.2926,
+      "end": 0.2939,
+      "empty_pct": 0.444293,
+      "end_upside_pct": 6.56273,
+      "ask_usdt_before": 79730.95,
+      "other_gaps": [
+        {
+          "start": 0.2977,
+          "end": 0.299,
+          "empty_pct": 0.436681,
+          "end_upside_pct": 8.41189,
+          "ask_usdt_before": 80039.15
+        },
+        {
+          "start": 0.2802,
+          "end": 0.281,
+          "empty_pct": 0.28551,
+          "end_upside_pct": 1.88542,
+          "ask_usdt_before": 63715.55
+        },
+        {
+          "start": 0.2815,
+          "end": 0.2823,
+          "empty_pct": 0.284192,
+          "end_upside_pct": 2.35678,
+          "ask_usdt_before": 69855.31
+        },
+        {
+          "start": 0.2876,
+          "end": 0.2885,
+          "empty_pct": 0.312935,
+          "end_upside_pct": 4.60479,
+          "ask_usdt_before": 78954.98
+        }
+      ]
+    },
+    {
+      "pair": "MUBUSDT",
+      "ask": 717.25,
+      "spread_pct": 0.0056,
+      "book_levels": 1000,
+      "visible_coverage_pct": 38.3757,
+      "update_id": 702571590,
+      "start": 736.84,
+      "end": 739.31,
+      "empty_pct": 0.335215,
+      "end_upside_pct": 3.07564,
+      "ask_usdt_before": 277469.57,
+      "other_gaps": [
+        {
+          "start": 728.0,
+          "end": 730.0,
+          "empty_pct": 0.274725,
+          "end_upside_pct": 1.77762,
+          "ask_usdt_before": 274557.68
+        },
+        {
+          "start": 742.78,
+          "end": 745.0,
+          "empty_pct": 0.298877,
+          "end_upside_pct": 3.86894,
+          "ask_usdt_before": 277619.14
+        },
+        {
+          "start": 732.8,
+          "end": 734.54,
+          "empty_pct": 0.237445,
+          "end_upside_pct": 2.4106,
+          "ask_usdt_before": 275360.04
+        },
+        {
+          "start": 746.21,
+          "end": 748.0,
+          "empty_pct": 0.239879,
+          "end_upside_pct": 4.28721,
+          "ask_usdt_before": 277679.49
+        }
+      ]
+    },
+    {
+      "pair": "COTIUSDT",
+      "ask": 0.00971,
+      "spread_pct": 0.1031,
+      "book_levels": 1000,
+      "visible_coverage_pct": 149.0216,
+      "update_id": 3754464327,
+      "start": 0.00985,
+      "end": 0.00988,
+      "empty_pct": 0.304569,
+      "end_upside_pct": 1.75077,
+      "ask_usdt_before": 36762.42,
+      "other_gaps": [
+        {
+          "start": 0.00981,
+          "end": 0.00983,
+          "empty_pct": 0.203874,
+          "end_upside_pct": 1.23584,
+          "ask_usdt_before": 36692.35
+        },
+        {
+          "start": 0.00992,
+          "end": 0.00994,
+          "empty_pct": 0.201613,
+          "end_upside_pct": 2.36869,
+          "ask_usdt_before": 48401.02
+        },
+        {
+          "start": 0.00996,
+          "end": 0.00998,
+          "empty_pct": 0.200803,
+          "end_upside_pct": 2.78064,
+          "ask_usdt_before": 48454.71
+        },
+        {
+          "start": 0.01,
+          "end": 0.01002,
+          "empty_pct": 0.2,
+          "end_upside_pct": 3.19258,
+          "ask_usdt_before": 55035.73
+        }
+      ]
+    },
+    {
+      "pair": "ZBTUSDT",
+      "ask": 0.0648,
+      "spread_pct": 0.1546,
+      "book_levels": 774,
+      "visible_coverage_pct": 6088.2716,
+      "update_id": 624199472,
+      "start": 0.0695,
+      "end": 0.0698,
+      "empty_pct": 0.431655,
+      "end_upside_pct": 7.71605,
+      "ask_usdt_before": 179619.03,
+      "other_gaps": [
+        {
+          "start": 0.066,
+          "end": 0.0662,
+          "empty_pct": 0.30303,
+          "end_upside_pct": 2.16049,
+          "ask_usdt_before": 108024.41
+        },
+        {
+          "start": 0.0698,
+          "end": 0.0701,
+          "empty_pct": 0.429799,
+          "end_upside_pct": 8.17901,
+          "ask_usdt_before": 181624.77
+        },
+        {
+          "start": 0.0792,
+          "end": 0.0797,
+          "empty_pct": 0.631313,
+          "end_upside_pct": 22.99383,
+          "ask_usdt_before": 324225.9
+        },
+        {
+          "start": 0.0679,
+          "end": 0.0681,
+          "empty_pct": 0.294551,
+          "end_upside_pct": 5.09259,
+          "ask_usdt_before": 149249.04
+        }
+      ]
+    },
+    {
+      "pair": "GALAUSDT",
+      "ask": 0.001608,
+      "spread_pct": 0.1245,
+      "book_levels": 1000,
+      "visible_coverage_pct": 384.4527,
+      "update_id": 7622010992,
+      "start": 0.001791,
+      "end": 0.0018,
+      "empty_pct": 0.502513,
+      "end_upside_pct": 11.9403,
+      "ask_usdt_before": 79052.24,
+      "other_gaps": [
+        {
+          "start": 0.001728,
+          "end": 0.001734,
+          "empty_pct": 0.347222,
+          "end_upside_pct": 7.83582,
+          "ask_usdt_before": 57461.92
+        },
+        {
+          "start": 0.00178,
+          "end": 0.001787,
+          "empty_pct": 0.393258,
+          "end_upside_pct": 11.13184,
+          "ask_usdt_before": 78847.72
+        },
+        {
+          "start": 0.001642,
+          "end": 0.001646,
+          "empty_pct": 0.243605,
+          "end_upside_pct": 2.36318,
+          "ask_usdt_before": 45300.19
+        },
+        {
+          "start": 0.001901,
+          "end": 0.00191,
+          "empty_pct": 0.473435,
+          "end_upside_pct": 18.78109,
+          "ask_usdt_before": 89654.47
+        }
+      ]
+    },
+    {
+      "pair": "STXUSDT",
+      "ask": 0.3365,
+      "spread_pct": 0.0595,
+      "book_levels": 1000,
+      "visible_coverage_pct": 336.2556,
+      "update_id": 4872464744,
+      "start": 0.3425,
+      "end": 0.3435,
+      "empty_pct": 0.291971,
+      "end_upside_pct": 2.08024,
+      "ask_usdt_before": 60183.11,
+      "other_gaps": [
+        {
+          "start": 0.3475,
+          "end": 0.3484,
+          "empty_pct": 0.258993,
+          "end_upside_pct": 3.5364,
+          "ask_usdt_before": 61638.98
+        },
+        {
+          "start": 0.353,
+          "end": 0.354,
+          "empty_pct": 0.283286,
+          "end_upside_pct": 5.20059,
+          "ask_usdt_before": 106246.42
+        },
+        {
+          "start": 0.3467,
+          "end": 0.3475,
+          "empty_pct": 0.230747,
+          "end_upside_pct": 3.26895,
+          "ask_usdt_before": 61547.79
+        },
+        {
+          "start": 0.358,
+          "end": 0.3589,
+          "empty_pct": 0.251397,
+          "end_upside_pct": 6.65676,
+          "ask_usdt_before": 112616.74
+        }
+      ]
+    },
+    {
+      "pair": "ERAUSDT",
+      "ask": 0.0731,
+      "spread_pct": 0.137,
+      "book_levels": 1000,
+      "visible_coverage_pct": 3730.3694,
+      "update_id": 595850856,
+      "start": 0.13,
+      "end": 0.1322,
+      "empty_pct": 1.692308,
+      "end_upside_pct": 80.84815,
+      "ask_usdt_before": 364223.89,
+      "other_gaps": [
+        {
+          "start": 0.1182,
+          "end": 0.1198,
+          "empty_pct": 1.353638,
+          "end_upside_pct": 63.88509,
+          "ask_usdt_before": 332654.56
+        },
+        {
+          "start": 0.0981,
+          "end": 0.0988,
+          "empty_pct": 0.713558,
+          "end_upside_pct": 35.15732,
+          "ask_usdt_before": 261930.49
+        },
+        {
+          "start": 0.0768,
+          "end": 0.077,
+          "empty_pct": 0.260417,
+          "end_upside_pct": 5.33516,
+          "ask_usdt_before": 51092.58
+        },
+        {
+          "start": 0.077,
+          "end": 0.0772,
+          "empty_pct": 0.25974,
+          "end_upside_pct": 5.60876,
+          "ask_usdt_before": 52584.75
+        }
+      ]
+    },
+    {
+      "pair": "ARKMUSDT",
+      "ask": 0.1056,
+      "spread_pct": 0.0948,
+      "book_levels": 1000,
+      "visible_coverage_pct": 809.0909,
+      "update_id": 3411965101,
+      "start": 0.1134,
+      "end": 0.1138,
+      "empty_pct": 0.352734,
+      "end_upside_pct": 7.76515,
+      "ask_usdt_before": 86245.84,
+      "other_gaps": [
+        {
+          "start": 0.1093,
+          "end": 0.1096,
+          "empty_pct": 0.274474,
+          "end_upside_pct": 3.78788,
+          "ask_usdt_before": 72323.52
+        },
+        {
+          "start": 0.1116,
+          "end": 0.1119,
+          "empty_pct": 0.268817,
+          "end_upside_pct": 5.96591,
+          "ask_usdt_before": 82742.84
+        },
+        {
+          "start": 0.1121,
+          "end": 0.1124,
+          "empty_pct": 0.267618,
+          "end_upside_pct": 6.43939,
+          "ask_usdt_before": 85304.44
+        },
+        {
+          "start": 0.1605,
+          "end": 0.162,
+          "empty_pct": 0.934579,
+          "end_upside_pct": 53.40909,
+          "ask_usdt_before": 248270.37
+        }
+      ]
+    },
+    {
+      "pair": "SHIBUSDT",
+      "ask": 4.62e-06,
+      "spread_pct": 0.2169,
+      "book_levels": 1000,
+      "visible_coverage_pct": 216.2338,
+      "update_id": 9410059216,
+      "start": 4.62e-06,
+      "end": 4.63e-06,
+      "empty_pct": 0.21645,
+      "end_upside_pct": 0.21645,
+      "ask_usdt_before": 31638.8,
+      "other_gaps": [
+        {
+          "start": 4.63e-06,
+          "end": 4.64e-06,
+          "empty_pct": 0.215983,
+          "end_upside_pct": 0.4329,
+          "ask_usdt_before": 60596.99
+        },
+        {
+          "start": 4.64e-06,
+          "end": 4.65e-06,
+          "empty_pct": 0.215517,
+          "end_upside_pct": 0.64935,
+          "ask_usdt_before": 126634.62
+        },
+        {
+          "start": 4.65e-06,
+          "end": 4.66e-06,
+          "empty_pct": 0.215054,
+          "end_upside_pct": 0.8658,
+          "ask_usdt_before": 162192.76
+        },
+        {
+          "start": 4.66e-06,
+          "end": 4.67e-06,
+          "empty_pct": 0.214592,
+          "end_upside_pct": 1.08225,
+          "ask_usdt_before": 182578.59
+        }
+      ]
+    },
+    {
+      "pair": "WLFIUSDT",
+      "ask": 0.0472,
+      "spread_pct": 0.2123,
+      "book_levels": 1000,
+      "visible_coverage_pct": 304.0254,
+      "update_id": 891875638,
+      "start": 0.0472,
+      "end": 0.0473,
+      "empty_pct": 0.211864,
+      "end_upside_pct": 0.21186,
+      "ask_usdt_before": 34178.93,
+      "other_gaps": [
+        {
+          "start": 0.0473,
+          "end": 0.0474,
+          "empty_pct": 0.211416,
+          "end_upside_pct": 0.42373,
+          "ask_usdt_before": 54055.96
+        },
+        {
+          "start": 0.0474,
+          "end": 0.0475,
+          "empty_pct": 0.21097,
+          "end_upside_pct": 0.63559,
+          "ask_usdt_before": 72474.02
+        },
+        {
+          "start": 0.0475,
+          "end": 0.0476,
+          "empty_pct": 0.210526,
+          "end_upside_pct": 0.84746,
+          "ask_usdt_before": 99621.37
+        },
+        {
+          "start": 0.0476,
+          "end": 0.0477,
+          "empty_pct": 0.210084,
+          "end_upside_pct": 1.05932,
+          "ask_usdt_before": 112352.93
+        }
+      ]
+    },
+    {
+      "pair": "ALICEUSDT",
+      "ask": 0.1237,
+      "spread_pct": 0.1619,
+      "book_levels": 1000,
+      "visible_coverage_pct": 748.8278,
+      "update_id": 2949353205,
+      "start": 0.1256,
+      "end": 0.1259,
+      "empty_pct": 0.238854,
+      "end_upside_pct": 1.7785,
+      "ask_usdt_before": 10919.07,
+      "other_gaps": [
+        {
+          "start": 0.1306,
+          "end": 0.131,
+          "empty_pct": 0.306279,
+          "end_upside_pct": 5.90137,
+          "ask_usdt_before": 21823.13
+        },
+        {
+          "start": 0.1355,
+          "end": 0.136,
+          "empty_pct": 0.369004,
+          "end_upside_pct": 9.94341,
+          "ask_usdt_before": 32086.3
+        },
+        {
+          "start": 0.1312,
+          "end": 0.1316,
+          "empty_pct": 0.304878,
+          "end_upside_pct": 6.38642,
+          "ask_usdt_before": 21852.21
+        },
+        {
+          "start": 0.1316,
+          "end": 0.132,
+          "empty_pct": 0.303951,
+          "end_upside_pct": 6.70978,
+          "ask_usdt_before": 21949.91
+        }
+      ]
+    },
+    {
+      "pair": "ARUSDT",
+      "ask": 3.151,
+      "spread_pct": 0.0635,
+      "book_levels": 1000,
+      "visible_coverage_pct": 139.2891,
+      "update_id": 4539970953,
+      "start": 3.34,
+      "end": 3.35,
+      "empty_pct": 0.299401,
+      "end_upside_pct": 6.31546,
+      "ask_usdt_before": 93471.58,
+      "other_gaps": [
+        {
+          "start": 3.32,
+          "end": 3.329,
+          "empty_pct": 0.271084,
+          "end_upside_pct": 5.649,
+          "ask_usdt_before": 91279.97
+        },
+        {
+          "start": 3.4,
+          "end": 3.41,
+          "empty_pct": 0.294118,
+          "end_upside_pct": 8.21961,
+          "ask_usdt_before": 104265.08
+        },
+        {
+          "start": 3.25,
+          "end": 3.257,
+          "empty_pct": 0.215385,
+          "end_upside_pct": 3.36401,
+          "ask_usdt_before": 67600.06
+        },
+        {
+          "start": 3.263,
+          "end": 3.27,
+          "empty_pct": 0.214527,
+          "end_upside_pct": 3.77658,
+          "ask_usdt_before": 68141.59
+        }
+      ]
+    },
+    {
+      "pair": "PEPEUSDT",
+      "ask": 5.05e-06,
+      "spread_pct": 0.1984,
+      "book_levels": 1000,
+      "visible_coverage_pct": 197.8218,
+      "update_id": 8895617978,
+      "start": 5.05e-06,
+      "end": 5.06e-06,
+      "empty_pct": 0.19802,
+      "end_upside_pct": 0.19802,
+      "ask_usdt_before": 85593.36,
+      "other_gaps": [
+        {
+          "start": 5.06e-06,
+          "end": 5.07e-06,
+          "empty_pct": 0.197628,
+          "end_upside_pct": 0.39604,
+          "ask_usdt_before": 178590.74
+        },
+        {
+          "start": 5.07e-06,
+          "end": 5.08e-06,
+          "empty_pct": 0.197239,
+          "end_upside_pct": 0.59406,
+          "ask_usdt_before": 270413.69
+        },
+        {
+          "start": 5.08e-06,
+          "end": 5.09e-06,
+          "empty_pct": 0.19685,
+          "end_upside_pct": 0.79208,
+          "ask_usdt_before": 419588.9
+        },
+        {
+          "start": 5.09e-06,
+          "end": 5.1e-06,
+          "empty_pct": 0.196464,
+          "end_upside_pct": 0.9901,
+          "ask_usdt_before": 503621.54
+        }
+      ]
+    },
+    {
+      "pair": "TRBUSDT",
+      "ask": 16.16,
+      "spread_pct": 0.1239,
+      "book_levels": 1000,
+      "visible_coverage_pct": 176.9183,
+      "update_id": 6422909885,
+      "start": 16.61,
+      "end": 16.65,
+      "empty_pct": 0.240819,
+      "end_upside_pct": 3.03218,
+      "ask_usdt_before": 312403.12,
+      "other_gaps": [
+        {
+          "start": 16.7,
+          "end": 16.74,
+          "empty_pct": 0.239521,
+          "end_upside_pct": 3.58911,
+          "ask_usdt_before": 313314.39
+        },
+        {
+          "start": 16.86,
+          "end": 16.9,
+          "empty_pct": 0.237248,
+          "end_upside_pct": 4.57921,
+          "ask_usdt_before": 314302.26
+        },
+        {
+          "start": 16.46,
+          "end": 16.49,
+          "empty_pct": 0.18226,
+          "end_upside_pct": 2.04208,
+          "ask_usdt_before": 38213.98
+        },
+        {
+          "start": 18.15,
+          "end": 18.2,
+          "empty_pct": 0.275482,
+          "end_upside_pct": 12.62376,
+          "ask_usdt_before": 549677.26
+        }
+      ]
+    },
+    {
+      "pair": "ZROUSDT",
+      "ask": 1.623,
+      "spread_pct": 0.1234,
+      "book_levels": 1000,
+      "visible_coverage_pct": 157.9174,
+      "update_id": 2981618226,
+      "start": 1.735,
+      "end": 1.74,
+      "empty_pct": 0.288184,
+      "end_upside_pct": 7.20887,
+      "ask_usdt_before": 365109.47,
+      "other_gaps": [
+        {
+          "start": 1.746,
+          "end": 1.75,
+          "empty_pct": 0.229095,
+          "end_upside_pct": 7.82502,
+          "ask_usdt_before": 365339.02
+        },
+        {
+          "start": 1.686,
+          "end": 1.689,
+          "empty_pct": 0.177936,
+          "end_upside_pct": 4.06654,
+          "ask_usdt_before": 338686.44
+        },
+        {
+          "start": 1.695,
+          "end": 1.698,
+          "empty_pct": 0.176991,
+          "end_upside_pct": 4.62107,
+          "ask_usdt_before": 342341.52
+        },
+        {
+          "start": 1.701,
+          "end": 1.704,
+          "empty_pct": 0.176367,
+          "end_upside_pct": 4.99076,
+          "ask_usdt_before": 350174.48
+        }
+      ]
+    },
+    {
+      "pair": "TIAUSDT",
+      "ask": 0.433,
+      "spread_pct": 0.0462,
+      "book_levels": 1000,
+      "visible_coverage_pct": 117.321,
+      "update_id": 6457214236,
+      "start": 0.4507,
+      "end": 0.4518,
+      "empty_pct": 0.244065,
+      "end_upside_pct": 4.3418,
+      "ask_usdt_before": 282700.18,
+      "other_gaps": [
+        {
+          "start": 0.4536,
+          "end": 0.4546,
+          "empty_pct": 0.220459,
+          "end_upside_pct": 4.98845,
+          "ask_usdt_before": 282901.91
+        },
+        {
+          "start": 0.4484,
+          "end": 0.4493,
+          "empty_pct": 0.200714,
+          "end_upside_pct": 3.76443,
+          "ask_usdt_before": 281760.1
+        },
+        {
+          "start": 0.4615,
+          "end": 0.4626,
+          "empty_pct": 0.238353,
+          "end_upside_pct": 6.83603,
+          "ask_usdt_before": 285757.75
+        },
+        {
+          "start": 0.5337,
+          "end": 0.5361,
+          "empty_pct": 0.449691,
+          "end_upside_pct": 23.81062,
+          "ask_usdt_before": 398511.91
+        }
+      ]
+    },
+    {
+      "pair": "XPLUSDT",
+      "ask": 0.05805,
+      "spread_pct": 0.0172,
+      "book_levels": 1000,
+      "visible_coverage_pct": 58.4152,
+      "update_id": 2193833046,
+      "start": 0.06412,
+      "end": 0.06433,
+      "empty_pct": 0.327511,
+      "end_upside_pct": 10.81826,
+      "ask_usdt_before": 309289.15,
+      "other_gaps": [
+        {
+          "start": 0.0615,
+          "end": 0.06166,
+          "empty_pct": 0.260163,
+          "end_upside_pct": 6.21878,
+          "ask_usdt_before": 282761.42
+        },
+        {
+          "start": 0.06037,
+          "end": 0.06048,
+          "empty_pct": 0.18221,
+          "end_upside_pct": 4.18605,
+          "ask_usdt_before": 275794.52
+        },
+        {
+          "start": 0.06513,
+          "end": 0.0653,
+          "empty_pct": 0.261016,
+          "end_upside_pct": 12.48923,
+          "ask_usdt_before": 314337.45
+        },
+        {
+          "start": 0.0607,
+          "end": 0.0608,
+          "empty_pct": 0.164745,
+          "end_upside_pct": 4.7373,
+          "ask_usdt_before": 276329.71
+        }
+      ]
+    },
+    {
+      "pair": "PENDLEUSDT",
+      "ask": 1.68,
+      "spread_pct": 0.1192,
+      "book_levels": 1000,
+      "visible_coverage_pct": 100.1786,
+      "update_id": 4310653072,
+      "start": 1.705,
+      "end": 1.708,
+      "empty_pct": 0.175953,
+      "end_upside_pct": 1.66667,
+      "ask_usdt_before": 269310.89,
+      "other_gaps": [
+        {
+          "start": 2.006,
+          "end": 2.014,
+          "empty_pct": 0.398804,
+          "end_upside_pct": 19.88095,
+          "ask_usdt_before": 491149.2
+        },
+        {
+          "start": 1.713,
+          "end": 1.716,
+          "empty_pct": 0.175131,
+          "end_upside_pct": 2.14286,
+          "ask_usdt_before": 390683.11
+        },
+        {
+          "start": 1.786,
+          "end": 1.79,
+          "empty_pct": 0.223964,
+          "end_upside_pct": 6.54762,
+          "ask_usdt_before": 401175.37
+        },
+        {
+          "start": 1.724,
+          "end": 1.727,
+          "empty_pct": 0.174014,
+          "end_upside_pct": 2.79762,
+          "ask_usdt_before": 392282.62
+        }
+      ]
+    },
+    {
+      "pair": "APTUSDT",
+      "ask": 0.6153,
+      "spread_pct": 0.0163,
+      "book_levels": 1000,
+      "visible_coverage_pct": 70.8272,
+      "update_id": 7908069955,
+      "start": 0.6417,
+      "end": 0.643,
+      "empty_pct": 0.202587,
+      "end_upside_pct": 4.50187,
+      "ask_usdt_before": 82249.96,
+      "other_gaps": [
+        {
+          "start": 0.6782,
+          "end": 0.68,
+          "empty_pct": 0.265408,
+          "end_upside_pct": 10.5152,
+          "ask_usdt_before": 126994.66
+        },
+        {
+          "start": 0.6304,
+          "end": 0.6313,
+          "empty_pct": 0.142766,
+          "end_upside_pct": 2.60036,
+          "ask_usdt_before": 76044.01
+        },
+        {
+          "start": 0.6565,
+          "end": 0.6576,
+          "empty_pct": 0.167555,
+          "end_upside_pct": 6.8747,
+          "ask_usdt_before": 105748.08
+        },
+        {
+          "start": 0.6833,
+          "end": 0.6846,
+          "empty_pct": 0.190253,
+          "end_upside_pct": 11.2628,
+          "ask_usdt_before": 131741.75
+        }
+      ]
+    },
+    {
+      "pair": "USDCUSDT",
+      "ask": 1.0012,
+      "spread_pct": 0.001,
+      "book_levels": 579,
+      "visible_coverage_pct": 19.9461,
+      "update_id": 2621721756,
+      "start": 1.082,
+      "end": 1.0847,
+      "empty_pct": 0.249538,
+      "end_upside_pct": 8.33999,
+      "ask_usdt_before": 12964862.45,
+      "other_gaps": [
+        {
+          "start": 1.0955,
+          "end": 1.0983,
+          "empty_pct": 0.255591,
+          "end_upside_pct": 9.69836,
+          "ask_usdt_before": 12976549.38
+        },
+        {
+          "start": 1.0928,
+          "end": 1.0955,
+          "empty_pct": 0.247072,
+          "end_upside_pct": 9.4187,
+          "ask_usdt_before": 12976541.71
+        },
+        {
+          "start": 1.1092,
+          "end": 1.112,
+          "empty_pct": 0.252434,
+          "end_upside_pct": 11.06672,
+          "ask_usdt_before": 14672218.55
+        },
+        {
+          "start": 1.1065,
+          "end": 1.1092,
+          "empty_pct": 0.244013,
+          "end_upside_pct": 10.78706,
+          "ask_usdt_before": 14672210.79
+        }
+      ]
+    },
+    {
+      "pair": "LUNCUSDT",
+      "ask": 4.141e-05,
+      "spread_pct": 0.0242,
+      "book_levels": 1000,
+      "visible_coverage_pct": 58.2951,
+      "update_id": 4545425505,
+      "start": 4.291e-05,
+      "end": 4.299e-05,
+      "empty_pct": 0.186437,
+      "end_upside_pct": 3.8155,
+      "ask_usdt_before": 202478.88,
+      "other_gaps": [
+        {
+          "start": 4.47e-05,
+          "end": 4.48e-05,
+          "empty_pct": 0.223714,
+          "end_upside_pct": 8.18643,
+          "ask_usdt_before": 238171.7
+        },
+        {
+          "start": 4.352e-05,
+          "end": 4.36e-05,
+          "empty_pct": 0.183824,
+          "end_upside_pct": 5.28858,
+          "ask_usdt_before": 216694.82
+        },
+        {
+          "start": 4.212e-05,
+          "end": 4.218e-05,
+          "empty_pct": 0.14245,
+          "end_upside_pct": 1.85945,
+          "ask_usdt_before": 98894.57
+        },
+        {
+          "start": 4.451e-05,
+          "end": 4.46e-05,
+          "empty_pct": 0.202202,
+          "end_upside_pct": 7.70345,
+          "ask_usdt_before": 235794.04
+        }
+      ]
+    },
+    {
+      "pair": "OPUSDT",
+      "ask": 0.1072,
+      "spread_pct": 0.0934,
+      "book_levels": 1000,
+      "visible_coverage_pct": 146.2687,
+      "update_id": 5850768571,
+      "start": 0.1108,
+      "end": 0.111,
+      "empty_pct": 0.180505,
+      "end_upside_pct": 3.54478,
+      "ask_usdt_before": 363121.04,
+      "other_gaps": [
+        {
+          "start": 0.1111,
+          "end": 0.1113,
+          "empty_pct": 0.180018,
+          "end_upside_pct": 3.82463,
+          "ask_usdt_before": 363297.85
+        },
+        {
+          "start": 0.1114,
+          "end": 0.1116,
+          "empty_pct": 0.179533,
+          "end_upside_pct": 4.10448,
+          "ask_usdt_before": 368619.12
+        },
+        {
+          "start": 0.1122,
+          "end": 0.1124,
+          "empty_pct": 0.178253,
+          "end_upside_pct": 4.85075,
+          "ask_usdt_before": 372337.92
+        },
+        {
+          "start": 0.1153,
+          "end": 0.1155,
+          "empty_pct": 0.173461,
+          "end_upside_pct": 7.74254,
+          "ask_usdt_before": 396361.23
+        }
+      ]
+    },
+    {
+      "pair": "SNDKBUSDT",
+      "ask": 897.16,
+      "spread_pct": 0.01,
+      "book_levels": 1000,
+      "visible_coverage_pct": 32.0222,
+      "update_id": 1017584048,
+      "start": 922.11,
+      "end": 923.7,
+      "empty_pct": 0.172431,
+      "end_upside_pct": 2.95822,
+      "ask_usdt_before": 436353.73,
+      "other_gaps": [
+        {
+          "start": 930.0,
+          "end": 931.51,
+          "empty_pct": 0.162366,
+          "end_upside_pct": 3.82875,
+          "ask_usdt_before": 467715.06
+        },
+        {
+          "start": 958.36,
+          "end": 960.0,
+          "empty_pct": 0.171126,
+          "end_upside_pct": 7.00432,
+          "ask_usdt_before": 508836.8
+        },
+        {
+          "start": 951.0,
+          "end": 952.53,
+          "empty_pct": 0.160883,
+          "end_upside_pct": 6.1717,
+          "ask_usdt_before": 503845.67
+        },
+        {
+          "start": 937.29,
+          "end": 938.62,
+          "empty_pct": 0.141898,
+          "end_upside_pct": 4.62125,
+          "ask_usdt_before": 474221.02
+        }
+      ]
+    },
+    {
+      "pair": "RENDERUSDT",
+      "ask": 1.569,
+      "spread_pct": 0.0638,
+      "book_levels": 1000,
+      "visible_coverage_pct": 82.9191,
+      "update_id": 2705352624,
+      "start": 1.633,
+      "end": 1.636,
+      "empty_pct": 0.183711,
+      "end_upside_pct": 4.27024,
+      "ask_usdt_before": 303952.49,
+      "other_gaps": [
+        {
+          "start": 1.645,
+          "end": 1.648,
+          "empty_pct": 0.182371,
+          "end_upside_pct": 5.03505,
+          "ask_usdt_before": 308766.78
+        },
+        {
+          "start": 1.601,
+          "end": 1.603,
+          "empty_pct": 0.124922,
+          "end_upside_pct": 2.16699,
+          "ask_usdt_before": 291852.98
+        },
+        {
+          "start": 1.616,
+          "end": 1.618,
+          "empty_pct": 0.123762,
+          "end_upside_pct": 3.12301,
+          "ask_usdt_before": 302589.17
+        },
+        {
+          "start": 1.62,
+          "end": 1.622,
+          "empty_pct": 0.123457,
+          "end_upside_pct": 3.37795,
+          "ask_usdt_before": 302966.43
+        }
+      ]
+    },
+    {
+      "pair": "ICPUSDT",
+      "ask": 2.463,
+      "spread_pct": 0.0406,
+      "book_levels": 1000,
+      "visible_coverage_pct": 58.3029,
+      "update_id": 6548594698,
+      "start": 2.6,
+      "end": 2.605,
+      "empty_pct": 0.192308,
+      "end_upside_pct": 5.76533,
+      "ask_usdt_before": 294065.29,
+      "other_gaps": [
+        {
+          "start": 2.526,
+          "end": 2.53,
+          "empty_pct": 0.158353,
+          "end_upside_pct": 2.72026,
+          "ask_usdt_before": 265300.92
+        },
+        {
+          "start": 2.502,
+          "end": 2.505,
+          "empty_pct": 0.119904,
+          "end_upside_pct": 1.70524,
+          "ask_usdt_before": 197974.84
+        },
+        {
+          "start": 2.545,
+          "end": 2.548,
+          "empty_pct": 0.117878,
+          "end_upside_pct": 3.45108,
+          "ask_usdt_before": 271407.33
+        },
+        {
+          "start": 2.552,
+          "end": 2.555,
+          "empty_pct": 0.117555,
+          "end_upside_pct": 3.73528,
+          "ask_usdt_before": 274760.89
+        }
+      ]
+    },
+    {
+      "pair": "POLUSDT",
+      "ask": 0.09364,
+      "spread_pct": 0.0107,
+      "book_levels": 1000,
+      "visible_coverage_pct": 46.1235,
+      "update_id": 2197160867,
+      "start": 0.09671,
+      "end": 0.09687,
+      "empty_pct": 0.165443,
+      "end_upside_pct": 3.44938,
+      "ask_usdt_before": 161287.82,
+      "other_gaps": [
+        {
+          "start": 0.09752,
+          "end": 0.09768,
+          "empty_pct": 0.164069,
+          "end_upside_pct": 4.3144,
+          "ask_usdt_before": 172038.64
+        },
+        {
+          "start": 0.09526,
+          "end": 0.09539,
+          "empty_pct": 0.136469,
+          "end_upside_pct": 1.86886,
+          "ask_usdt_before": 111014.97
+        },
+        {
+          "start": 0.09652,
+          "end": 0.09665,
+          "empty_pct": 0.134687,
+          "end_upside_pct": 3.21444,
+          "ask_usdt_before": 161195.81
+        },
+        {
+          "start": 0.09612,
+          "end": 0.09623,
+          "empty_pct": 0.11444,
+          "end_upside_pct": 2.76591,
+          "ask_usdt_before": 159343.17
+        }
+      ]
+    },
+    {
+      "pair": "PENGUUSDT",
+      "ask": 0.006727,
+      "spread_pct": 0.0149,
+      "book_levels": 1000,
+      "visible_coverage_pct": 37.6988,
+      "update_id": 6572809869,
+      "start": 0.007037,
+      "end": 0.007048,
+      "empty_pct": 0.156317,
+      "end_upside_pct": 4.77182,
+      "ask_usdt_before": 446693.32,
+      "other_gaps": [
+        {
+          "start": 0.00702,
+          "end": 0.00703,
+          "empty_pct": 0.14245,
+          "end_upside_pct": 4.50424,
+          "ask_usdt_before": 446682.84
+        },
+        {
+          "start": 0.00699,
+          "end": 0.006999,
+          "empty_pct": 0.128755,
+          "end_upside_pct": 4.04341,
+          "ask_usdt_before": 443463.77
+        },
+        {
+          "start": 0.007091,
+          "end": 0.0071,
+          "empty_pct": 0.126921,
+          "end_upside_pct": 5.54482,
+          "ask_usdt_before": 449251.3
+        },
+        {
+          "start": 0.006942,
+          "end": 0.006949,
+          "empty_pct": 0.100835,
+          "end_upside_pct": 3.30013,
+          "ask_usdt_before": 437794.12
+        }
+      ]
+    },
+    {
+      "pair": "FILUSDT",
+      "ask": 0.8114,
+      "spread_pct": 0.0123,
+      "book_levels": 1000,
+      "visible_coverage_pct": 33.7441,
+      "update_id": 10023685147,
+      "start": 0.8304,
+      "end": 0.8315,
+      "empty_pct": 0.132466,
+      "end_upside_pct": 2.4772,
+      "ask_usdt_before": 177161.18,
+      "other_gaps": [
+        {
+          "start": 0.85,
+          "end": 0.8513,
+          "empty_pct": 0.152941,
+          "end_upside_pct": 4.91743,
+          "ask_usdt_before": 223312.58
+        },
+        {
+          "start": 0.834,
+          "end": 0.835,
+          "empty_pct": 0.119904,
+          "end_upside_pct": 2.90855,
+          "ask_usdt_before": 179756.32
+        },
+        {
+          "start": 0.824,
+          "end": 0.8249,
+          "empty_pct": 0.109223,
+          "end_upside_pct": 1.66379,
+          "ask_usdt_before": 165874.6
+        },
+        {
+          "start": 0.828,
+          "end": 0.8289,
+          "empty_pct": 0.108696,
+          "end_upside_pct": 2.15677,
+          "ask_usdt_before": 168479.84
+        }
+      ]
+    },
+    {
+      "pair": "WLDUSDT",
+      "ask": 0.3491,
+      "spread_pct": 0.0287,
+      "book_levels": 1000,
+      "visible_coverage_pct": 40.0172,
+      "update_id": 7663229166,
+      "start": 0.3622,
+      "end": 0.3627,
+      "empty_pct": 0.138045,
+      "end_upside_pct": 3.89573,
+      "ask_usdt_before": 405287.31,
+      "other_gaps": [
+        {
+          "start": 0.3611,
+          "end": 0.3615,
+          "empty_pct": 0.110773,
+          "end_upside_pct": 3.55199,
+          "ask_usdt_before": 361759.61
+        },
+        {
+          "start": 0.3577,
+          "end": 0.358,
+          "empty_pct": 0.083869,
+          "end_upside_pct": 2.54941,
+          "ask_usdt_before": 346572.99
+        },
+        {
+          "start": 0.3597,
+          "end": 0.36,
+          "empty_pct": 0.083403,
+          "end_upside_pct": 3.12231,
+          "ask_usdt_before": 348693.48
+        },
+        {
+          "start": 0.39,
+          "end": 0.3905,
+          "empty_pct": 0.128205,
+          "end_upside_pct": 11.85907,
+          "ask_usdt_before": 552086.58
+        }
+      ]
+    },
+    {
+      "pair": "FLOKIUSDT",
+      "ask": 2.191e-05,
+      "spread_pct": 0.0457,
+      "book_levels": 1000,
+      "visible_coverage_pct": 66.6362,
+      "update_id": 14059198629,
+      "start": 2.275e-05,
+      "end": 2.278e-05,
+      "empty_pct": 0.131868,
+      "end_upside_pct": 3.97079,
+      "ask_usdt_before": 65174.75,
+      "other_gaps": [
+        {
+          "start": 2.213e-05,
+          "end": 2.215e-05,
+          "empty_pct": 0.090375,
+          "end_upside_pct": 1.09539,
+          "ask_usdt_before": 51263.9
+        },
+        {
+          "start": 2.22e-05,
+          "end": 2.222e-05,
+          "empty_pct": 0.09009,
+          "end_upside_pct": 1.41488,
+          "ask_usdt_before": 56840.19
+        },
+        {
+          "start": 2.225e-05,
+          "end": 2.227e-05,
+          "empty_pct": 0.089888,
+          "end_upside_pct": 1.64309,
+          "ask_usdt_before": 57257.58
+        },
+        {
+          "start": 2.23e-05,
+          "end": 2.232e-05,
+          "empty_pct": 0.089686,
+          "end_upside_pct": 1.87129,
+          "ask_usdt_before": 58082.75
+        }
+      ]
+    },
+    {
+      "pair": "RWUSDUSDT",
+      "ask": 0.9998,
+      "spread_pct": 0.01,
+      "book_levels": 61,
+      "visible_coverage_pct": 2.1504,
+      "update_id": 170460,
+      "start": 1.0114,
+      "end": 1.0125,
+      "empty_pct": 0.10876,
+      "end_upside_pct": 1.27025,
+      "ask_usdt_before": 7547477.02,
+      "other_gaps": [
+        {
+          "start": 1.0134,
+          "end": 1.0144,
+          "empty_pct": 0.098678,
+          "end_upside_pct": 1.46029,
+          "ask_usdt_before": 7727232.17
+        },
+        {
+          "start": 1.0144,
+          "end": 1.0154,
+          "empty_pct": 0.09858,
+          "end_upside_pct": 1.56031,
+          "ask_usdt_before": 7815020.38
+        },
+        {
+          "start": 1.0164,
+          "end": 1.0174,
+          "empty_pct": 0.098386,
+          "end_upside_pct": 1.76035,
+          "ask_usdt_before": 7993786.1
+        },
+        {
+          "start": 1.0125,
+          "end": 1.0134,
+          "empty_pct": 0.088889,
+          "end_upside_pct": 1.36027,
+          "ask_usdt_before": 7630377.48
+        }
+      ]
+    },
+    {
+      "pair": "TRUMPUSDT",
+      "ask": 1.221,
+      "spread_pct": 0.082,
+      "book_levels": 1000,
+      "visible_coverage_pct": 96.4783,
+      "update_id": 3724775934,
+      "start": 1.31,
+      "end": 1.312,
+      "empty_pct": 0.152672,
+      "end_upside_pct": 7.45291,
+      "ask_usdt_before": 345415.18,
+      "other_gaps": [
+        {
+          "start": 1.323,
+          "end": 1.325,
+          "empty_pct": 0.151172,
+          "end_upside_pct": 8.51761,
+          "ask_usdt_before": 346278.52
+        },
+        {
+          "start": 1.331,
+          "end": 1.333,
+          "empty_pct": 0.150263,
+          "end_upside_pct": 9.17281,
+          "ask_usdt_before": 350118.67
+        },
+        {
+          "start": 1.34,
+          "end": 1.342,
+          "empty_pct": 0.149254,
+          "end_upside_pct": 9.90991,
+          "ask_usdt_before": 352914.3
+        },
+        {
+          "start": 1.221,
+          "end": 1.222,
+          "empty_pct": 0.0819,
+          "end_upside_pct": 0.0819,
+          "ask_usdt_before": 1909.81
+        }
+      ]
+    },
+    {
+      "pair": "INJUSDT",
+      "ask": 8.162,
+      "spread_pct": 0.0123,
+      "book_levels": 1000,
+      "visible_coverage_pct": 34.3176,
+      "update_id": 5997395873,
+      "start": 10.567,
+      "end": 10.6,
+      "empty_pct": 0.312293,
+      "end_upside_pct": 29.87013,
+      "ask_usdt_before": 2205649.53,
+      "other_gaps": [
+        {
+          "start": 9.031,
+          "end": 9.044,
+          "empty_pct": 0.143949,
+          "end_upside_pct": 10.80617,
+          "ask_usdt_before": 727314.79
+        },
+        {
+          "start": 10.61,
+          "end": 10.636,
+          "empty_pct": 0.245052,
+          "end_upside_pct": 30.3112,
+          "ask_usdt_before": 2207022.25
+        },
+        {
+          "start": 10.38,
+          "end": 10.4,
+          "empty_pct": 0.192678,
+          "end_upside_pct": 27.41975,
+          "ask_usdt_before": 2195134.31
+        },
+        {
+          "start": 10.412,
+          "end": 10.43,
+          "empty_pct": 0.172877,
+          "end_upside_pct": 27.78731,
+          "ask_usdt_before": 2195541.76
+        }
+      ]
+    },
+    {
+      "pair": "ARBUSDT",
+      "ask": 0.1687,
+      "spread_pct": 0.0593,
+      "book_levels": 1000,
+      "visible_coverage_pct": 64.9674,
+      "update_id": 6855037349,
+      "start": 0.1746,
+      "end": 0.1748,
+      "empty_pct": 0.114548,
+      "end_upside_pct": 3.61589,
+      "ask_usdt_before": 369076.65,
+      "other_gaps": [
+        {
+          "start": 0.1767,
+          "end": 0.1769,
+          "empty_pct": 0.113186,
+          "end_upside_pct": 4.8607,
+          "ask_usdt_before": 385511.79
+        },
+        {
+          "start": 0.178,
+          "end": 0.1782,
+          "empty_pct": 0.11236,
+          "end_upside_pct": 5.6313,
+          "ask_usdt_before": 403252.74
+        },
+        {
+          "start": 0.179,
+          "end": 0.1792,
+          "empty_pct": 0.111732,
+          "end_upside_pct": 6.22407,
+          "ask_usdt_before": 409351.17
+        },
+        {
+          "start": 0.1796,
+          "end": 0.1798,
+          "empty_pct": 0.111359,
+          "end_upside_pct": 6.57973,
+          "ask_usdt_before": 410294.34
+        }
+      ]
+    },
+    {
+      "pair": "NVDABUSDT",
+      "ask": 190.38,
+      "spread_pct": 0.0053,
+      "book_levels": 1000,
+      "visible_coverage_pct": 15.0804,
+      "update_id": 178236043,
+      "start": 194.21,
+      "end": 194.41,
+      "empty_pct": 0.102981,
+      "end_upside_pct": 2.11682,
+      "ask_usdt_before": 226683.47,
+      "other_gaps": [
+        {
+          "start": 196.69,
+          "end": 196.89,
+          "empty_pct": 0.101683,
+          "end_upside_pct": 3.41948,
+          "ask_usdt_before": 236332.76
+        },
+        {
+          "start": 193.52,
+          "end": 193.69,
+          "empty_pct": 0.087846,
+          "end_upside_pct": 1.73863,
+          "ask_usdt_before": 226418.49
+        },
+        {
+          "start": 192.64,
+          "end": 192.78,
+          "empty_pct": 0.072674,
+          "end_upside_pct": 1.26064,
+          "ask_usdt_before": 225500.69
+        },
+        {
+          "start": 198.09,
+          "end": 198.26,
+          "empty_pct": 0.08582,
+          "end_upside_pct": 4.13909,
+          "ask_usdt_before": 248996.8
+        }
+      ]
+    },
+    {
+      "pair": "ONDOUSDT",
+      "ask": 0.3779,
+      "spread_pct": 0.0265,
+      "book_levels": 1000,
+      "visible_coverage_pct": 38.9256,
+      "update_id": 2115822318,
+      "start": 0.3892,
+      "end": 0.3896,
+      "empty_pct": 0.102775,
+      "end_upside_pct": 3.09606,
+      "ask_usdt_before": 197917.99,
+      "other_gaps": [
+        {
+          "start": 0.3945,
+          "end": 0.3949,
+          "empty_pct": 0.101394,
+          "end_upside_pct": 4.49854,
+          "ask_usdt_before": 250490.87
+        },
+        {
+          "start": 0.3816,
+          "end": 0.3819,
+          "empty_pct": 0.078616,
+          "end_upside_pct": 1.05848,
+          "ask_usdt_before": 165622.8
+        },
+        {
+          "start": 0.3844,
+          "end": 0.3847,
+          "empty_pct": 0.078044,
+          "end_upside_pct": 1.79942,
+          "ask_usdt_before": 174368.76
+        },
+        {
+          "start": 0.4,
+          "end": 0.4004,
+          "empty_pct": 0.1,
+          "end_upside_pct": 5.95396,
+          "ask_usdt_before": 302127.3
+        }
+      ]
+    },
+    {
+      "pair": "\u5e01\u5b89\u4eba\u751fUSDT",
+      "ask": 0.4953,
+      "spread_pct": 0.0606,
+      "book_levels": 1000,
+      "visible_coverage_pct": 25.7016,
+      "update_id": 491240962,
+      "start": 0.5155,
+      "end": 0.516,
+      "empty_pct": 0.096993,
+      "end_upside_pct": 4.17929,
+      "ask_usdt_before": 54051.16,
+      "other_gaps": [
+        {
+          "start": 0.5111,
+          "end": 0.5114,
+          "empty_pct": 0.058697,
+          "end_upside_pct": 3.25056,
+          "ask_usdt_before": 46920.82
+        },
+        {
+          "start": 0.5133,
+          "end": 0.5136,
+          "empty_pct": 0.058445,
+          "end_upside_pct": 3.69473,
+          "ask_usdt_before": 47674.56
+        },
+        {
+          "start": 0.5175,
+          "end": 0.5178,
+          "empty_pct": 0.057971,
+          "end_upside_pct": 4.5427,
+          "ask_usdt_before": 55296.44
+        },
+        {
+          "start": 0.523,
+          "end": 0.5233,
+          "empty_pct": 0.057361,
+          "end_upside_pct": 5.65314,
+          "ask_usdt_before": 107587.03
+        }
+      ]
+    },
+    {
+      "pair": "TAOUSDT",
+      "ask": 224.8,
+      "spread_pct": 0.0445,
+      "book_levels": 1000,
+      "visible_coverage_pct": 44.8399,
+      "update_id": 4820314905,
+      "start": 232.6,
+      "end": 232.8,
+      "empty_pct": 0.085985,
+      "end_upside_pct": 3.55872,
+      "ask_usdt_before": 559434.24,
+      "other_gaps": [
+        {
+          "start": 233.2,
+          "end": 233.4,
+          "empty_pct": 0.085763,
+          "end_upside_pct": 3.82562,
+          "ask_usdt_before": 592328.09
+        },
+        {
+          "start": 253.0,
+          "end": 253.3,
+          "empty_pct": 0.118577,
+          "end_upside_pct": 12.67794,
+          "ask_usdt_before": 1314077.82
+        },
+        {
+          "start": 256.7,
+          "end": 256.9,
+          "empty_pct": 0.077912,
+          "end_upside_pct": 14.27936,
+          "ask_usdt_before": 1358658.5
+        },
+        {
+          "start": 270.6,
+          "end": 270.8,
+          "empty_pct": 0.07391,
+          "end_upside_pct": 20.46263,
+          "ask_usdt_before": 2410795.07
+        }
+      ]
+    },
+    {
+      "pair": "AAVEUSDT",
+      "ask": 129.55,
+      "spread_pct": 0.0077,
+      "book_levels": 1000,
+      "visible_coverage_pct": 21.9606,
+      "update_id": 10574736593,
+      "start": 144.6,
+      "end": 144.78,
+      "empty_pct": 0.124481,
+      "end_upside_pct": 11.75608,
+      "ask_usdt_before": 587516.84,
+      "other_gaps": [
+        {
+          "start": 133.34,
+          "end": 133.43,
+          "empty_pct": 0.067497,
+          "end_upside_pct": 2.99498,
+          "ask_usdt_before": 301029.7
+        },
+        {
+          "start": 131.76,
+          "end": 131.84,
+          "empty_pct": 0.060716,
+          "end_upside_pct": 1.76766,
+          "ask_usdt_before": 161446.37
+        },
+        {
+          "start": 132.07,
+          "end": 132.15,
+          "empty_pct": 0.060574,
+          "end_upside_pct": 2.00695,
+          "ask_usdt_before": 164768.23
+        },
+        {
+          "start": 138.51,
+          "end": 138.62,
+          "empty_pct": 0.079417,
+          "end_upside_pct": 7.00116,
+          "ask_usdt_before": 503737.61
+        }
+      ]
+    },
+    {
+      "pair": "ENAUSDT",
+      "ask": 0.1658,
+      "spread_pct": 0.0604,
+      "book_levels": 1000,
+      "visible_coverage_pct": 63.0277,
+      "update_id": 6284632498,
+      "start": 0.1811,
+      "end": 0.1813,
+      "empty_pct": 0.110436,
+      "end_upside_pct": 9.34861,
+      "ask_usdt_before": 870617.11,
+      "other_gaps": [
+        {
+          "start": 0.1815,
+          "end": 0.1817,
+          "empty_pct": 0.110193,
+          "end_upside_pct": 9.58987,
+          "ask_usdt_before": 871356.45
+        },
+        {
+          "start": 0.1658,
+          "end": 0.1659,
+          "empty_pct": 0.060314,
+          "end_upside_pct": 0.06031,
+          "ask_usdt_before": 12943.34
+        },
+        {
+          "start": 0.1659,
+          "end": 0.166,
+          "empty_pct": 0.060277,
+          "end_upside_pct": 0.12063,
+          "ask_usdt_before": 37374.74
+        },
+        {
+          "start": 0.166,
+          "end": 0.1661,
+          "empty_pct": 0.060241,
+          "end_upside_pct": 0.18094,
+          "ask_usdt_before": 96647.72
+        }
+      ]
+    },
+    {
+      "pair": "ASTERUSDT",
+      "ask": 0.6884,
+      "spread_pct": 0.0145,
+      "book_levels": 1000,
+      "visible_coverage_pct": 25.6682,
+      "update_id": 967677563,
+      "start": 0.7244,
+      "end": 0.725,
+      "empty_pct": 0.082827,
+      "end_upside_pct": 5.31668,
+      "ask_usdt_before": 537961.15,
+      "other_gaps": [
+        {
+          "start": 0.731,
+          "end": 0.7315,
+          "empty_pct": 0.068399,
+          "end_upside_pct": 6.26089,
+          "ask_usdt_before": 580232.09
+        },
+        {
+          "start": 0.8221,
+          "end": 0.823,
+          "empty_pct": 0.109476,
+          "end_upside_pct": 19.55259,
+          "ask_usdt_before": 1187617.11
+        },
+        {
+          "start": 0.844,
+          "end": 0.845,
+          "empty_pct": 0.118483,
+          "end_upside_pct": 22.7484,
+          "ask_usdt_before": 1409749.06
+        },
+        {
+          "start": 0.809,
+          "end": 0.8098,
+          "empty_pct": 0.098888,
+          "end_upside_pct": 17.6351,
+          "ask_usdt_before": 1116158.0
+        }
+      ]
+    },
+    {
+      "pair": "AVAXUSDT",
+      "ask": 8.393,
+      "spread_pct": 0.0119,
+      "book_levels": 1000,
+      "visible_coverage_pct": 20.0763,
+      "update_id": 10660920765,
+      "start": 9.031,
+      "end": 9.039,
+      "empty_pct": 0.088584,
+      "end_upside_pct": 7.69689,
+      "ask_usdt_before": 464682.76,
+      "other_gaps": [
+        {
+          "start": 9.78,
+          "end": 9.79,
+          "empty_pct": 0.102249,
+          "end_upside_pct": 16.64482,
+          "ask_usdt_before": 687177.84
+        },
+        {
+          "start": 8.831,
+          "end": 8.836,
+          "empty_pct": 0.056619,
+          "end_upside_pct": 5.27821,
+          "ask_usdt_before": 329356.0
+        },
+        {
+          "start": 9.333,
+          "end": 9.34,
+          "empty_pct": 0.075003,
+          "end_upside_pct": 11.28321,
+          "ask_usdt_before": 588046.97
+        },
+        {
+          "start": 8.963,
+          "end": 8.968,
+          "empty_pct": 0.055785,
+          "end_upside_pct": 6.85095,
+          "ask_usdt_before": 364856.96
+        }
+      ]
+    },
+    {
+      "pair": "ADAUSDT",
+      "ask": 0.1866,
+      "spread_pct": 0.0536,
+      "book_levels": 1000,
+      "visible_coverage_pct": 53.537,
+      "update_id": 15999174614,
+      "start": 0.1866,
+      "end": 0.1867,
+      "empty_pct": 0.053591,
+      "end_upside_pct": 0.05359,
+      "ask_usdt_before": 26415.23,
+      "other_gaps": [
+        {
+          "start": 0.1867,
+          "end": 0.1868,
+          "empty_pct": 0.053562,
+          "end_upside_pct": 0.10718,
+          "ask_usdt_before": 72533.3
+        },
+        {
+          "start": 0.1868,
+          "end": 0.1869,
+          "empty_pct": 0.053533,
+          "end_upside_pct": 0.16077,
+          "ask_usdt_before": 120933.82
+        },
+        {
+          "start": 0.1869,
+          "end": 0.187,
+          "empty_pct": 0.053505,
+          "end_upside_pct": 0.21436,
+          "ask_usdt_before": 173766.91
+        },
+        {
+          "start": 0.187,
+          "end": 0.1871,
+          "empty_pct": 0.053476,
+          "end_upside_pct": 0.26795,
+          "ask_usdt_before": 217236.93
+        }
+      ]
+    },
+    {
+      "pair": "MSTRBUSDT",
+      "ask": 130.66,
+      "spread_pct": 0.0077,
+      "book_levels": 1000,
+      "visible_coverage_pct": 14.8018,
+      "update_id": 393691561,
+      "start": 135.7,
+      "end": 135.79,
+      "empty_pct": 0.066323,
+      "end_upside_pct": 3.92622,
+      "ask_usdt_before": 368525.19,
+      "other_gaps": [
+        {
+          "start": 134.78,
+          "end": 134.86,
+          "empty_pct": 0.059356,
+          "end_upside_pct": 3.21445,
+          "ask_usdt_before": 353747.14
+        },
+        {
+          "start": 136.02,
+          "end": 136.1,
+          "empty_pct": 0.058815,
+          "end_upside_pct": 4.16348,
+          "ask_usdt_before": 374223.26
+        },
+        {
+          "start": 139.03,
+          "end": 139.12,
+          "empty_pct": 0.064734,
+          "end_upside_pct": 6.47482,
+          "ask_usdt_before": 585430.85
+        },
+        {
+          "start": 140.33,
+          "end": 140.42,
+          "empty_pct": 0.064135,
+          "end_upside_pct": 7.46977,
+          "ask_usdt_before": 596438.84
+        }
+      ]
+    },
+    {
+      "pair": "SPCXBUSDT",
+      "ask": 129.46,
+      "spread_pct": 0.0077,
+      "book_levels": 1000,
+      "visible_coverage_pct": 12.359,
+      "update_id": 379844392,
+      "start": 131.42,
+      "end": 131.49,
+      "empty_pct": 0.053264,
+      "end_upside_pct": 1.56805,
+      "ask_usdt_before": 480725.86,
+      "other_gaps": [
+        {
+          "start": 134.8,
+          "end": 134.88,
+          "empty_pct": 0.059347,
+          "end_upside_pct": 4.18662,
+          "ask_usdt_before": 602553.64
+        }
+      ]
+    },
+    {
+      "pair": "HYPEUSDT",
+      "ask": 78.37,
+      "spread_pct": 0.0128,
+      "book_levels": 1000,
+      "visible_coverage_pct": 18.7955,
+      "update_id": 176703451,
+      "start": 81.34,
+      "end": 81.39,
+      "empty_pct": 0.06147,
+      "end_upside_pct": 3.85352,
+      "ask_usdt_before": 675318.8,
+      "other_gaps": [
+        {
+          "start": 82.15,
+          "end": 82.2,
+          "empty_pct": 0.060864,
+          "end_upside_pct": 4.88707,
+          "ask_usdt_before": 721450.25
+        },
+        {
+          "start": 88.92,
+          "end": 89.0,
+          "empty_pct": 0.089969,
+          "end_upside_pct": 13.56386,
+          "ask_usdt_before": 1490997.01
+        },
+        {
+          "start": 84.75,
+          "end": 84.8,
+          "empty_pct": 0.058997,
+          "end_upside_pct": 8.20467,
+          "ask_usdt_before": 978301.71
+        },
+        {
+          "start": 88.45,
+          "end": 88.5,
+          "empty_pct": 0.056529,
+          "end_upside_pct": 12.92586,
+          "ask_usdt_before": 1344169.44
+        }
+      ]
+    },
+    {
+      "pair": "NEARUSDT",
+      "ask": 3.737,
+      "spread_pct": 0.0268,
+      "book_levels": 1000,
+      "visible_coverage_pct": 27.0805,
+      "update_id": 9807687440,
+      "start": 3.828,
+      "end": 3.83,
+      "empty_pct": 0.052247,
+      "end_upside_pct": 2.48863,
+      "ask_usdt_before": 1077511.54,
+      "other_gaps": [
+        {
+          "start": 3.842,
+          "end": 3.844,
+          "empty_pct": 0.052056,
+          "end_upside_pct": 2.86326,
+          "ask_usdt_before": 1098053.28
+        },
+        {
+          "start": 3.881,
+          "end": 3.883,
+          "empty_pct": 0.051533,
+          "end_upside_pct": 3.90688,
+          "ask_usdt_before": 1163278.15
+        },
+        {
+          "start": 3.941,
+          "end": 3.943,
+          "empty_pct": 0.050749,
+          "end_upside_pct": 5.51244,
+          "ask_usdt_before": 1323406.43
+        },
+        {
+          "start": 3.947,
+          "end": 3.949,
+          "empty_pct": 0.050671,
+          "end_upside_pct": 5.673,
+          "ask_usdt_before": 1324635.13
+        }
+      ]
+    },
+    {
+      "pair": "QQQBUSDT",
+      "ask": 659.01,
+      "spread_pct": 0.0015,
+      "book_levels": 1000,
+      "visible_coverage_pct": 8.9483,
+      "update_id": 166257311,
+      "start": 690.92,
+      "end": 691.28,
+      "empty_pct": 0.052104,
+      "end_upside_pct": 4.89674,
+      "ask_usdt_before": 407050.21,
+      "other_gaps": []
+    },
+    {
+      "pair": "UNIUSDT",
+      "ask": 7.018,
+      "spread_pct": 0.0143,
+      "book_levels": 1000,
+      "visible_coverage_pct": 15.6455,
+      "update_id": 10234989937,
+      "start": 7.46,
+      "end": 7.464,
+      "empty_pct": 0.053619,
+      "end_upside_pct": 6.35509,
+      "ask_usdt_before": 1324200.64,
+      "other_gaps": [
+        {
+          "start": 7.714,
+          "end": 7.718,
+          "empty_pct": 0.051854,
+          "end_upside_pct": 9.97435,
+          "ask_usdt_before": 1992367.77
+        }
+      ]
+    },
+    {
+      "pair": "LINKUSDT",
+      "ask": 10.879,
+      "spread_pct": 0.0092,
+      "book_levels": 1000,
+      "visible_coverage_pct": 12.7953,
+      "update_id": 15134402204,
+      "start": 11.851,
+      "end": 11.857,
+      "empty_pct": 0.050629,
+      "end_upside_pct": 8.9898,
+      "ask_usdt_before": 1010158.64,
+      "other_gaps": []
+    },
+    {
+      "pair": "TRXUSDT",
+      "ask": 0.3182,
+      "spread_pct": 0.0314,
+      "book_levels": 1000,
+      "visible_coverage_pct": 33.4067,
+      "update_id": 6311948621,
+      "start": 0.409,
+      "end": 0.4094,
+      "empty_pct": 0.0978,
+      "end_upside_pct": 28.66122,
+      "ask_usdt_before": 4941891.97,
+      "other_gaps": [
+        {
+          "start": 0.3631,
+          "end": 0.3633,
+          "empty_pct": 0.055081,
+          "end_upside_pct": 14.17348,
+          "ask_usdt_before": 3879192.15
+        },
+        {
+          "start": 0.3951,
+          "end": 0.3954,
+          "empty_pct": 0.07593,
+          "end_upside_pct": 24.26147,
+          "ask_usdt_before": 4562055.3
+        },
+        {
+          "start": 0.3672,
+          "end": 0.3674,
+          "empty_pct": 0.054466,
+          "end_upside_pct": 15.46197,
+          "ask_usdt_before": 4040403.81
+        },
+        {
+          "start": 0.403,
+          "end": 0.4033,
+          "empty_pct": 0.074442,
+          "end_upside_pct": 26.74419,
+          "ask_usdt_before": 4931175.95
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "pair": "ROSEUSDT",
+      "message": "Binance endpoints failed: HTTPError:HTTP Error 429: Too Many Requests | HTTPError:HTTP Error 451:  | HTTPError:HTTP Error 451: "
+    },
+    {
+      "pair": "PROMUSDT",
+      "message": "Binance endpoints failed: HTTPError:HTTP Error 429: Too Many Requests | HTTPError:HTTP Error 451:  | HTTPError:HTTP Error 451: "
+    }
+  ],
+  "note": "Displayed asks only. Gaps do not guarantee future price movement. Reverify before trading.",
+  "finished_utc": "2026-11-06T11:39:50.759199+00:00"
+}
