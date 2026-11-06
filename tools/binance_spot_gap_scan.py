@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='BEAM IQ BNT ME WAXP KAIA'.split()
+FOCUS='BEAMX IQ BNT ME WAXP KAIA'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
