@@ -1,20 +1,20 @@
 {
-  "started_utc": "2026-11-06T13:15:52.405326+00:00",
+  "started_utc": "2026-11-06T13:16:41.267707+00:00",
   "exchange": "Binance Spot",
-  "books": 5,
-  "pairs_checked": 5,
+  "books": 6,
+  "pairs_checked": 6,
   "candidates": [
     {
       "ask_depth_usdt": {
-        "2": 27444.13,
-        "5": 46468.01,
-        "10": 57851.13,
-        "20": 57887.57
+        "2": 27240.3,
+        "5": 46264.19,
+        "10": 57736.15,
+        "20": 57772.58
       },
       "bid_depth_usdt": {
-        "2": 18589.04,
-        "5": 24160.73,
-        "10": 24827.42
+        "2": 18161.28,
+        "5": 23874.95,
+        "10": 24541.57
       },
       "pair": "WAXPUSDT",
       "ask": 0.00402,
@@ -22,510 +22,614 @@
       "book_levels": 1000,
       "visible_coverage_pct": 4661.194,
       "quote_volume_24h_usdt": 212799.39,
-      "update_id": 1412420737,
+      "update_id": 1412420794,
       "start": 0.00461,
       "end": 0.00489,
       "empty_pct": 6.073753,
       "end_upside_pct": 21.64179,
-      "ask_usdt_before": 57887.57,
+      "ask_usdt_before": 57772.58,
       "other_gaps": [
         {
           "start": 0.00434,
           "end": 0.00445,
           "empty_pct": 2.534562,
           "end_upside_pct": 10.69652,
-          "ask_usdt_before": 57851.13
+          "ask_usdt_before": 57736.15
         },
         {
           "start": 0.00452,
           "end": 0.00461,
           "empty_pct": 1.99115,
           "end_upside_pct": 14.67662,
-          "ask_usdt_before": 57881.52
+          "ask_usdt_before": 57766.54
         },
         {
           "start": 0.00447,
           "end": 0.00452,
           "empty_pct": 1.118568,
           "end_upside_pct": 12.43781,
-          "ask_usdt_before": 57871.46
+          "ask_usdt_before": 57756.47
         },
         {
           "start": 0.00492,
           "end": 0.005,
           "empty_pct": 1.626016,
           "end_upside_pct": 24.37811,
-          "ask_usdt_before": 58308.62
+          "ask_usdt_before": 58193.64
         },
         {
           "start": 0.00583,
           "end": 0.00597,
           "empty_pct": 2.401372,
           "end_upside_pct": 48.50746,
-          "ask_usdt_before": 62479.61
+          "ask_usdt_before": 62364.62
         },
         {
           "start": 0.0062,
           "end": 0.00636,
           "empty_pct": 2.580645,
           "end_upside_pct": 58.20896,
-          "ask_usdt_before": 62661.94
+          "ask_usdt_before": 62546.96
         },
         {
           "start": 0.00505,
           "end": 0.00512,
           "empty_pct": 1.386139,
           "end_upside_pct": 27.36318,
-          "ask_usdt_before": 58651.7
+          "ask_usdt_before": 58536.72
         },
         {
           "start": 0.00565,
           "end": 0.00575,
           "empty_pct": 1.769912,
           "end_upside_pct": 43.03483,
-          "ask_usdt_before": 59405.14
+          "ask_usdt_before": 59290.16
         },
         {
           "start": 0.00521,
           "end": 0.00528,
           "empty_pct": 1.34357,
           "end_upside_pct": 31.34328,
-          "ask_usdt_before": 58703.94
+          "ask_usdt_before": 58588.96
         },
         {
           "start": 0.00542,
           "end": 0.00549,
           "empty_pct": 1.291513,
           "end_upside_pct": 36.56716,
-          "ask_usdt_before": 59347.79
+          "ask_usdt_before": 59232.81
         },
         {
           "start": 0.00575,
           "end": 0.00583,
           "empty_pct": 1.391304,
           "end_upside_pct": 45.02488,
-          "ask_usdt_before": 59415.18
+          "ask_usdt_before": 59300.19
         }
       ]
     },
     {
       "ask_depth_usdt": {
-        "2": 17007.84,
-        "5": 22794.27,
-        "10": 23692.28,
-        "20": 24010.19
+        "2": 16668.53,
+        "5": 22454.96,
+        "10": 23352.97,
+        "20": 23670.88
       },
       "bid_depth_usdt": {
-        "2": 93514.14,
-        "5": 94094.73,
-        "10": 94260.43
+        "2": 93498.4,
+        "5": 94078.99,
+        "10": 94244.69
       },
       "pair": "MEUSDT",
-      "ask": 0.04779,
+      "ask": 0.04778,
       "spread_pct": 0.0628,
       "book_levels": 1000,
-      "visible_coverage_pct": 11032.036,
-      "quote_volume_24h_usdt": 274890.72,
-      "update_id": 961263462,
+      "visible_coverage_pct": 11034.3658,
+      "quote_volume_24h_usdt": 274901.34,
+      "update_id": 961263519,
       "start": 0.05383,
       "end": 0.05623,
       "empty_pct": 4.45848,
-      "end_upside_pct": 17.6606,
-      "ask_usdt_before": 23902.01,
+      "end_upside_pct": 17.68522,
+      "ask_usdt_before": 23562.7,
       "other_gaps": [
         {
           "start": 0.05182,
           "end": 0.053,
           "empty_pct": 2.277113,
-          "end_upside_pct": 10.90186,
-          "ask_usdt_before": 23692.28
+          "end_upside_pct": 10.92507,
+          "ask_usdt_before": 23352.97
         },
         {
           "start": 0.053,
           "end": 0.05383,
           "empty_pct": 1.566038,
-          "end_upside_pct": 12.63863,
-          "ask_usdt_before": 23795.3
+          "end_upside_pct": 12.6622,
+          "ask_usdt_before": 23455.99
         },
         {
           "start": 0.04841,
           "end": 0.04879,
           "empty_pct": 0.784962,
-          "end_upside_pct": 2.09249,
-          "ask_usdt_before": 17007.84
+          "end_upside_pct": 2.11386,
+          "ask_usdt_before": 16668.53
         },
         {
           "start": 0.05721,
           "end": 0.0582,
           "empty_pct": 1.730467,
-          "end_upside_pct": 21.7828,
-          "ask_usdt_before": 24010.19
+          "end_upside_pct": 21.80829,
+          "ask_usdt_before": 23670.88
         },
         {
           "start": 0.05038,
           "end": 0.0508,
           "empty_pct": 0.833664,
-          "end_upside_pct": 6.29839,
-          "ask_usdt_before": 22942.93
+          "end_upside_pct": 6.32064,
+          "ask_usdt_before": 22603.62
         },
         {
           "start": 0.0582,
           "end": 0.05899,
           "empty_pct": 1.357388,
-          "end_upside_pct": 23.43587,
-          "ask_usdt_before": 24027.02
+          "end_upside_pct": 23.4617,
+          "ask_usdt_before": 23687.7
         },
         {
           "start": 0.06024,
           "end": 0.06116,
           "empty_pct": 1.527224,
-          "end_upside_pct": 27.97656,
-          "ask_usdt_before": 24201.48
+          "end_upside_pct": 28.00335,
+          "ask_usdt_before": 23862.17
         },
         {
           "start": 0.06343,
           "end": 0.06453,
           "empty_pct": 1.734195,
-          "end_upside_pct": 35.02825,
-          "ask_usdt_before": 24388.04
+          "end_upside_pct": 35.05651,
+          "ask_usdt_before": 24048.73
         },
         {
           "start": 0.04924,
           "end": 0.04951,
           "empty_pct": 0.548335,
-          "end_upside_pct": 3.59908,
-          "ask_usdt_before": 17743.53
+          "end_upside_pct": 3.62076,
+          "ask_usdt_before": 17404.22
         },
         {
           "start": 0.05136,
           "end": 0.05171,
           "empty_pct": 0.681464,
-          "end_upside_pct": 8.20255,
-          "ask_usdt_before": 23489.08
+          "end_upside_pct": 8.2252,
+          "ask_usdt_before": 23149.77
         },
         {
           "start": 0.06679,
           "end": 0.06795,
           "empty_pct": 1.736787,
-          "end_upside_pct": 42.18456,
-          "ask_usdt_before": 24896.34
+          "end_upside_pct": 42.21432,
+          "ask_usdt_before": 24557.03
         }
       ]
     },
     {
       "ask_depth_usdt": {
-        "2": 6506.71,
-        "5": 7452.1,
-        "10": 7463.28,
-        "20": 13201.83
+        "2": 5992.85,
+        "5": 6938.24,
+        "10": 6949.41,
+        "20": 12687.84
       },
       "bid_depth_usdt": {
-        "2": 10032.15,
-        "5": 10175.05,
-        "10": 10484.91
+        "2": 10034.94,
+        "5": 10182.86,
+        "10": 10487.69
       },
       "pair": "BNTUSDT",
-      "ask": 0.2799,
+      "ask": 0.2798,
       "spread_pct": 0.1073,
-      "book_levels": 622,
-      "visible_coverage_pct": 1686.3523,
+      "book_levels": 623,
+      "visible_coverage_pct": 1686.9907,
       "quote_volume_24h_usdt": 166012.67,
-      "update_id": 1979738807,
+      "update_id": 1979738915,
       "start": 0.3165,
       "end": 0.33,
       "empty_pct": 4.265403,
-      "end_upside_pct": 17.89925,
-      "ask_usdt_before": 8239.81,
+      "end_upside_pct": 17.94139,
+      "ask_usdt_before": 7725.81,
       "other_gaps": [
         {
           "start": 0.2989,
           "end": 0.3069,
           "empty_pct": 2.67648,
-          "end_upside_pct": 9.6463,
-          "ask_usdt_before": 7457.69
+          "end_upside_pct": 9.68549,
+          "ask_usdt_before": 6943.83
         },
         {
           "start": 0.2933,
           "end": 0.2989,
           "empty_pct": 1.909308,
-          "end_upside_pct": 6.78814,
-          "ask_usdt_before": 7452.1
+          "end_upside_pct": 6.8263,
+          "ask_usdt_before": 6938.24
         },
         {
           "start": 0.3321,
           "end": 0.3404,
           "empty_pct": 2.499247,
-          "end_upside_pct": 21.61486,
-          "ask_usdt_before": 13201.83
+          "end_upside_pct": 21.65833,
+          "ask_usdt_before": 12687.84
         },
         {
           "start": 0.285,
           "end": 0.2877,
           "empty_pct": 0.947368,
-          "end_upside_pct": 2.78671,
-          "ask_usdt_before": 6506.71
+          "end_upside_pct": 2.82345,
+          "ask_usdt_before": 5992.85
         },
         {
           "start": 0.3404,
           "end": 0.3481,
           "empty_pct": 2.262045,
-          "end_upside_pct": 24.36584,
-          "ask_usdt_before": 13254.87
+          "end_upside_pct": 24.41029,
+          "ask_usdt_before": 12740.87
         },
         {
           "start": 0.3116,
           "end": 0.3157,
           "empty_pct": 1.315789,
-          "end_upside_pct": 12.79028,
-          "ask_usdt_before": 7904.24
+          "end_upside_pct": 12.83059,
+          "ask_usdt_before": 7390.24
         },
         {
           "start": 0.2894,
           "end": 0.2916,
           "empty_pct": 0.760194,
-          "end_upside_pct": 4.18006,
-          "ask_usdt_before": 7095.88
+          "end_upside_pct": 4.2173,
+          "ask_usdt_before": 6582.01
         },
         {
-          "start": 0.3085,
+          "start": 0.3084,
           "end": 0.3116,
-          "empty_pct": 1.004862,
-          "end_upside_pct": 11.32547,
-          "ask_usdt_before": 7880.06
+          "empty_pct": 1.037613,
+          "end_upside_pct": 11.36526,
+          "ask_usdt_before": 7366.06
         },
         {
           "start": 0.2821,
           "end": 0.2835,
           "empty_pct": 0.496278,
-          "end_upside_pct": 1.28617,
-          "ask_usdt_before": 5678.37
+          "end_upside_pct": 1.32237,
+          "ask_usdt_before": 5164.51
         },
         {
           "start": 0.39,
           "end": 0.3975,
           "empty_pct": 1.923077,
-          "end_upside_pct": 42.01501,
-          "ask_usdt_before": 17722.54
+          "end_upside_pct": 42.06576,
+          "ask_usdt_before": 17208.54
         },
         {
           "start": 0.4293,
           "end": 0.4389,
           "empty_pct": 2.236198,
-          "end_upside_pct": 56.806,
-          "ask_usdt_before": 20807.38
+          "end_upside_pct": 56.86204,
+          "ask_usdt_before": 20293.38
         }
       ]
     },
     {
       "ask_depth_usdt": {
-        "2": 1319.42,
-        "5": 3955.34,
-        "10": 4380.17,
-        "20": 5554.59
+        "2": 1309.7,
+        "5": 3945.62,
+        "10": 4369.93,
+        "20": 5544.35
       },
       "bid_depth_usdt": {
-        "2": 4865.43,
-        "5": 6614.06,
-        "10": 7129.72
+        "2": 4789.17,
+        "5": 6511.02,
+        "10": 7102.72
       },
       "pair": "IQUSDT",
-      "ask": 0.000696,
-      "spread_pct": 0.2882,
+      "ask": 0.000695,
+      "spread_pct": 0.1441,
       "book_levels": 1000,
-      "visible_coverage_pct": 3316.2356,
+      "visible_coverage_pct": 3321.1511,
       "quote_volume_24h_usdt": 107008.99,
-      "update_id": 629468562,
+      "update_id": 629468577,
       "start": 0.000741,
       "end": 0.000761,
       "empty_pct": 2.699055,
-      "end_upside_pct": 9.33908,
-      "ask_usdt_before": 3972.8,
+      "end_upside_pct": 9.4964,
+      "ask_usdt_before": 3963.08,
       "other_gaps": [
         {
           "start": 0.000807,
           "end": 0.00084,
           "empty_pct": 4.089219,
-          "end_upside_pct": 20.68966,
-          "ask_usdt_before": 5554.59
+          "end_upside_pct": 20.86331,
+          "ask_usdt_before": 5544.35
+        },
+        {
+          "start": 0.0007,
+          "end": 0.00071,
+          "empty_pct": 1.428571,
+          "end_upside_pct": 2.15827,
+          "ask_usdt_before": 1309.7
         },
         {
           "start": 0.000725,
           "end": 0.000737,
           "empty_pct": 1.655172,
-          "end_upside_pct": 5.8908,
-          "ask_usdt_before": 3955.34
-        },
-        {
-          "start": 0.000701,
-          "end": 0.00071,
-          "empty_pct": 1.28388,
-          "end_upside_pct": 2.01149,
-          "ask_usdt_before": 1319.42
+          "end_upside_pct": 6.04317,
+          "ask_usdt_before": 3945.62
         },
         {
           "start": 0.000767,
           "end": 0.000783,
           "empty_pct": 2.08605,
-          "end_upside_pct": 12.5,
-          "ask_usdt_before": 5026.48
+          "end_upside_pct": 12.66187,
+          "ask_usdt_before": 5016.24
         },
         {
           "start": 0.000795,
           "end": 0.000807,
           "empty_pct": 1.509434,
-          "end_upside_pct": 15.94828,
-          "ask_usdt_before": 5203.83
+          "end_upside_pct": 16.11511,
+          "ask_usdt_before": 5193.59
         },
         {
           "start": 0.000718,
           "end": 0.000724,
           "empty_pct": 0.835655,
-          "end_upside_pct": 4.02299,
-          "ask_usdt_before": 3749.1
+          "end_upside_pct": 4.17266,
+          "ask_usdt_before": 3739.38
         },
         {
           "start": 0.000863,
           "end": 0.00088,
           "empty_pct": 1.969873,
-          "end_upside_pct": 26.43678,
-          "ask_usdt_before": 6262.86
+          "end_upside_pct": 26.61871,
+          "ask_usdt_before": 6252.61
         },
         {
           "start": 0.001009,
           "end": 0.001039,
           "empty_pct": 2.973241,
-          "end_upside_pct": 49.28161,
-          "ask_usdt_before": 48458.26
+          "end_upside_pct": 49.4964,
+          "ask_usdt_before": 48448.02
         },
         {
           "start": 0.00085,
           "end": 0.000863,
           "empty_pct": 1.529412,
-          "end_upside_pct": 23.99425,
-          "ask_usdt_before": 6252.54
+          "end_upside_pct": 24.17266,
+          "ask_usdt_before": 6242.3
         },
         {
           "start": 0.00114,
           "end": 0.00117,
           "empty_pct": 2.631579,
-          "end_upside_pct": 68.10345,
-          "ask_usdt_before": 56551.2
+          "end_upside_pct": 68.34532,
+          "ask_usdt_before": 56540.96
         },
         {
           "start": 0.000785,
           "end": 0.000791,
           "empty_pct": 0.764331,
-          "end_upside_pct": 13.64943,
-          "ask_usdt_before": 5056.86
+          "end_upside_pct": 13.81295,
+          "ask_usdt_before": 5046.62
         }
       ]
     },
     {
       "ask_depth_usdt": {
-        "2": 40284.94,
-        "5": 58252.43,
-        "10": 73694.33,
-        "20": 77288.91
+        "2": 40358.06,
+        "5": 58706.64,
+        "10": 74148.54,
+        "20": 77743.12
       },
       "bid_depth_usdt": {
-        "2": 42430.62,
-        "5": 70331.6,
-        "10": 81094.4
+        "2": 42078.6,
+        "5": 69966.88,
+        "10": 80729.67
       },
       "pair": "KAIAUSDT",
       "ask": 0.0337,
       "spread_pct": 0.2976,
       "book_levels": 1000,
       "visible_coverage_pct": 1081.8991,
-      "quote_volume_24h_usdt": 599624.98,
-      "update_id": 732429020,
+      "quote_volume_24h_usdt": 599630.1,
+      "update_id": 732429316,
       "start": 0.0387,
       "end": 0.0397,
       "empty_pct": 2.583979,
       "end_upside_pct": 17.80415,
-      "ask_usdt_before": 73859.39,
+      "ask_usdt_before": 74313.6,
       "other_gaps": [
         {
           "start": 0.0373,
           "end": 0.038,
           "empty_pct": 1.876676,
           "end_upside_pct": 12.75964,
-          "ask_usdt_before": 73812.58
+          "ask_usdt_before": 74266.79
         },
         {
           "start": 0.0455,
           "end": 0.0469,
           "empty_pct": 3.076923,
           "end_upside_pct": 39.16914,
-          "ask_usdt_before": 81455.8
+          "ask_usdt_before": 81910.01
         },
         {
           "start": 0.0366,
           "end": 0.037,
           "empty_pct": 1.092896,
           "end_upside_pct": 9.79228,
-          "ask_usdt_before": 72954.33
+          "ask_usdt_before": 73408.54
         },
         {
           "start": 0.0401,
           "end": 0.0407,
           "empty_pct": 1.496259,
           "end_upside_pct": 20.77151,
-          "ask_usdt_before": 77288.91
+          "ask_usdt_before": 77743.12
         },
         {
           "start": 0.038,
           "end": 0.0384,
           "empty_pct": 1.052632,
           "end_upside_pct": 13.94659,
-          "ask_usdt_before": 73832.95
+          "ask_usdt_before": 74287.16
         },
         {
           "start": 0.0431,
           "end": 0.0438,
           "empty_pct": 1.62413,
           "end_upside_pct": 29.97033,
-          "ask_usdt_before": 79900.6
+          "ask_usdt_before": 80354.82
         },
         {
           "start": 0.0356,
           "end": 0.0358,
           "empty_pct": 0.561798,
           "end_upside_pct": 6.23145,
-          "ask_usdt_before": 58505.82
+          "ask_usdt_before": 58960.03
         },
         {
           "start": 0.0425,
           "end": 0.043,
           "empty_pct": 1.176471,
           "end_upside_pct": 27.59644,
-          "ask_usdt_before": 78932.67
+          "ask_usdt_before": 79386.88
         },
         {
           "start": 0.0362,
           "end": 0.0364,
           "empty_pct": 0.552486,
           "end_upside_pct": 8.01187,
-          "ask_usdt_before": 72807.41
+          "ask_usdt_before": 73261.62
         },
         {
           "start": 0.0364,
           "end": 0.0366,
           "empty_pct": 0.549451,
           "end_upside_pct": 8.60534,
-          "ask_usdt_before": 72912.87
+          "ask_usdt_before": 73367.08
         },
         {
           "start": 0.037,
           "end": 0.0372,
           "empty_pct": 0.540541,
           "end_upside_pct": 10.38576,
-          "ask_usdt_before": 73694.33
+          "ask_usdt_before": 74148.54
+        }
+      ]
+    },
+    {
+      "ask_depth_usdt": {
+        "2": 56962.17,
+        "5": 70577.13,
+        "10": 78868.85,
+        "20": 106179.34
+      },
+      "bid_depth_usdt": {
+        "2": 61138.69,
+        "5": 78249.71,
+        "10": 95514.05
+      },
+      "pair": "BEAMXUSDT",
+      "ask": 0.004296,
+      "spread_pct": 0.0466,
+      "book_levels": 1000,
+      "visible_coverage_pct": 344.5996,
+      "quote_volume_24h_usdt": 3788190.64,
+      "update_id": 2349550410,
+      "start": 0.004451,
+      "end": 0.004464,
+      "empty_pct": 0.292069,
+      "end_upside_pct": 3.91061,
+      "ask_usdt_before": 69073.04,
+      "other_gaps": [
+        {
+          "start": 0.004468,
+          "end": 0.004481,
+          "empty_pct": 0.290958,
+          "end_upside_pct": 4.30633,
+          "ask_usdt_before": 69108.79
+        },
+        {
+          "start": 0.004425,
+          "end": 0.004436,
+          "empty_pct": 0.248588,
+          "end_upside_pct": 3.25885,
+          "ask_usdt_before": 68291.33
+        },
+        {
+          "start": 0.004769,
+          "end": 0.004786,
+          "empty_pct": 0.356469,
+          "end_upside_pct": 11.40596,
+          "ask_usdt_before": 80556.67
+        },
+        {
+          "start": 0.004688,
+          "end": 0.004702,
+          "empty_pct": 0.298635,
+          "end_upside_pct": 9.45065,
+          "ask_usdt_before": 78556.26
+        },
+        {
+          "start": 0.0045,
+          "end": 0.00451,
+          "empty_pct": 0.222222,
+          "end_upside_pct": 4.98138,
+          "ask_usdt_before": 70571.75
+        },
+        {
+          "start": 0.004563,
+          "end": 0.004574,
+          "empty_pct": 0.241069,
+          "end_upside_pct": 6.47114,
+          "ask_usdt_before": 73420.13
+        },
+        {
+          "start": 0.004852,
+          "end": 0.004868,
+          "empty_pct": 0.329761,
+          "end_upside_pct": 13.31471,
+          "ask_usdt_before": 90341.64
+        },
+        {
+          "start": 0.00452,
+          "end": 0.00453,
+          "empty_pct": 0.221239,
+          "end_upside_pct": 5.44693,
+          "ask_usdt_before": 70599.58
+        },
+        {
+          "start": 0.007501,
+          "end": 0.00758,
+          "empty_pct": 1.053193,
+          "end_upside_pct": 76.4432,
+          "ask_usdt_before": 252313.39
+        },
+        {
+          "start": 0.004361,
+          "end": 0.004368,
+          "empty_pct": 0.160514,
+          "end_upside_pct": 1.67598,
+          "ask_usdt_before": 56831.4
+        },
+        {
+          "start": 0.004832,
+          "end": 0.004846,
+          "empty_pct": 0.289735,
+          "end_upside_pct": 12.80261,
+          "ask_usdt_before": 90115.18
         }
       ]
     }
   ],
   "errors": [],
   "note": "Displayed asks only. Gaps do not guarantee future price movement. Reverify before trading.",
-  "finished_utc": "2026-11-06T13:15:57.069060+00:00"
+  "finished_utc": "2026-11-06T13:16:46.001891+00:00"
 }
