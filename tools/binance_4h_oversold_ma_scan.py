@@ -78,7 +78,7 @@ def main():
     try:
         info=get('/api/v3/exchangeInfo',12)
         tk=get('/api/v3/ticker/24hr',12)
-        pairs={s['symbol'] for s in info['symbols'] if s.get('status')=='TRADING' and s.get('quoteAsset')=='USDT' and s.get('isSpotTradingAllowed',True) and 'SPOT' in s.get('permissions',['SPOT'])}
+        pairs={s['symbol'] for s in info['symbols'] if s.get('status')=='TRADING' and s.get('quoteAsset')=='USDT' and s.get('isSpotTradingAllowed',True) and ('SPOT' in s.get('permissions',['SPOT']) or not s.get('permissions'))}
         vol={s['symbol']:float(s.get('quoteVolume') or 0) for s in tk if isinstance(s,dict) and s.get('symbol')}
         price={s['symbol']:float(s.get('lastPrice') or 0) for s in tk if isinstance(s,dict) and s.get('symbol')}
         focus=[x+'USDT' for x in dict.fromkeys(FOCUS) if x not in STABLE and x+'USDT' in pairs]
