@@ -12,7 +12,7 @@ def get(path,timeout=8):
             with urllib.request.urlopen(q,timeout=timeout) as f:return json.load(f)
         except Exception as ex:errs.append(type(ex).__name__+':'+str(ex)[:80])
     raise RuntimeError('Binance endpoints failed: '+' | '.join(errs))
-def analyze(pair,book):
+def analyze(pair,book,quote_volume):
     asks=sorted((float(p),float(q)) for p,q in book.get('asks',[]) if float(p)>0 and float(q)>0)
     bids=sorted(float(p) for p,q in book.get('bids',[]) if float(p)>0 and float(q)>0)
     if len(asks)<2 or not bids or bids[-1]>asks[0][0]:return None
@@ -26,7 +26,7 @@ def analyze(pair,book):
     gaps.sort(key=lambda z:z['empty_pct']/(1+z['end_upside_pct']/12),reverse=True)
     ask_depth={str(p):round(sum(price*qty for price,qty in asks if price<=best*(1+p/100)),2) for p in (2,5,10,20)}
     bid_depth={str(p):round(sum(price*qty for price,qty in ((float(a),float(b)) for a,b in book.get('bids',[])) if price>=best*(1-p/100)),2) for p in (2,5,10)}
-    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'quote_volume_24h_usdt':round(volume.get(pair,0),2),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
+    return {'ask_depth_usdt':ask_depth,'bid_depth_usdt':bid_depth,'pair':pair,'ask':best,'spread_pct':round(spread,4),'book_levels':len(asks),'visible_coverage_pct':round((asks[-1][0]/best-1)*100,4),'quote_volume_24h_usdt':round(quote_volume,2),'update_id':book.get('lastUpdateId'),**gaps[0],'other_gaps':gaps[1:12]}
 def main():
     results={'started_utc':dt.datetime.now(dt.timezone.utc).isoformat(),'exchange':'Binance Spot','books':0,'pairs_checked':0,'candidates':[],'errors':[],'note':'Displayed asks only. Gaps do not guarantee future price movement. Reverify before trading.'}
     try:
@@ -43,7 +43,7 @@ def main():
         def run(pair):
             try:
                 book=get('/api/v3/depth?'+urllib.parse.urlencode({'symbol':pair,'limit':1000}),10)
-                return pair,analyze(pair,book),None
+                return pair,analyze(pair,book,volume.get(pair,0)),None
             except Exception as e:return pair,None,str(e)[:260]
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             for pair,x,e in pool.map(run,pairs):
