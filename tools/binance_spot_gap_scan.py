@@ -3,7 +3,7 @@
 import concurrent.futures,datetime as dt,json,random,time,urllib.parse,urllib.request
 from pathlib import Path
 URLS=('https://data-api.binance.vision','https://api1.binance.com','https://api-gcp.binance.com')
-FOCUS='OPG INIT HAEDAL CYBER ZIL PNUT XTZ GRT JUP DEXE OGN AXS GALA SXT GPS NXPC MET APE BABY RLC SAND NOM KAIA BERA SEI ZRO TRB ASTER IOST ALGO CHZ ONE LPT NMR BLUR MAGIC MEME SKL NKN CVC API3 RARE GLMR C98 CHR CTSI MASK DYM NTRN SSV REZ LISTA TLM HFT FIDA ACE WAXP RDNT LQTY HOOK ID EDU MAV PORTAL DODO PHA HIGH BADGER'.split()
+FOCUS='WAXP ME KNC BREV MAV JOE CVC QKC KAIA NOM BERA YGG 1000CHEEMS OPG INIT HAEDAL GRT MOVR SUI ASTER WLFI SEI STG ALICE RLC LPT NMR GTC FET FIO DGB NKN ARPA IDEX CTK LSK CKB HIVE PHA DENT STMX CELR SFP PERP MINA ROSE PROM FLUX XVS XEC IOTX SYS KMD NULS NKN COTI BAND LRC AERGO REQ DUSK VTHO QUICK TWT OXT KAVA ONG STPT UTK FORTH BAT AUDIO DAR TWT ALPACA COMBO'.split()
 def get(path,timeout=8):
     errs=[]
     for root in URLS:
@@ -34,9 +34,9 @@ def main():
         volume={s.get('symbol'):float(s.get('quoteVolume') or 0) for s in tick if isinstance(s,dict)}
         ranked=sorted(valid,key=lambda s:volume.get(s,0),reverse=True)
         focus=[x+'USDT' for x in FOCUS if x+'USDT' in valid]
-        mids=[s for s in ranked[220:850] if s not in focus]
+        mids=[s for s in ranked[320:1050] if s not in focus]
         random.Random(int(time.time()//3600)).shuffle(mids)
-        pairs=list(dict.fromkeys(focus+ranked[80:92]+mids[:70]))[:130]
+        pairs=list(dict.fromkeys(focus+ranked[140:145]+mids[:85]))[:150]
         print('Verified exchangeInfo, Spot USDT pairs selected:',len(pairs),flush=True)
         def run(pair):
             try:
